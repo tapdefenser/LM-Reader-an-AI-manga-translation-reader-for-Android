@@ -28,6 +28,12 @@ class TaskServiceController(private val container: AppContainer,
     @Synchronized fun setVisible(value: Boolean) { visible = value }
     @Synchronized fun canStart() = !blocked && (visible || requested)
     @Synchronized fun allowRetry() { if (visible) { blocked = false; _failure.value = null } }
+    /** A user notification action may resume work only after its actual service is foreground. */
+    @Synchronized fun allowNotificationResume(owner: Any) {
+        check(serviceOwner === owner) { "后台服务尚未就绪" }
+        ready = CompletableDeferred<Unit>().apply { complete(Unit) }
+        blocked = false; requested = true; _failure.value = null
+    }
     suspend fun acquire(): String {
         val id = UUID.randomUUID().toString()
         val job = currentCoroutineContext().job

@@ -16,7 +16,7 @@ class BubbleRenderPreferences(private val context: Context) {
     suspend fun reset() = update { BubbleRenderSettings() }
     private fun decode(prefs: Preferences) = BubbleRenderSettings(
         runCatching { BubbleFillMode.valueOf(prefs[MODE].orEmpty()) }.getOrDefault(BubbleFillMode.AUTO),
-        (prefs[OPACITY] ?: 100).coerceIn(0,100), (prefs[PADDING] ?: 8).coerceIn(0,20))
+        (prefs[OPACITY] ?: BubbleRenderSettings().opacityPercent).coerceIn(0,100), (prefs[PADDING] ?: 8).coerceIn(0,20))
     private companion object {
         val MODE=stringPreferencesKey("bubble_fill_mode_v1")
         val OPACITY=intPreferencesKey("bubble_opacity_v1")

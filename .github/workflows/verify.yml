@@ -1,4 +1,4 @@
-name: Verify release candidate
+name: Verify and build release
 
 on:
   pull_request:
@@ -35,20 +35,29 @@ jobs:
           log-accepted-android-sdk-licenses: 'false'
       - name: Prepare Android tools
         run: |
-          sdkmanager --install 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
+          python3 tools/ci_run.py android-sdk sdkmanager --install 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;28.2.13676358' 'cmake;3.22.1'
       - name: Prepare pinned test inputs
         run: |
           mkdir -p .scratch
           python3 -m venv .scratch/ci-python
-          .scratch/ci-python/bin/python -m pip install PyYAML
-          .scratch/ci-python/bin/python tools/fetch_vision_models.py
-          .scratch/ci-python/bin/python tools/fetch_translation_sources.py
+          python3 tools/ci_run.py python-dependencies .scratch/ci-python/bin/python -m pip install PyYAML
+          python3 tools/ci_run.py vision-models .scratch/ci-python/bin/python tools/fetch_vision_models.py
+          python3 tools/ci_run.py translation-sources .scratch/ci-python/bin/python tools/fetch_translation_sources.py
+      - name: Check localization
+        run: python3 tools/ci_run.py localization python3 tools/test_ui_translations.py
       - name: Build, test and lint
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug :app:lintDebug test --max-workers=2 --no-parallel -Dorg.gradle.jvmargs=-Xmx4g --console=plain
-          ./gradlew :app:assembleRelease :app:lintRelease --max-workers=2 --no-parallel -Dorg.gradle.jvmargs=-Xmx4g --console=plain
-          .scratch/ci-python/bin/python tools/verify_native_jni.py --apk app/build/outputs/apk/release/app-release-unsigned.apk
+          python3 tools/ci_run.py debug-tests ./gradlew :app:assembleDebug :app:lintDebug test --max-workers=2 --no-parallel -Dorg.gradle.jvmargs=-Xmx4g --console=plain
+          python3 tools/ci_run.py release ./gradlew :app:assembleRelease :app:lintRelease --max-workers=2 --no-parallel -Dorg.gradle.jvmargs=-Xmx4g --console=plain
+          python3 tools/ci_run.py native-jni .scratch/ci-python/bin/python tools/verify_native_jni.py --apk app/build/outputs/apk/release/app-release-unsigned.apk
+      - name: Upload release APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-apk-unsigned
+          retention-days: 7
+          if-no-files-found: error
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
       - name: Upload verification reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -61,4 +70,5 @@ jobs:
             app/build/test-results/
             core/*/build/reports/
             core/*/build/test-results/
-      # Candidate APKs are prepared locally until signing and model distribution are resolved.
+            .scratch/ci-logs/
+      # The downloaded APK is signed locally with the existing release key.

@@ -18,6 +18,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -28,7 +29,7 @@ import com.lmreader.di.AppContainer
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: () -> Unit,
-    onOpenGlossary: () -> Unit, showSetupPrompt: Boolean = false,
+    showSetupPrompt: Boolean = false,
     viewModel: TranslationOptionsViewModel = viewModel(key = "translation-options-$mangaId",
         factory = TranslationOptionsViewModel.factory(container, mangaId))) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -78,8 +79,6 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
                 label = { Text("这部作品的文风") }, placeholder = { Text("留空 = 自动使用分类的文风") },
                 minLines = 3, modifier = Modifier.fillMaxWidth())
             Text(state.effectiveStyleSource, style = MaterialTheme.typography.bodySmall)
-            ListItem(headlineContent = { Text("译名管理") }, supportingContent = { Text("这部作品的原词 → 译名对照表") },
-                modifier = Modifier.clickable(onClick = onOpenGlossary))
             HorizontalDivider()
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("翻译工作流", style = MaterialTheme.typography.titleMedium)
@@ -121,12 +120,18 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
             }
             Text("此选项只作用于这部漫画的新翻译任务。", style = MaterialTheme.typography.bodySmall)
             OptionSlider("Seg 判定阈值", state.settings.effectiveSegThreshold() * 100, 5f..95f) { viewModel.setSegThreshold(it / 100) }
+            OptionSlider("文字检测置信度阈值", state.settings.effectiveTextDetectionThreshold() * 100, 5f..95f) { viewModel.setTextDetectionThreshold(it / 100) }
+            OptionSlider("游离文字行间合并距离", state.settings.effectiveFreeTextMergeGapRatio() * 100, 0f..200f) { viewModel.setFreeTextMergeGap(it / 100) }
+            Text("0 表示逐行独立；数值越大越容易合并。100 表示允许一行字高的间隔，竖排按列宽计算。修改后需重新识别。", style = MaterialTheme.typography.bodySmall)
+            Text("默认 45%。漏检时降低，误检时提高；仅影响新翻译任务中的文字检测。", style = MaterialTheme.typography.bodySmall)
             Text("阈值影响新识别；回填样式和字体实时作用于已有译文。", style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 BubbleFillMode.entries.forEach { fill -> FilterChip(render.fillMode == fill, { viewModel.setBubbleFill(fill) },
                     label = { Text(if (fill == BubbleFillMode.AUTO) "自动取背景色" else "纯白遮盖") }) }
             }
             OptionSlider("遮盖不透明度", render.opacityPercent.toFloat(), 0f..100f) { viewModel.setBubbleOpacity(it.toInt()) }
+            OptionSlider("游离文字遮罩扩张", render.freeTextMaskExpansionPercent.toFloat(), 0f..20f) { viewModel.setFreeTextMaskExpansion(it.toInt()) }
+            Text("默认 6%。原文边缘仍露出时增大；过大会遮住附近画面。已有译文会实时更新。", style = MaterialTheme.typography.bodySmall)
             OptionSlider("文字边距", render.textPaddingPercent.toFloat(), 0f..20f) { viewModel.setBubblePadding(it.toInt()) }
             Text("字体", style = MaterialTheme.typography.titleSmall)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -147,5 +152,6 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
 private fun OptionSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, save: (Float) -> Unit) {
     var draft by remember(value) { mutableFloatStateOf(value.coerceIn(range)) }
     Text("$label ${draft.toInt()}%")
-    Slider(draft, { draft = it }, valueRange = range, onValueChangeFinished = { save(draft) })
+    Slider(draft, { draft = it }, valueRange = range, onValueChangeFinished = { save(draft) },
+        modifier = Modifier.testTag("translation-option:$label"))
 }

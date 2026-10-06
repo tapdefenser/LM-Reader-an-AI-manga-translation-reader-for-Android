@@ -2,11 +2,15 @@
 
 [简体中文](USAGE.zh-CN.md) · [Project home](../README.en.md)
 
-This guide covers `v0.1.0`. Installation requires a signed APK; the unsigned candidate cannot be installed directly. Target devices are Android 8.0+ with arm64-v8a or x86_64.
+This guide covers `v0.1.4`. Installation requires a signed APK; the unsigned candidate cannot be installed directly. Target devices are Android 8.0+ with arm64-v8a or x86_64.
 
 ## Library, reading and language
 
 Select a folder on the initial path screen, choose its single/multi-chapter layout and scan it. Image folders, ZIP, CBZ and PDF share the entry point. Reselect the original folder after moving it or losing permission. Comic details offer shelf membership, categories and chapters; reader settings cover paged/strip modes, zoom, cropping and preloading.
+
+Document paths identify comics; titles are display labels. Same titles at different paths remain separate, while rescanning the same path updates its existing record and retains shelf membership, reading progress and glossary. After scanning, the loaded page window is reconciled to recover records inserted before an existing cursor, without loading the whole library.
+
+Open **⋮ → Translation Management** on the comic details page to manage that comic's glossary.
 
 **Settings → General → App language** offers Follow system, Simplified Chinese and English. Follow system uses only the primary language: Simplified Chinese selects Chinese; all others, including Traditional Chinese, select English. English primary plus Chinese secondary still selects English. A manual selection overrides the system and rebuilds the UI. Titles, paths, user input and translation targets are unchanged.
 
@@ -18,13 +22,21 @@ Start Cat-paw editing from a reference template and adjust loops, variables, con
 
 ## About and updates
 
-**Settings → About** shows the installed app version, opens the GitHub project page and checks the latest public stable Release. If a new version is found, open its release page. A private repository or one with no public stable Release shows that no public version is available. Network failures and access restrictions show separate retry messages.
+**Settings → About** shows the installed version and GitHub project page. Automatic checks can run **On every launch**, **On the first launch each day** (default), **Every three days**, or be turned **Off**. Startup and manual **Check for updates** both open the same release-notes dialog when a newer stable release is available.
+
+**Download update package** downloads a compatible APK in the background. Closing the dialog or reopening the app retains the transfer; About can show its progress. Once downloaded, the app checks size, published SHA-256 when available, package name, version and signing certificate before enabling **Install update**. Android handles installation and may ask you to allow this app to install updates. Manual checks remain available when automatic checks are off. Network errors and GitHub access restrictions have separate retry messages.
 
 Queue all/selected chapters from comic details; reorder, pause, cancel, retry and inspect steps. In the reader, retranslate a page, clear translations or edit bubbles. Edits support undo/save and a leave-page prompt. Bubbles/translations are private JSON drawn over the original; source comics are not rewritten. Back up saved results before clearing them when needed.
 
+Free-text translations use the whole detection frame with automatic wrapping, fitted font sizes, smaller padding and contrasting text outlines. Original-text masks retain their detection contours. Reader and export share the same layout; existing translations can be redrawn without another API request.
+
+Translation options include **Free-text line merge distance**, defaulting to 0 for independent lines. Higher values merge nearby lines; 100 permits a gap equal to one line height (column width for vertical text), within a 0–200 range. This is saved per comic and requires recognition/retranslation to update detection frames. New mask settings default to 60% opacity; saved settings and queued snapshots retain their existing values.
+
 ## Background tasks and notifications
 
-Chapter translation/export use a foreground service. Switching screens, backgrounding or locking does not actively cancel queues. The notification shows counts/progress, opens the queue and pauses all tasks. Configure permission in **Settings → Background tasks and notifications**; denying it hides drawer progress while execution remains possible.
+Chapter translation/export use a foreground service. Switching screens, backgrounding or locking does not actively cancel queues. Separate translation and export cards show manga/chapter names, completed/total pages and unfinished chapters. Translation also shows active SEG/OCR/API counts. Each card can pause or resume its own queue and open that queue. Paused cards and completion/failure results remain after the service stops; results are dismissible. Translation pause waits for the current page to finish, retaining the existing whole-comic request rules. Resume restores paused items; failed chapters require explicit queue retry.
+
+Android 13+ requests notification permission once when the first task starts. Denial does not stop work or cause repeated prompts. Use **Settings → Background tasks and notifications** to request permission again or open system settings, including a blocked task channel. Drawer progress requires notification permission.
 
 Translation pause stops scheduling and retains the completed current-page result; a whole-comic API response can take time to finish. Export pause stops further writing and retains its snapshot. Cancel does not remove saved translations. Service termination/time limits pause tasks. Process death marks running tasks interrupted; saved results remain and need manual retry. Arbitrary workflow intermediate state is not checkpointed. Vendor power policies can still affect execution.
 

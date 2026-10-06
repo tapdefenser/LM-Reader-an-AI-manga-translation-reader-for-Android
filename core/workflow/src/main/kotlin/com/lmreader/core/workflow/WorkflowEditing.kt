@@ -8,6 +8,12 @@ data class WorkflowFlatRow(val node: WorkflowNode, val depth: Int, val position:
 data class WorkflowReferenceChoice(val ref: WorkflowRef, val label: String, val type: WorkflowType, val readOnly: Boolean)
 
 object WorkflowEditing {
+    fun currentBubble(scope: List<WorkflowAvailableVariable>): WorkflowVariable? =
+        scope.lastOrNull { it.iterator && it.variable.type == WorkflowType.BUBBLE }?.variable
+    fun automaticImage(node: WorkflowNode, scope: List<WorkflowAvailableVariable>): WorkflowRef? =
+        if (node.inputs["images"] != null || node.inputs["attachCurrentImage"] == WorkflowExpression.Boolean(false)) null
+        else currentBubble(scope)?.let { WorkflowRef(it.id, listOf("image")) }
+
     fun flatten(program: WorkflowProgram): List<WorkflowFlatRow> = buildList {
         fun visit(rows: List<WorkflowNode>, parent: String?, depth: Int, otherwise: Boolean = false) {
             rows.forEachIndexed { index, node ->
@@ -52,11 +58,20 @@ object WorkflowEditing {
         require(introduced.isEmpty()) { introduced.joinToString("；") { it.message } }
         return changed
     }
+    /** Variables an inserted row at [position] may read: everything the rows above it declared. */
     fun scope(program: WorkflowProgram, position: WorkflowPosition): List<WorkflowAvailableVariable> {
         val validation = WorkflowValidator.validate(program); val rows = rows(program, position)
         return if (position.index < rows.size) validation.scopes[rows[position.index].id].orEmpty()
-        else if (rows.isNotEmpty()) validation.scopes[rows.last().id + ":end"].orEmpty()
+        else if (rows.isNotEmpty()) validation.outputs[rows.last().id].orEmpty()
         else validation.scopes[(position.parentId ?: "root") + (if (position.otherwise) ":otherwise" else "") + ":children"].orEmpty()
+    }
+    /** Variables a row may read or write, including the variable the row itself declares. */
+    fun outputs(program: WorkflowProgram, id: String, validation: WorkflowValidation = WorkflowValidator.validate(program)): List<WorkflowAvailableVariable> {
+        val row = flatten(program).firstOrNull { it.node.id == id } ?: return emptyList()
+        return validation.outputs[id] ?: run {
+            val variable = row.node.variable ?: return@run scope(program, row.position)
+            scope(program, row.position) + WorkflowAvailableVariable(variable, iterator = row.node.kind == WorkflowKind.EACH)
+        }
     }
     fun references(scope: List<WorkflowAvailableVariable>): List<WorkflowReferenceChoice> = buildList {
         fun walk(v: WorkflowAvailableVariable, type: WorkflowType, path: List<String>, label: String, depth: Int) {
@@ -65,6 +80,8 @@ object WorkflowEditing {
             val bubbleReadOnly = v.variable.type.kind == WorkflowDataKind.BUBBLE && path.firstOrNull() !in setOf("source", "translation") ||
                 v.variable.id == WorkflowSystem.PAGE && path.firstOrNull() == "bubbles" && path.size > 2 && path[2] !in setOf("source", "translation")
             add(WorkflowReferenceChoice(WorkflowRef(v.variable.id, path), label, type, v.readOnly || builtinReadOnly || bubbleReadOnly))
+            if (type.kind == WorkflowDataKind.LIST) add(WorkflowReferenceChoice(
+                WorkflowRef(v.variable.id, path + WorkflowReferencePaths.ITEM_COUNT), "$label · 项数", WorkflowType.NUMBER, true))
             if (depth < 8) {
                 type.fields.forEach { (key, field) -> walk(v, field, path + key, "$label · ${WorkflowLabels.field(key)}", depth + 1) }
                 if (type.kind == WorkflowDataKind.LIST) type.element?.let { walk(v, it, path + "0", "$label · 第一项", depth + 1) }
@@ -72,6 +89,12 @@ object WorkflowEditing {
         }
         scope.forEach { walk(it, it.variable.type, emptyList(), it.variable.name, 0) }
     }
+    /** Output targets a row may write: appends reach read-only parents, iteration variables are never assignment targets. */
+    fun writeTargets(outScope: List<WorkflowAvailableVariable>, append: Boolean = false): List<WorkflowReferenceChoice> =
+        references(outScope).filterNot { choice ->
+            (choice.readOnly && !append) || outScope.any { it.variable.id == choice.ref.variableId &&
+                (it.iterator || WorkflowReferencePaths.resolve(it.variable.type, choice.ref.path)?.readOnly == true) }
+        }
     fun copyNode(node: WorkflowNode): WorkflowNode {
         require(node.kind !in WorkflowValidator.fixedKinds)
         val nodes = WorkflowProgram(rows = listOf(node)).allNodes()

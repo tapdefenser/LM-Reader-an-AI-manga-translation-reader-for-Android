@@ -94,7 +94,13 @@ class ExportQueueCoordinator(private val container: AppContainer) {
             val existing = _tasks.value.filter { it.state in listOf("PENDING", "RUNNING", "PAUSED") }
                 .map { it.chapterId }.toSet()
             val added = fresh.filterNot { it.chapterId in existing }
-            check(update(_tasks.value + added.map { if (_paused.value) it.copy(state = "PAUSED") else it })) { _storageFailure.value!! }
+            val startNewBatch = added.isNotEmpty() && _tasks.value.isEmpty()
+            check(update(_tasks.value + added.map { if (_paused.value && !startNewBatch) it.copy(state = "PAUSED") else it })) { _storageFailure.value!! }
+            if (startNewBatch) {
+                container.taskService.allowRetry()
+                context.getSharedPreferences("export-settings", 0).edit().putBoolean("queue-paused", false).commit()
+                _paused.value = false
+            }
             start()
             return added.size
         }

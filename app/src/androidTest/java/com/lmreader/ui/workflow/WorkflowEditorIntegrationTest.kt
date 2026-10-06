@@ -20,6 +20,130 @@ import java.io.File
 
 /** Only an in-memory editor fixture is shown; no library source or user workflow is modified. */
 class WorkflowEditorIntegrationTest {
+    @Test fun pageVisionTemplateIsSelectableAndFullMangaTemplateIsAbsent() {
+        show(WorkflowTemplates.blank())
+        compose.onNodeWithContentDescription("工作流菜单").performClick()
+        compose.onNodeWithText("填入模板").performClick()
+        compose.onNodeWithText("全文速译（整漫画一次 API）").assertDoesNotExist()
+        compose.onNodeWithText("VL 整页直接翻译（多图一次 API）").performScrollTo().performClick()
+        compose.onNodeWithText("保存").performClick()
+        compose.runOnIdle {
+            val program = requireNotNull(saved).program
+            assertTrue(program.uses(WorkflowKind.API_STREAM))
+            assertFalse(program.uses(WorkflowKind.OCR))
+            assertEquals(WorkflowSystem.ref("page-vision-images", "count"), program.allNodes().single { it.id == "page-vision-api" }.inputs["expectedCount"])
+        }
+    }
+    @Test fun imageListPresetAndBothApiAttachmentPickersPersistTheListReference() {
+        val pictures = WorkflowVariable("pictures", "待发送图片", WorkflowType.TEXT)
+        val result = WorkflowVariable("list-result", "API 对照列表", WorkflowType.list(WorkflowType.GLOSSARY_ENTRY))
+        val apiInputs = mapOf("profile" to WorkflowExpression.Text("fixture"), "prompt" to WorkflowExpression.Template("Read images"))
+        val rows = listOf(WorkflowNode("pictures-declare", WorkflowKind.DECLARE, variable = pictures),
+            WorkflowNode("list-result-declare", WorkflowKind.DECLARE, variable = result),
+            WorkflowNode("list-api", WorkflowKind.API, target = WorkflowRef(result.id), resultType = result.type, inputs = apiInputs),
+            WorkflowNode("list-stream", WorkflowKind.API_STREAM, target = WorkflowRef(result.id), resultType = result.type, inputs = apiInputs,
+                variable = WorkflowVariable("list-entry", "当前条目", WorkflowType.GLOSSARY_ENTRY)))
+        show(WorkflowEditing.update(WorkflowTemplates.blank(), "pages") { it.copy(children = it.children + rows) })
+        scroll("workflow-row:pictures-declare")
+        compose.onNodeWithTag("workflow-row:pictures-declare").performClick()
+        compose.onNodeWithText("变量类型").performScrollTo()
+        compose.onNode(hasText("<文本>") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        compose.onNodeWithTag("workflow-search:变量类型").performTextInput("列表<图片>")
+        compose.onNode(hasText("<列表<图片>>") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        compose.onNodeWithText("完成").performClick()
+        for (id in listOf("list-api", "list-stream")) {
+            scroll("workflow-row:$id")
+            compose.onNodeWithTag("workflow-row:$id").performClick()
+            compose.onNodeWithTag("workflow-search:<图片>／<列表<图片>> · 附件").performScrollTo().performTextInput("待发送图片")
+            compose.onNodeWithText("可选择单张图片或图片列表；列表按原顺序作为同一次请求的附件发送，张数不限，只受单次请求总大小限制。新建变量时可直接选择 <列表<图片>>，再用新增项或循环收集图片。").performScrollTo()
+            val pictureChoice = compose.onNode(hasText("<列表<图片>> · 待发送图片") and hasClickAction() and hasAnyAncestor(isDialog()))
+            pictureChoice.performScrollTo()
+            screenshot("image-list-picker-$id")
+            pictureChoice.assertIsDisplayed().performClick()
+            compose.onNodeWithText("完成").performClick()
+        }
+        compose.onNodeWithText("保存").performClick()
+        compose.runOnIdle {
+            val program = requireNotNull(saved).program
+            assertEquals(WorkflowType.list(WorkflowType.IMAGE), program.allNodes().single { it.id == "pictures-declare" }.variable!!.type)
+            for (id in listOf("list-api", "list-stream")) assertEquals(WorkflowSystem.ref(pictures.id), program.allNodes().single { it.id == id }.inputs["images"])
+            assertTrue(WorkflowValidator.validate(program).valid)
+        }
+    }
+
+    @Test fun declaredImageListIsVisibleAsALoopItemAndInsideNestedRows() {
+        val pictures = WorkflowVariable("pictures", "待发送图片", WorkflowType.TEXT)
+        val captions = WorkflowVariable("captions", "说明", WorkflowType.TEXT)
+        val rows = listOf(WorkflowNode("pictures-declare", WorkflowKind.DECLARE, variable = pictures),
+            WorkflowNode("picture-loop", WorkflowKind.EACH, variable = WorkflowVariable("picture", "当前图片", WorkflowType.TEXT),
+                inputs = mapOf("items" to WorkflowExpression.Empty(WorkflowType.list(WorkflowType.TEXT))), children = listOf(
+                    WorkflowNode("loop-declare", WorkflowKind.DECLARE, variable = captions),
+                    WorkflowNode("loop-api", WorkflowKind.API, target = WorkflowRef(captions.id), resultType = WorkflowType.TEXT,
+                        inputs = mapOf("profile" to WorkflowExpression.Text("fixture"), "prompt" to WorkflowExpression.Template("x"))))))
+        show(WorkflowEditing.update(WorkflowTemplates.blank(), "pages") { it.copy(children = it.children + rows) })
+        scroll("workflow-row:pictures-declare")
+        compose.onNodeWithTag("workflow-row:pictures-declare").performClick()
+        compose.onNodeWithText("变量类型").performScrollTo()
+        compose.onNode(hasText("<文本>") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        compose.onNodeWithTag("workflow-search:变量类型").performTextInput("列表<图片>")
+        compose.onNode(hasText("<列表<图片>>") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        screenshot("declared-list-type")
+        compose.onNodeWithText("完成").performClick()
+        // The row card itself must report the declared variable's type and name.
+        compose.onNode(hasText("<列表<图片>> · 待发送图片") and hasAnyAncestor(hasTestTag("workflow-row:pictures-declare"))).assertIsDisplayed()
+        screenshot("declared-list-row-output")
+        scroll("workflow-row:picture-loop")
+        compose.onNodeWithTag("workflow-row:picture-loop").performClick()
+        compose.onNodeWithTag("workflow-search:遍历列表／字典").performScrollTo().performTextInput("待发送图片")
+        screenshot("declared-list-loop-picker")
+        val loopChoice = compose.onNode(hasText("<列表<图片>> · 待发送图片") and hasClickAction() and hasAnyAncestor(isDialog()))
+        loopChoice.assertIsDisplayed().performClick()
+        compose.onNodeWithText("完成").performClick()
+        scroll("workflow-row:loop-api")
+        compose.onNodeWithTag("workflow-row:loop-api").performClick()
+        compose.onNodeWithTag("workflow-search:<图片>／<列表<图片>> · 附件").performScrollTo().performTextInput("待发送图片")
+        screenshot("declared-list-nested-picker")
+        val nestedChoice = compose.onNode(hasText("<列表<图片>> · 待发送图片") and hasClickAction() and hasAnyAncestor(isDialog()))
+        nestedChoice.assertIsDisplayed().performClick()
+        compose.onNodeWithText("完成").performClick()
+        compose.onNodeWithText("保存").performClick()
+        compose.runOnIdle {
+            val program = requireNotNull(saved).program
+            assertEquals(WorkflowType.list(WorkflowType.IMAGE), program.allNodes().single { it.id == "pictures-declare" }.variable!!.type)
+            assertEquals(WorkflowSystem.ref(pictures.id), program.allNodes().single { it.id == "picture-loop" }.inputs["items"])
+            assertEquals(WorkflowSystem.ref(pictures.id), program.allNodes().single { it.id == "loop-api" }.inputs["images"])
+            assertTrue(WorkflowValidator.validate(program).issues.toString(), WorkflowValidator.validate(program).valid)
+        }
+    }
+
+    @Test fun asyncModuleLimitIsEditableAndOnlyShownWhileAsync() {
+        show(WorkflowTemplates.localMachine())
+        scroll("workflow-row:pages")
+        compose.onNodeWithTag("workflow-row:pages").performClick()
+        compose.onNodeWithTag("workflow-parallel-value").performScrollTo().assertTextEquals("自动")
+        compose.onNodeWithTag("workflow-parallel-auto").assertIsNotEnabled()
+        compose.onNodeWithText("＋").performClick()
+        compose.onNodeWithTag("workflow-parallel-value").assertTextEquals("2")
+        compose.onNodeWithText("＋").performClick()
+        compose.onNodeWithTag("workflow-parallel-value").assertTextEquals("3")
+        compose.onNodeWithText("－").performClick()
+        compose.onNodeWithTag("workflow-parallel-value").assertTextEquals("2")
+        screenshot("async-parallel-limit")
+        compose.onNodeWithText("完成").performClick()
+        compose.onNode(hasText("并行上限 2") and hasAnyAncestor(hasTestTag("workflow-row:pages"))).assertIsDisplayed()
+        compose.onNodeWithTag("workflow-mode:pages").performClick()
+        scroll("workflow-row:pages")
+        compose.onNodeWithTag("workflow-row:pages").performClick()
+        compose.onNodeWithTag("workflow-parallel-value").assertDoesNotExist()
+        compose.onNodeWithText("完成").performClick()
+        compose.onNodeWithText("保存").performClick()
+        compose.runOnIdle {
+            val pages = requireNotNull(saved).program.allNodes().single { it.id == "pages" }
+            assertEquals(2, pages.parallelLimit)
+            assertEquals(WorkflowMode.SYNC, pages.mode)
+        }
+    }
+
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private val container = AppContainer.from(ApplicationProvider.getApplicationContext())
     private var pausedBefore = true
@@ -72,7 +196,7 @@ class WorkflowEditorIntegrationTest {
         compose.onNode(hasContentDescription("此处可用变量") and hasAnyAncestor(hasTestTag("workflow-row:ocr"))).performClick()
         compose.onNodeWithText("此处可用变量").assertIsDisplayed()
         compose.onNode(hasSetTextAction() and hasText("搜索变量或字段")).performTextInput("气泡 · 原文")
-        compose.onNode(hasText("文本 · 气泡 · 原文") and hasAnyAncestor(isDialog())).assertIsDisplayed()
+        compose.onNode(hasText("<文本> · 气泡 · 原文") and hasAnyAncestor(isDialog())).assertIsDisplayed()
         screenshot("variables")
         compose.onNodeWithText("关闭").performClick()
         compose.onNodeWithText("保存").performClick()
@@ -154,6 +278,23 @@ class WorkflowEditorIntegrationTest {
         screenshot("read-only-parameters")
         compose.onNodeWithText("关闭").performClick()
     }
+    @Test fun automaticRegionImageAndExplicitNoImageAreVisibleAndPersisted() {
+        val program=WorkflowEditing.update(WorkflowTemplates.visionApi("fixture"),"api-vision") {it.copy(inputs=it.inputs-"images")}
+        show(program)
+        scroll("workflow-row:api-vision")
+        compose.onNodeWithTag("workflow-row:api-vision").performClick()
+        compose.onNodeWithTag("workflow-image-auto").performScrollTo().assertIsSelected()
+        compose.onNodeWithTag("workflow-image-none").performScrollTo().performClick()
+        compose.onNodeWithTag("workflow-image-auto").assertIsNotSelected()
+        compose.onNodeWithText("完成").performClick()
+        compose.onNodeWithText("保存").performClick()
+        compose.runOnIdle {
+            val api=requireNotNull(saved).program.allNodes().single {it.id=="api-vision"}
+            assertNull(api.inputs["images"])
+            assertEquals(WorkflowExpression.Boolean(false),api.inputs["attachCurrentImage"])
+            assertTrue(WorkflowSource.render(saved!!.program).contains("图片=无"))
+        }
+    }
     @Test fun promptVariableChipInsertsAtCursorAndAllSourcesAreDirectChoices() {
         show(WorkflowReferenceTemplates.standard("fixture"))
         scroll("workflow-row:standard-api")
@@ -162,7 +303,9 @@ class WorkflowEditorIntegrationTest {
         val field = compose.onNode(hasSetTextAction() and hasText("提示词模板"))
         field.performScrollTo().performTextReplacement("前后")
         field.performTextInputSelection(TextRange(1))
-        compose.onNode(hasText("文本 · 源语言") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
+        compose.onNodeWithTag("workflow-search:<文本> · 请求提示词").performScrollTo().performTextInput("源语言")
+        compose.onNode(hasText("<文本> · 目标语言") and hasClickAction() and hasAnyAncestor(isDialog())).assertDoesNotExist()
+        compose.onNode(hasText("<文本> · 源语言") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
         field.assertTextContains("前" + "$" + "{源语言}后")
         screenshot("prompt-variable-bar")
         compose.onNodeWithText("完成").performClick()

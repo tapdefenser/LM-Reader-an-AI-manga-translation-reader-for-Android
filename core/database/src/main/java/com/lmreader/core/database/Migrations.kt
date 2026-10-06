@@ -340,6 +340,19 @@ object Migrations {
         }
     }
 
+    val MIGRATION_12_13 = object : Migration(12, 13) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE mangas ADD COLUMN translationTextDetectionThreshold REAL")
+            db.execSQL("ALTER TABLE mangas ADD COLUMN translationFreeTextMaskExpansion INTEGER")
+        }
+    }
+
+    val MIGRATION_13_14 = object : Migration(13, 14) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE mangas ADD COLUMN translationFreeTextMergeGapRatio REAL")
+        }
+    }
+
     val ALL: Array<Migration> =
         arrayOf(
             MIGRATION_1_2,
@@ -353,5 +366,7 @@ object Migrations {
             MIGRATION_9_10,
             MIGRATION_10_11,
             MIGRATION_11_12,
+            MIGRATION_12_13,
+            MIGRATION_13_14,
         )
 }

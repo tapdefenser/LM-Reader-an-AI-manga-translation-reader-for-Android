@@ -141,6 +141,9 @@ class TranslationOptionsViewModel(
     fun setWorkflow(id: String?) = update { it.copy(workflowId = id) }
     fun setPageMode(mode: TranslationPageMode?) = update { it.copy(pageMode = mode) }
     fun setSegThreshold(value: Float) = update { it.copy(segThreshold = value.coerceIn(0f, 1f)) }
+    fun setTextDetectionThreshold(value: Float) = update { it.copy(textDetectionThreshold = value.coerceIn(0f, 1f)) }
+    fun setFreeTextMaskExpansion(value: Int) = update { it.copy(freeTextMaskExpansionPercent = value.coerceIn(0, 20)) }
+    fun setFreeTextMergeGap(value: Float) = update { it.copy(freeTextMergeGapRatio = value.coerceIn(0f, 2f)) }
     fun setSegTextScope(value: com.lmreader.core.model.SegTextScope) = update { it.copy(segTextScope = value) }
     fun setBubbleFill(mode: BubbleFillMode) = update { it.copy(bubbleFillMode = mode) }
     fun setBubbleOpacity(value: Int) = update { it.copy(bubbleOpacityPercent = value.coerceIn(0, 100)) }

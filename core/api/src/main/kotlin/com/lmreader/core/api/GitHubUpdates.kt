@@ -10,28 +10,41 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 
 object ProjectLinks {
-    const val GITHUB = "https://github.com/tapdefenser/LM-Reader"
+    const val GITHUB = "https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android"
     const val RELEASES = "$GITHUB/releases"
-    const val LATEST_RELEASE_API = "https://api.github.com/repos/tapdefenser/LM-Reader/releases/latest"
+    const val LATEST_RELEASE_API = "https://api.github.com/repos/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/latest"
 }
+
+data class ReleaseApk(val name: String, val url: String, val bytes: Long, val sha256: String? = null)
 
 sealed interface UpdateStatus {
     data object NoPublicRelease : UpdateStatus
     data object AccessRestricted : UpdateStatus
-    data class Release(val version: String, val page: String, val isNewer: Boolean?) : UpdateStatus
+    data class Release(val version: String, val page: String, val isNewer: Boolean?,
+        val notes: String = "", val apks: List<ReleaseApk> = emptyList()) : UpdateStatus {
+        fun apkFor(abis: List<String>): ReleaseApk? = apks.firstOrNull {
+            it.name.contains("universal", true) ||
+                (abis.any { abi -> abi == "arm64-v8a" || abi == "x86_64" } && it.name.endsWith("-64bit.apk", true))
+        }
+            ?: abis.firstNotNullOfOrNull { abi -> apks.firstOrNull { it.name.contains(abi, true) } }
+            ?: apks.singleOrNull { apk -> listOf("arm64", "armeabi", "x86", "32bit", "64bit").none { apk.name.contains(it, true) } }
+    }
 }
 
-/** Reads public stable releases only; never uses provider keys or downloads/install APKs. */
+/** Reads public stable releases only; never uses translation-provider credentials. */
 class GitHubUpdates(
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -101,7 +114,23 @@ class GitHubUpdates(
         val newer = if (latest != null && current != null) latest > current else null
         // Build the destination from our repository and an encoded tag, not server-supplied URLs.
         val page = ProjectLinks.RELEASES.toHttpUrl().newBuilder().addPathSegment("tag").addPathSegment(tag).build().toString()
-        return UpdateStatus.Release(tag, page, newer)
+        val notes = json["body"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val apks = json["assets"]?.jsonArray.orEmpty().mapNotNull { element ->
+            val asset = element.jsonObject
+            val name = asset["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            if(!name.startsWith("LM-Reader", true) || !name.endsWith(".apk", true) ||
+                name.any { it == '/' || it == '\\' || it.isISOControl() }) return@mapNotNull null
+            if(asset["state"]?.jsonPrimitive?.contentOrNull != "uploaded") return@mapNotNull null
+            val size = asset["size"]?.jsonPrimitive?.longOrNull?.takeIf { it > 0 } ?: return@mapNotNull null
+            val url = ProjectLinks.RELEASES.toHttpUrl().newBuilder().addPathSegment("download")
+                .addPathSegment(tag).addPathSegment(name).build().toString()
+            // Only an asset on this release in our own repository can become an install candidate.
+            if(asset["browser_download_url"]?.jsonPrimitive?.contentOrNull?.toHttpUrlOrNull()?.toString() != url) return@mapNotNull null
+            val digest = asset["digest"]?.jsonPrimitive?.contentOrNull?.removePrefix("sha256:")
+                ?.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }?.lowercase()
+            ReleaseApk(name, url, size, digest)
+        }
+        return UpdateStatus.Release(tag, page, newer, notes, apks)
     }
 
     private companion object { const val MAX_RESPONSE = 512L * 1024 }

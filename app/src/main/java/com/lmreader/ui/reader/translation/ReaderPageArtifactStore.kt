@@ -155,7 +155,7 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
             json.getLong("elapsedMillis"), json.optJSONObject("render")?.let {
                 BubbleRenderSettings(BubbleFillMode.valueOf(it.getString("fillMode")), it.getInt("opacity"), it.getInt("padding"),
                     runCatching { BubbleFont.valueOf(it.optString("font")) }.getOrDefault(BubbleFont.SYSTEM),
-                    it.optInt("fontScale", 100), it.optBoolean("bold", false))
+                    it.optInt("fontScale", 100), it.optBoolean("bold", false), it.optInt("freeTextMaskExpansion", 6))
             } ?: BubbleRenderSettings()).also(::validate)
     }
 
@@ -177,7 +177,8 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
         .put("width", data.width).put("height", data.height).put("elapsedMillis", data.elapsedMillis)
         .put("modelPacks", JSONArray(data.modelPacks)).put("render", JSONObject().put("fillMode", data.renderSettings.fillMode.name)
             .put("opacity", data.renderSettings.opacityPercent).put("padding", data.renderSettings.textPaddingPercent)
-            .put("font", data.renderSettings.font.name).put("fontScale", data.renderSettings.fontScalePercent).put("bold", data.renderSettings.bold))
+            .put("font", data.renderSettings.font.name).put("fontScale", data.renderSettings.fontScalePercent).put("bold", data.renderSettings.bold)
+            .put("freeTextMaskExpansion", data.renderSettings.freeTextMaskExpansionPercent))
         .put("regions", JSONArray().apply { data.regions.forEach { item ->
             val r = item.region
             put(JSONObject().put("id", r.id).put("kind", r.kind.name).put("bounds", rectJson(r.bounds)).put("sourceText", r.sourceText)

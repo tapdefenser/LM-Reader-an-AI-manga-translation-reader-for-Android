@@ -127,6 +127,7 @@ fun MangaDetailScreen(
     onBack: () -> Unit,
     onReadChapter: (chapterId: String?, startPage: Int?) -> Unit,
     onOpenTranslationOptions: (prompt: Boolean) -> Unit,
+    onOpenGlossary: () -> Unit,
     viewModel: MangaDetailViewModel = viewModel(
         key = mangaId,
         factory = MangaDetailViewModel.factory(container, mangaId),
@@ -238,6 +239,7 @@ fun MangaDetailScreen(
                             onTranslateAll = viewModel::translateAll,
                             onExportAll = { enqueueExport(state.chapters.map { it.chapterId }) },
                             onOpenSettings = { onOpenTranslationOptions(false) },
+                            onOpenGlossary = onOpenGlossary,
                         )
                     },
                 )
@@ -976,6 +978,7 @@ private fun DetailOverflowMenu(
     onTranslateAll: () -> Unit,
     onExportAll: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenGlossary: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     IconButton(onClick = { open = true }) {
@@ -999,6 +1002,10 @@ private fun DetailOverflowMenu(
                 open = false
                 onOpenSettings()
             },
+        )
+        DropdownMenuItem(
+            text = { Text("译名管理") },
+            onClick = { open = false; onOpenGlossary() },
         )
     }
 }

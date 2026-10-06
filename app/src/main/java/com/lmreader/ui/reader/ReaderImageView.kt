@@ -158,14 +158,18 @@ internal fun EnginePageView(
         var prepared: PreparedOverlayPage? = null
         var attached = false
         try {
-            if (target.getTag(IMAGE_LOADED_TAG) == loadTag && !settings.effectiveCropBorders) {
+            if (target.getTag(IMAGE_LOADED_TAG) == loadTag) {
                 if (translation == null) {
                     target.overlay = null; overlaySource = null; target.invalidate()
                 } else {
                     val seed = withContext(Dispatchers.IO) { prepareOverlaySource(context, source, page, translation) }
                     ensureActive()
-                    target.overlayGeometry = com.lmreader.ui.reader.translation.ReaderOverlayGeometry(translation.width, translation.height,
-                        com.lmreader.core.model.PixelRect(0f, 0f, translation.width.toFloat(), translation.height.toFloat()))
+                    // A loaded cropped bitmap already has offsets. Preserve them when
+                    // only refreshing its mask, including after the PageSource changes.
+                    if (!settings.effectiveCropBorders) {
+                        target.overlayGeometry = com.lmreader.ui.reader.translation.ReaderOverlayGeometry(translation.width, translation.height,
+                            com.lmreader.core.model.PixelRect(0f, 0f, translation.width.toFloat(), translation.height.toFloat()))
+                    }
                     overlaySource = seed
                 }
                 return@LaunchedEffect
@@ -185,34 +189,41 @@ internal fun EnginePageView(
             }
             // tag 带上解码策略：同一页在**同一策略下**只 setImage 一次（避免重组触发第二次
             // 整图解码），但用户切换「加载原图」时必须让它重新载一次——那就是这个开关的意义。
-            if(target.getTag(IMAGE_REQUESTED_TAG)!=loadTag) return@LaunchedEffect
-            if (target.getTag(IMAGE_LOADED_TAG) == loadTag) return@LaunchedEffect
-            if(target.isReady && target.minScale>0f && target.sWidth>0 && target.sHeight>0) {
-                target.center?.let {center ->target.pendingViewport=PageViewport(target.scale/target.minScale,
-                    center.x/target.sWidth,center.y/target.sHeight)}
+            withContext(Dispatchers.Main.immediate) {
+                if(target.getTag(IMAGE_REQUESTED_TAG)!=loadTag || target.getTag(IMAGE_LOADED_TAG)==loadTag) return@withContext
+                if(target.isReady && target.minScale>0f && target.sWidth>0 && target.sHeight>0) {
+                    target.center?.let {center ->target.pendingViewport=PageViewport(target.scale/target.minScale,
+                        center.x/target.sWidth,center.y/target.sHeight)}
+                }
+                target.overlayGeometry = prepared?.geometry
+                // Cropping translated pages is performed once above with explicit offsets.
+                target.setCropBorders(translation == null && settings.effectiveCropBorders)
+                target.setImage(imageSource)
+                // Record success only after setImage actually accepts the new source.
+                target.setTag(IMAGE_LOADED_TAG, loadTag)
+                attached = true
+                overlaySource = prepared?.overlay
             }
-            target.setTag(IMAGE_LOADED_TAG, loadTag)
-            target.overlayGeometry = prepared?.geometry
-            // Cropping translated pages is performed once above with explicit offsets.
-            target.setCropBorders(translation == null && settings.effectiveCropBorders)
-            target.setImage(imageSource)
-            attached = true
-            overlaySource = prepared?.overlay
         } catch(cancelled:CancellationException) { throw cancelled }
-        catch(_:Exception) { decodeFailed = true }
+        catch(error:Exception) {
+            android.util.Log.e("ReaderImage", "Cannot prepare reader image or overlay", error)
+            decodeFailed = true
+        }
         finally { if (!attached) prepared?.bitmap?.recycle() }
     }
 
-    LaunchedEffect(overlaySource, regions, renderSettings, translation?.preview) {
+    LaunchedEffect(view, overlaySource, regions, renderSettings, translation?.preview, editing) {
         val target = view ?: return@LaunchedEffect
         val seed = overlaySource ?: return@LaunchedEffect
-        val overlay = withContext(Dispatchers.Default) { seed.layout(regions, renderSettings, hideEmpty = translation?.preview == true) }
+        val overlay = withContext(Dispatchers.Default) {
+            seed.layout(regions, renderSettings, hideEmpty = true, includeEmptyForEditing = editing)
+        }
         ensureActive()
         target.overlay = overlay
         target.invalidate()
     }
 
-    DisposableEffect(page.pageId) {
+    DisposableEffect(view) {
         val target = view
         onDispose {
             // 清理顺序有讲究：先摘监听器，再 recycle。
@@ -226,7 +237,6 @@ internal fun EnginePageView(
             target?.setTag(IMAGE_REQUESTED_TAG, null)
             target?.overlay = null
             target?.recycle()
-            view = null
         }
     }
 }

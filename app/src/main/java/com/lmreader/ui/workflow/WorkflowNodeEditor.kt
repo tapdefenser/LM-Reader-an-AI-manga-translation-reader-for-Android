@@ -10,7 +10,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
@@ -19,7 +21,7 @@ import com.lmreader.core.workflow.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailableVariable>, profiles: List<ApiProfile>,
+internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailableVariable>, outScope: List<WorkflowAvailableVariable>, profiles: List<ApiProfile>,
     dismiss: () -> Unit, readOnly: Boolean = false, collectScope: List<WorkflowAvailableVariable> = emptyList(), save: (WorkflowNode) -> Unit) {
     var node by remember(value.id) { mutableStateOf(value) }
     var leaving by remember { mutableStateOf(false) }
@@ -30,11 +32,12 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
         if(it == SheetValue.Hidden && latestDirty) { leaving = true; false } else true
     })
     val refs = WorkflowEditing.references(scope)
+    val outRefs = WorkflowEditing.references(outScope)
     val enabled = !readOnly
     fun parameter(key: String, expression: WorkflowExpression?) {
         node = node.copy(inputs = if(expression == null) node.inputs - key else node.inputs + (key to expression))
     }
-    fun targetType() = refs.firstOrNull { it.ref == node.target }?.type
+    fun targetType() = outRefs.firstOrNull { it.ref == node.target }?.type
     @Composable fun input(key: String, label: String, type: WorkflowType?, optional: Boolean = false) {
         ExpressionEditor(label, type, node.inputs[key], refs, optional = optional, enabled = enabled) { parameter(key, it) }
     }
@@ -56,14 +59,33 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                         val element = if(collection?.kind == WorkflowDataKind.DICTIONARY) WorkflowType(WorkflowDataKind.RECORD, fields = mapOf("key" to WorkflowType.TEXT, "value" to WorkflowType.TEXT)) else collection?.element ?: WorkflowType.TEXT
                         node = node.copy(variable = node.variable?.let { variable -> variable.copy(id = if(element == WorkflowSystem.pageType) WorkflowSystem.PAGE else if(variable.id == WorkflowSystem.PAGE) java.util.UUID.randomUUID().toString() else variable.id, name = if(element == WorkflowSystem.pageType) "本页" else variable.name, type = element) })
                     }
-                    WorkflowKind.SEG -> input("image", "图片 · 输入图片", WorkflowType.IMAGE)
-                    WorkflowKind.OCR -> { input("image", "图片 · 气泡图片", WorkflowType.IMAGE); input("language", "文本 · 原文语言", WorkflowType.TEXT) }
-                    WorkflowKind.TRANSLATE -> { input("text", "文本 · 原文", WorkflowType.TEXT); input("source", "文本 · 源语言", WorkflowType.TEXT); input("target", "文本 · 目标语言", WorkflowType.TEXT) }
+                    WorkflowKind.SEG -> {
+                        input("image", "<图片> · 输入图片", WorkflowType.IMAGE)
+                        Text("气泡和游离文字统一输出为 <列表<气泡>>，每项都包含自己的裁图。每次成功执行都会替换本页旧气泡与翻译记录；输出到自定义变量也会同步本页。文字检测属于 SEG；OCR 步骤只负责转文字。", style = MaterialTheme.typography.bodySmall)
+                    }
+                    WorkflowKind.OCR -> { input("image", "<图片> · 气泡图片", WorkflowType.IMAGE); input("language", "<文本> · 原文语言", WorkflowType.TEXT) }
+                    WorkflowKind.TRANSLATE -> { input("text", "<文本> · 原文", WorkflowType.TEXT); input("source", "<文本> · 源语言", WorkflowType.TEXT); input("target", "<文本> · 目标语言", WorkflowType.TEXT) }
                     WorkflowKind.API, WorkflowKind.API_STREAM -> {
-                        input("context", "上下文 · 请求上下文", WorkflowType.CONTEXT, optional = true)
-                        TemplateEditor("文本 · 请求提示词", node.inputs["prompt"], refs, enabled) { parameter("prompt", it) }
-                        ExpressionEditor("图片 · 附件（可选）", null, node.inputs["images"], refs.filter { it.type == WorkflowType.IMAGE || it.type == WorkflowType.list(WorkflowType.IMAGE) }, optional = true, variableOnly = true, enabled = enabled) { parameter("images", it) }
-                        ExpressionEditor("列表 · 校验输入气泡（可选）", null, node.inputs["expectedBubbles"], refs.filter { it.type in setOf(WorkflowType.list(WorkflowType.BUBBLE), WorkflowType.list(WorkflowType.TRANSLATION), WorkflowType.list(WorkflowType.PAGE_RECORD)) }, optional = true, variableOnly = true, enabled = enabled) { parameter("expectedBubbles", it) }
+                        input("context", "<上下文> · 请求上下文", WorkflowType.CONTEXT, optional = true)
+                        TemplateEditor("<文本> · 请求提示词", node.inputs["prompt"], refs, enabled) { parameter("prompt", it) }
+                        val currentBubble = WorkflowEditing.currentBubble(scope)
+                        val automatic = WorkflowEditing.automaticImage(node, scope)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (currentBubble != null) FilterChip(automatic != null, {
+                                parameter("images", null); parameter("attachCurrentImage", WorkflowExpression.Boolean(true))
+                            }, enabled = enabled, label = { Text("自动附带当前气泡图片") }, modifier = Modifier.testTag("workflow-image-auto"))
+                            FilterChip(node.inputs["images"] == null && automatic == null, {
+                                parameter("images", null); parameter("attachCurrentImage", WorkflowExpression.Boolean(false))
+                            }, enabled = enabled, label = { Text("不附图") }, modifier = Modifier.testTag("workflow-image-none"))
+                        }
+                        automatic?.let { ref -> refs.firstOrNull { it.ref == ref }?.let { TypedVariable(it) } }
+                        ExpressionEditor("<图片>／<列表<图片>> · 附件", null, node.inputs["images"], refs.filter { it.type == WorkflowType.IMAGE || it.type == WorkflowType.list(WorkflowType.IMAGE) }, variableOnly = true, enabled = enabled) {
+                            parameter("images", it); parameter("attachCurrentImage", null)
+                        }
+                        Text("可选择单张图片或图片列表；列表按原顺序作为同一次请求的附件发送，张数不限，只受单次请求总大小限制。新建变量时可直接选择 <列表<图片>>，再用新增项或循环收集图片。", style = MaterialTheme.typography.bodySmall)
+                        if (automatic != null) Text("每次请求附带当前这一项的裁图；游离文字也按气泡项处理。", style = MaterialTheme.typography.bodySmall)
+                        ExpressionEditor("<列表> · 校验输入气泡（可选）", null, node.inputs["expectedBubbles"], refs.filter { it.type in setOf(WorkflowType.list(WorkflowType.BUBBLE), WorkflowType.list(WorkflowType.TRANSLATION), WorkflowType.list(WorkflowType.PAGE_RECORD)) }, optional = true, variableOnly = true, enabled = enabled) { parameter("expectedBubbles", it) }
+                        input("expectedCount", "<数字> · 期望输出项数（可选）", WorkflowType.NUMBER, optional = true)
                     }
                     WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.APPLY_ORDER -> {
                         val choices = refs.filter { r ->
@@ -71,19 +93,19 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                             if(node.kind == WorkflowKind.APPLY_ORDER) item?.kind == WorkflowDataKind.RECORD && item.fields["translation"] == WorkflowType.TEXT
                             else item in setOf(WorkflowType.TRANSLATION, WorkflowType.PAGE_RECORD)
                         }
-                        ExpressionEditor("记录／列表 · 译文", null, node.inputs["items"], choices, variableOnly = true, enabled = enabled) { parameter("items", it) }
-                        if(node.kind == WorkflowKind.APPLY_ORDER) input("index", "数字 · 起始气泡序号（从 1 开始）", WorkflowType.NUMBER)
+                        ExpressionEditor("<记录>／<列表> · 译文", null, node.inputs["items"], choices, variableOnly = true, enabled = enabled) { parameter("items", it) }
+                        if(node.kind == WorkflowKind.APPLY_ORDER) input("index", "<数字> · 起始气泡序号（从 1 开始）", WorkflowType.NUMBER)
                     }
                     WorkflowKind.SET -> input("value", "赋值", targetType())
                     WorkflowKind.APPEND -> input("value", "新增值", targetType()?.let { if(it.kind == WorkflowDataKind.LIST) it.element else it })
                     WorkflowKind.MERGE_LIST -> input("value", "合并列表", targetType())
-                    WorkflowKind.REPLACE -> { input("text", "文本 · 匹配文本", WorkflowType.TEXT); input("dictionary", "字典 · 译名字典", WorkflowType.DICTIONARY) }
+                    WorkflowKind.REPLACE -> { input("text", "<文本> · 匹配文本", WorkflowType.TEXT); input("dictionary", "<字典> · 译名字典", WorkflowType.DICTIONARY) }
                     WorkflowKind.MESSAGE -> {
-                        TemplateEditor("文本 · 用户上下文", node.inputs["user"], refs, enabled) { parameter("user", it) }
-                        TemplateEditor("文本 · 助手示例（可选）", node.inputs["assistant"], refs, enabled, optional = true) { parameter("assistant", it) }
+                        TemplateEditor("<文本> · 用户上下文", node.inputs["user"], refs, enabled) { parameter("user", it) }
+                        TemplateEditor("<文本> · 助手示例（可选）", node.inputs["assistant"], refs, enabled, optional = true) { parameter("assistant", it) }
                     }
-                    WorkflowKind.MERGE_GLOSSARY -> input("items", "列表 · 原词／译名", WorkflowType.list(WorkflowType.GLOSSARY_ENTRY))
-                    WorkflowKind.IF -> input("condition", "布尔 · 条件", WorkflowType.BOOLEAN)
+                    WorkflowKind.MERGE_GLOSSARY -> input("items", "<列表> · 原词／译名", WorkflowType.list(WorkflowType.GLOSSARY_ENTRY))
+                    WorkflowKind.IF -> input("condition", "<布尔> · 条件", WorkflowType.BOOLEAN)
                     WorkflowKind.RETURN -> input("value", "旧版返回值", node.resultType)
                     else -> Text("由漫画与当前作用域提供。", style = MaterialTheme.typography.bodySmall)
                 }
@@ -99,10 +121,14 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     else -> { _ -> true }
                 }
                 if(node.kind in setOf(WorkflowKind.SEG, WorkflowKind.OCR, WorkflowKind.TRANSLATE, WorkflowKind.API, WorkflowKind.API_STREAM, WorkflowKind.SET, WorkflowKind.REPLACE, WorkflowKind.APPEND, WorkflowKind.MERGE_LIST, WorkflowKind.MESSAGE)) {
-                    ReferencePicker("输出到", node.target, refs.filter { !it.readOnly && filter(it) }, enabled = enabled) { ref ->
-                        val type = refs.firstOrNull { it.ref == ref }?.type ?: node.resultType
+                    // Appends are commutative, so an outer list or text stays selectable from a nested async branch.
+                    val append = node.kind in setOf(WorkflowKind.APPEND, WorkflowKind.MERGE_LIST)
+                    val writable = WorkflowEditing.writeTargets(outScope, append).filter(filter)
+                    ReferencePicker("输出到", node.target, writable, enabled = enabled) { ref ->
+                        val type = outRefs.firstOrNull { it.ref == ref }?.type ?: node.resultType
                         node = node.copy(target = ref, resultType = type, variable = if(node.kind == WorkflowKind.API_STREAM) node.variable?.copy(type = type.element ?: WorkflowType.TRANSLATION) else node.variable)
                     }
+                    if(append) Text("可追加到外层声明的列表或文本。并行分支同时追加不保证顺序，但不会丢项。", style = MaterialTheme.typography.bodySmall)
                 }
                 if(node.variable != null) {
                     val variable = requireNotNull(node.variable)
@@ -111,11 +137,11 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     else TypedVariable(WorkflowReferenceChoice(WorkflowRef(variable.id), variable.name, variable.type, false))
                 }
                 if(node.kind == WorkflowKind.EACH) {
-                    ReferencePicker("收集到列表（可选）", node.collectTo, refs.filter { !it.readOnly && it.type.kind == WorkflowDataKind.LIST }, optional = true, enabled = enabled) {
+                    ReferencePicker("收集到列表（可选）", node.collectTo, outRefs.filter { !it.readOnly && it.type.kind == WorkflowDataKind.LIST }, optional = true, enabled = enabled) {
                         node = node.copy(collectTo = it, inputs = if(it == null) node.inputs - "collectValue" - "flatten" else node.inputs)
                     }
                     node.collectTo?.let { target ->
-                        val type = refs.firstOrNull { it.ref == target }?.type
+                        val type = outRefs.firstOrNull { it.ref == target }?.type ?: refs.firstOrNull { it.ref == target }?.type
                         val flatten = node.inputs["flatten"] == WorkflowExpression.Boolean(true)
                         Row { Text("合并每项列表", Modifier.weight(1f)); Switch(flatten, { parameter("flatten", WorkflowExpression.Boolean(it)); parameter("collectValue", null) }, enabled = enabled) }
                         val childScope = collectScope.filterNot { it.variable.id == node.variable?.id } + listOfNotNull(node.variable?.let { WorkflowAvailableVariable(it) })
@@ -136,6 +162,18 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                 OutlinedTextField(node.label, { if(it.length <= 80) node = node.copy(label = it) }, enabled = enabled, label = { Text("步骤名称（可选）") }, modifier = Modifier.fillMaxWidth())
                 if(node.kind in setOf(WorkflowKind.CHAPTERS, WorkflowKind.PAGES, WorkflowKind.EACH)) Row {
                     Text("异步", Modifier.weight(1f)); Switch(node.mode == WorkflowMode.ASYNC, { node = node.copy(mode = if(it) WorkflowMode.ASYNC else WorkflowMode.SYNC) }, enabled = enabled)
+                }
+                // The limit only applies while the branches run in parallel; null follows the engine setting.
+                if(node.mode == WorkflowMode.ASYNC && node.kind in setOf(WorkflowKind.CHAPTERS, WorkflowKind.PAGES, WorkflowKind.EACH)) {
+                    val limit = node.parallelLimit
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("最大并行数", Modifier.weight(1f))
+                        TextButton(enabled = enabled && limit != null, onClick = { node = node.copy(parallelLimit = null) }, modifier = Modifier.testTag("workflow-parallel-auto")) { Text("自动") }
+                        TextButton(enabled = enabled && limit != null && limit > 1, onClick = { node = node.copy(parallelLimit = limit?.minus(1)) }) { Text("－") }
+                        Text(limit?.toString() ?: "自动", style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("workflow-parallel-value"))
+                        TextButton(enabled = enabled && limit != WorkflowNode.MAX_PARALLEL, onClick = { node = node.copy(parallelLimit = limit?.plus(1) ?: 2) }) { Text("＋") }
+                    }
+                    Text(if(limit == null) "跟随引擎并行上限。" else "本模块同时最多处理 $limit 项，最多 ${WorkflowNode.MAX_PARALLEL} 项；实际并行度不会超过引擎上限。", style = MaterialTheme.typography.bodySmall)
                 }
                 if(node.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM)) {
                     var choosing by remember { mutableStateOf(false) }
@@ -167,14 +205,19 @@ private fun apiOutput(type: WorkflowType): Boolean = when(type.kind) {
 @Composable
 private fun ReferencePicker(label: String, value: WorkflowRef?, choices: List<WorkflowReferenceChoice>, optional: Boolean = false,
     enabled: Boolean = true, changed: (WorkflowRef?) -> Unit) {
-    Column {
+    var query by remember(label) { mutableStateOf("") }
+    val matches = workflowOptionMatcher(query)
+    val visible = choices.filter { matches(typedLabel(it)) }.sortedBy { it.ref != value }
+    Column(Modifier.testTag("workflow-reference:$label")) {
         Text(label, style = MaterialTheme.typography.labelLarge)
+        WorkflowOptionSearch(label, query) { query = it }
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if(optional) item { FilterChip(value == null, { changed(null) }, label = { Text("不使用") }, enabled = enabled) }
-            items(choices.sortedBy { it.ref != value }) { choice -> FilterChip(choice.ref == value, { changed(choice.ref) }, label = { TypedVariable(choice) }, enabled = enabled) }
+            if(optional && matches("不使用")) item { FilterChip(value == null, { changed(null) }, label = { Text("不使用") }, enabled = enabled) }
+            items(visible) { choice -> FilterChip(choice.ref == value, { changed(choice.ref) }, label = { TypedVariable(choice) }, enabled = enabled) }
         }
         if(value != null && choices.none { it.ref == value }) Text("引用 · 此处变量不可用", color = MaterialTheme.colorScheme.error)
-        if(choices.isEmpty()) Text("无匹配变量", style = MaterialTheme.typography.bodySmall)
+        if(visible.isEmpty()) Text("无匹配变量", style = MaterialTheme.typography.bodySmall)
+        if(query.isNotBlank()) choices.firstOrNull { it.ref == value }?.let { TypedVariable(it) }
     }
 }
 
@@ -182,29 +225,38 @@ private fun ReferencePicker(label: String, value: WorkflowRef?, choices: List<Wo
 internal fun ExpressionEditor(label: String, type: WorkflowType?, value: WorkflowExpression?, references: List<WorkflowReferenceChoice>,
     optional: Boolean = false, variableOnly: Boolean = false, depth: Int = 0, enabled: Boolean = true, changed: (WorkflowExpression?) -> Unit) {
     val refs = references.filter { type == null || it.type == type }.sortedBy { it.ref != (value as? WorkflowExpression.Ref)?.value }
+    var query by remember(label) { mutableStateOf("") }
+    val matches = workflowOptionMatcher(query)
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Text(label, style = MaterialTheme.typography.labelLarge)
+        WorkflowOptionSearch(label, query) { query = it }
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if(optional) item { FilterChip(value == null, { changed(null) }, label = { Text("不使用") }, enabled = enabled) }
-            items(refs) { choice -> FilterChip((value as? WorkflowExpression.Ref)?.value == choice.ref, { changed(WorkflowExpression.Ref(choice.ref)) }, label = { TypedVariable(choice) }, enabled = enabled) }
+            if(optional && matches("不使用")) item { FilterChip(value == null, { changed(null) }, label = { Text("不使用") }, enabled = enabled) }
             if(!variableOnly) {
                 if(type == null || type == WorkflowType.TEXT) {
-                    item { FilterChip(value is WorkflowExpression.Text, { changed(WorkflowExpression.Text("")) }, label = { Text("文本值", color = variableColor(WorkflowType.TEXT)) }, enabled = enabled) }
-                    item { FilterChip(value is WorkflowExpression.Template, { changed(WorkflowExpression.Template((value as? WorkflowExpression.Text)?.value.orEmpty())) }, label = { Text("提示词模板") }, enabled = enabled) }
+                    if(matches("<文本>值")) item { FilterChip(value is WorkflowExpression.Text, { changed(WorkflowExpression.Text("")) }, label = { Text("<文本>值", color = variableColor(WorkflowType.TEXT)) }, enabled = enabled) }
+                    if(matches("<文本> · 提示词模板")) item { FilterChip(value is WorkflowExpression.Template, { changed(WorkflowExpression.Template((value as? WorkflowExpression.Text)?.value.orEmpty())) }, label = { Text("提示词模板") }, enabled = enabled) }
                 }
-                if(type == WorkflowType.NUMBER) item { FilterChip(value is WorkflowExpression.Number, { changed(WorkflowExpression.Number(0.0)) }, label = { Text("数字值", color = variableColor(type)) }, enabled = enabled) }
-                if(type == WorkflowType.BOOLEAN) item { FilterChip(value is WorkflowExpression.Boolean, { changed(WorkflowExpression.Boolean(false)) }, label = { Text("布尔值", color = variableColor(type)) }, enabled = enabled) }
-                if(type?.kind == WorkflowDataKind.RECORD) item { FilterChip(value is WorkflowExpression.Record, { changed(WorkflowExpression.Record(type.fields.mapValues { WorkflowExpression.Empty(it.value) })) }, label = { Text("构造记录", color = variableColor(type)) }, enabled = enabled) }
-                if(type?.kind in setOf(WorkflowDataKind.LIST, WorkflowDataKind.DICTIONARY, WorkflowDataKind.CONTEXT)) item { FilterChip(value is WorkflowExpression.Empty, { changed(WorkflowExpression.Empty(type!!)) }, label = { Text("空${WorkflowLabels.type(type!!)}", color = variableColor(type)) }, enabled = enabled) }
+                if((type == null || type == WorkflowType.NUMBER) && matches("<数字>值")) item { FilterChip(value is WorkflowExpression.Number, { changed(WorkflowExpression.Number(0.0)) }, label = { Text("<数字>值", color = variableColor(WorkflowType.NUMBER)) }, enabled = enabled) }
+                if((type == null || type == WorkflowType.BOOLEAN) && matches("<布尔>值")) item { FilterChip(value is WorkflowExpression.Boolean, { changed(WorkflowExpression.Boolean(false)) }, label = { Text("<布尔>值", color = variableColor(WorkflowType.BOOLEAN)) }, enabled = enabled) }
+                if(type?.kind == WorkflowDataKind.RECORD && matches("${WorkflowLabels.type(type)} · 构造记录")) item { FilterChip(value is WorkflowExpression.Record, { changed(WorkflowExpression.Record(type.fields.mapValues { WorkflowExpression.Empty(it.value) })) }, label = { Text("${WorkflowLabels.type(type)} · 构造记录", color = variableColor(type)) }, enabled = enabled) }
+                if(type?.kind in setOf(WorkflowDataKind.LIST, WorkflowDataKind.DICTIONARY, WorkflowDataKind.CONTEXT) && matches("空${WorkflowLabels.type(type!!)}")) item { FilterChip(value is WorkflowExpression.Empty, { changed(WorkflowExpression.Empty(type!!)) }, label = { Text("空${WorkflowLabels.type(type!!)}", color = variableColor(type)) }, enabled = enabled) }
             }
+            items(refs.filter { matches(typedLabel(it)) }) { choice -> FilterChip((value as? WorkflowExpression.Ref)?.value == choice.ref, { changed(WorkflowExpression.Ref(choice.ref)) }, label = { TypedVariable(choice) }, enabled = enabled) }
         }
+        if(query.isNotBlank() && refs.none { matches(typedLabel(it)) }) Text("无匹配变量", style = MaterialTheme.typography.bodySmall)
         when(value) {
             is WorkflowExpression.Ref -> refs.firstOrNull { it.ref == value.value }?.let { TypedVariable(it) } ?: Text("引用 · 不可用变量")
-            is WorkflowExpression.Template -> TemplateEditor("文本 · 模板", value, references, enabled, changed = changed)
-            is WorkflowExpression.Text -> OutlinedTextField(value.value, { if(it.length <= 100_000) changed(WorkflowExpression.Text(it)) }, enabled = enabled, modifier = Modifier.fillMaxWidth())
+            is WorkflowExpression.Template -> TemplateEditor("<文本> · 模板", value, references, enabled, changed = changed)
+            is WorkflowExpression.Text -> OutlinedTextField(value.value, { if(it.length <= 100_000) changed(WorkflowExpression.Text(it)) }, enabled = enabled, modifier = Modifier.fillMaxWidth().testTag("workflow-literal:$label"))
             is WorkflowExpression.Number -> {
-                var raw by remember(value) { mutableStateOf(value.value.toString()) }
-                OutlinedTextField(raw, { raw = it; it.toDoubleOrNull()?.takeIf { n -> n.isFinite() }?.let { n -> changed(WorkflowExpression.Number(n)) } }, enabled = enabled, isError = raw.toDoubleOrNull()?.isFinite() != true, modifier = Modifier.fillMaxWidth())
+                var raw by remember { mutableStateOf(value.value.toString()) }
+                var previous by remember { mutableStateOf(value.value) }
+                if(previous != value.value) {
+                    if(raw.toDoubleOrNull() != value.value) raw = value.value.toString()
+                    previous = value.value
+                }
+                OutlinedTextField(raw, { raw = it; it.toDoubleOrNull()?.takeIf { n -> n.isFinite() }?.let { n -> changed(WorkflowExpression.Number(n)) } }, enabled = enabled, isError = raw.toDoubleOrNull()?.isFinite() != true, modifier = Modifier.fillMaxWidth().testTag("workflow-literal:$label"))
             }
             is WorkflowExpression.Boolean -> Switch(value.value, { changed(WorkflowExpression.Boolean(it)) }, enabled = enabled)
             is WorkflowExpression.Record -> if(depth < 8) type?.fields?.forEach { (key, fieldType) ->
@@ -224,12 +276,16 @@ private fun TemplateEditor(label: String, expression: WorkflowExpression?, refs:
     val value = expression as? WorkflowExpression.Template ?: WorkflowExpression.Template((expression as? WorkflowExpression.Text)?.value.orEmpty())
     var field by remember { mutableStateOf(TextFieldValue(value.text, TextRange(value.text.length))) }
     if(field.text != value.text) field = field.copy(text = value.text, selection = TextRange(value.text.length))
+    var query by remember(label) { mutableStateOf("") }
+    val matches = workflowOptionMatcher(query)
+    val visible = refs.filter { serializable(it.type) && matches(typedLabel(it)) }
     Column {
         Row { Text(label, Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
             if(optional) TextButton(onClick = { changed(null) }, enabled = enabled && expression != null) { Text("不使用") }
         }
+        WorkflowOptionSearch(label, query) { query = it }
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(refs.filter { serializable(it.type) }) { choice -> AssistChip(onClick = {
+            items(visible) { choice -> AssistChip(onClick = {
                 var key = choice.label; var index = 2
                 while(value.bindings[key]?.let { it != choice.ref } == true) key = choice.label + index++
                 val token = "$" + "{" + key + "}"
@@ -241,6 +297,7 @@ private fun TemplateEditor(label: String, expression: WorkflowExpression?, refs:
                 }
             }, enabled = enabled, label = { TypedVariable(choice) }) }
         }
+        if(visible.isEmpty()) Text("无匹配变量", style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(field, { next -> if(next.text.length <= 100_000) { field = next; if(next.text != value.text) changed(value.copy(text = next.text)) } },
             enabled = enabled, modifier = Modifier.fillMaxWidth(), minLines = 3, label = { Text("提示词模板") })
         val selected = (expression as? WorkflowExpression.Ref)?.let { e -> refs.firstOrNull { it.ref == e.value } }
@@ -280,11 +337,17 @@ internal fun TypeEditor(label: String, value: WorkflowType, depth: Int = 0, enab
         }
     }
     if(choosing) ChoiceDialog(label, buildList {
-        add(WorkflowType.TEXT to "文本"); add(WorkflowType.NUMBER to "数字"); add(WorkflowType.BOOLEAN to "布尔"); add(WorkflowType.IMAGE to "图片")
-        add(WorkflowType.BUBBLE to "气泡（来自 SEG）"); add(WorkflowType.CONTEXT to "上下文"); add(WorkflowType.DICTIONARY to "字典")
-        if(depth < 4) { add(WorkflowType.list(WorkflowType.TEXT) to "自定义列表"); add(WorkflowType(WorkflowDataKind.RECORD, fields = mapOf("字段1" to WorkflowType.TEXT)) to "自定义记录") }
-        add(WorkflowType.TRANSLATION to "气泡对照：bubbleId／source／translation")
-        add(WorkflowType.GLOSSARY_ENTRY to "译名条目：source／translation")
-        add(WorkflowType.PAGE_RECORD to "页翻译记录：页ID／页码／气泡ID／原文／译文")
-    }, { choosing = false }) { changed(it); choosing = false }
+        listOf(WorkflowType.TEXT, WorkflowType.NUMBER, WorkflowType.BOOLEAN, WorkflowType.IMAGE).forEach { add(it to WorkflowLabels.type(it)) }
+        add(WorkflowType.BUBBLE to "${WorkflowLabels.type(WorkflowType.BUBBLE)}（来自 SEG）")
+        listOf(WorkflowType.CONTEXT, WorkflowType.DICTIONARY).forEach { add(it to WorkflowLabels.type(it)) }
+        if(depth < 4) {
+            add(WorkflowType.list(WorkflowType.IMAGE) to WorkflowLabels.type(WorkflowType.list(WorkflowType.IMAGE)))
+            val list = WorkflowType.list(WorkflowType.TEXT)
+            val record = WorkflowType(WorkflowDataKind.RECORD, fields = mapOf("字段1" to WorkflowType.TEXT))
+            add(list to "${WorkflowLabels.type(list)}（自定义列表）"); add(record to WorkflowLabels.type(record))
+        }
+        add(WorkflowType.TRANSLATION to "${WorkflowLabels.type(WorkflowType.TRANSLATION)}：bubbleId／source／translation")
+        add(WorkflowType.GLOSSARY_ENTRY to "${WorkflowLabels.type(WorkflowType.GLOSSARY_ENTRY)}：source／translation")
+        add(WorkflowType.PAGE_RECORD to "${WorkflowLabels.type(WorkflowType.PAGE_RECORD)}：页ID／页码／气泡ID／原文／译文")
+    }, { choosing = false }, searchable = true) { changed(it); choosing = false }
 }

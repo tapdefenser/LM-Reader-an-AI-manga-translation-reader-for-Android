@@ -10,5 +10,5 @@ data class ApiImage(val mimeType: String, val base64: String) {
     val dataUrl get() = "data:$mimeType;base64,$base64"
 }
 data class ApiMessage(val role: String, val text: String, val images: List<ApiImage> = emptyList()) {
-    init { require(role in setOf("system", "user", "assistant")); require(images.size <= 32) }
+    init { require(role in setOf("system", "user", "assistant")) }
 }

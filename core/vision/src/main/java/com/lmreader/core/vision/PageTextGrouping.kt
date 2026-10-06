@@ -4,11 +4,12 @@ import com.lmreader.core.model.*
 import kotlin.math.*
 
 /** Each OCR line belongs to exactly one region; text detections inside bubbles do not duplicate it. */
-fun groupPageText(seg: SegResult, ocr: LocalOcrResult, scope: SegTextScope = SegTextScope.ALL): List<PageTextRegion> {
+fun groupPageText(seg: SegResult, ocr: LocalOcrResult, scope: SegTextScope = SegTextScope.ALL,
+    freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO): List<PageTextRegion> {
     require(seg.imageId == ocr.imageId && seg.width == ocr.width && seg.height == ocr.height)
     require(ocr.lines.map { it.id }.distinct().size == ocr.lines.size)
     require(seg.regions.map { it.id }.distinct().size == seg.regions.size)
-    val candidates = selectSegRegions(seg, scope)
+    val candidates = selectSegRegions(seg, scope, freeTextMergeGapRatio)
     val groups = linkedMapOf<String, Pair<SegRegion, MutableList<OcrLine>>>()
     for (line in ocr.lines.filter { it.text.isNotBlank() && it.bounds.area > 0 }) {
         val match = regionOwner(line.bounds, candidates)

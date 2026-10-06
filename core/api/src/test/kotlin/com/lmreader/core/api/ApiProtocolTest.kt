@@ -6,6 +6,32 @@ import kotlin.test.*
 import org.junit.Test
 
 class ApiProtocolTest {
+    @Test fun `image lists preserve all attachments and their order in every protocol`() {
+        val images = listOf(ApiImage("image/jpeg", "YQ=="), ApiImage("image/png", "Yg=="), ApiImage("image/webp", "Yw=="))
+        for (format in ApiFormat.entries) {
+            val request = Json.parseToJsonElement(ApiProtocol.requestBody(profile(format), listOf(ApiMessage("user", "read all images", images)))).jsonObject
+            val urls = when (format) {
+                ApiFormat.CHAT -> request.getValue("messages").jsonArray.single().jsonObject.getValue("content").jsonArray.drop(1)
+                    .map { it.jsonObject.getValue("image_url").jsonObject.getValue("url").jsonPrimitive.content }
+                ApiFormat.RESPONSES -> request.getValue("input").jsonArray.single().jsonObject.getValue("content").jsonArray.drop(1)
+                    .map { it.jsonObject.getValue("image_url").jsonPrimitive.content }
+                ApiFormat.GEMINI -> request.getValue("contents").jsonArray.single().jsonObject.getValue("parts").jsonArray.drop(1)
+                    .map { it.jsonObject.getValue("inlineData").jsonObject.let { data -> "data:${data.getValue("mimeType").jsonPrimitive.content};base64,${data.getValue("data").jsonPrimitive.content}" } }
+            }
+            assertEquals(images.map { it.dataUrl }, urls, format.name)
+        }
+    }
+
+    @Test fun `a request carries every attachment without an image count limit`() {
+        val images = (1..64).map { ApiImage("image/jpeg", "YQ==") }
+        val message = ApiMessage("user", "read all images", images)
+        assertEquals(64, message.images.size)
+        val request = Json.parseToJsonElement(ApiProtocol.requestBody(profile(), listOf(message))).jsonObject
+        val urls = request.getValue("messages").jsonArray.single().jsonObject.getValue("content").jsonArray.drop(1)
+        assertEquals(64, urls.size)
+        assertTrue(urls.all { it.jsonObject.getValue("image_url").jsonObject.getValue("url").jsonPrimitive.content == images.first().dataUrl })
+    }
+
     @Test fun `typed messages carry real images and role based examples in all protocols`() {
         val image = ApiImage("image/jpeg", "aGVsbG8=")
         val messages = listOf(ApiMessage("system", "Translate"), ApiMessage("user", "example"), ApiMessage("assistant", "示例"), ApiMessage("user", "read image", listOf(image)))

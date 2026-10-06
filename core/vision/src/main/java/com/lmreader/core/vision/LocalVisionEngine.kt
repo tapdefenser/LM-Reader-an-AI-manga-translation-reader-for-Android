@@ -55,8 +55,8 @@ internal class LocalVisionSession(context: Context, private val settings: Vision
                 for (raw in decodeSeg(model.detections,model.anchorCount,model.inputWidth,model.inputHeight,threshold)) {
                     val bounds = transform.rect(raw.bounds).offset(tile.x.toFloat(),tile.y.toFloat())
                     if (bounds.width <= 1 || bounds.height <= 1) continue
-                    val contours = if (raw.classId == 0) segContours(raw,model.prototypes,model.protoWidth,model.protoHeight,transform)
-                        .map { points -> points.map { PixelPoint(it.x+tile.x,it.y+tile.y) } } else emptyList()
+                    val contours = segContours(raw,model.prototypes,model.protoWidth,model.protoHeight,transform)
+                        .map { points -> points.map { PixelPoint(it.x+tile.x,it.y+tile.y) } }
                     if (contours.size > 1) contours.forEach { contour ->
                         regions += SegRegion("", RegionKind.BUBBLE, contourBounds(contour), raw.confidence, contour)
                     } else regions += SegRegion("",if (raw.classId == 0) RegionKind.BUBBLE else RegionKind.FREE_TEXT,
@@ -70,49 +70,49 @@ internal class LocalVisionSession(context: Context, private val settings: Vision
             (System.nanoTime()-started)/1_000_000,model.backend)
     }
 
-    /** regions=null 识别整页；指定区域时输出仍是整页坐标，可直接承接 Seg 积木的 bounds。 */
+    suspend fun detectTextLines(imageId: String, image: Bitmap, regions: List<PixelRect>? = null,
+        vertical: Boolean = true, progress: (VisionProgress) -> Unit = {}): List<DetectedTextLine> = execute("文字检测") {
+        validate(imageId,image)
+        val areas = checkedAreas(image,regions)
+        detectTextBoxes(image,areas,vertical,.45f,progress).map { (bounds,confidence) -> DetectedTextLine(bounds,confidence) }
+    }
+
+    /** Small text loses strokes at page scale. Refine its lines inside SEG, in the OCR pool. */
+    suspend fun detectSegTextLines(seg: SegResult, image: Bitmap,
+        scoreThreshold: Float = .45f,
+        progress: (VisionProgress) -> Unit = {}): List<DetectedTextLine> = execute("文字检测") {
+        validate(seg.imageId, image)
+        require(scoreThreshold.isFinite() && scoreThreshold in 0f..1f)
+        val page = detectTextBoxes(image, checkedAreas(image, null), true, scoreThreshold, progress)
+            .map { (bounds, confidence) -> DetectedTextLine(bounds, confidence) }
+        val regions = textRefinementRegions(seg.copy(textLines = page))
+        val refined = ArrayList<DetectedTextLine>()
+        for (region in regions) {
+            coroutineContext.ensureActive()
+            cropSegRegion(image, region, seg.regions).use { crop ->
+                val local = detectTextBoxes(crop.bitmap, checkedAreas(crop.bitmap, null), true, scoreThreshold, progress)
+                    .map { (bounds, confidence) -> DetectedTextLine(bounds.offset(crop.left.toFloat(), crop.top.toFloat()), confidence) }
+                refined += selectRegionTextLines(region, seg.regions, local)
+            }
+        }
+        val lines = keepCompleteRegions(page + refined, { it.bounds }, { it.confidence })
+        require(lines.size <= 1000) { "文字行过多，请分批处理图片" }
+        lines
+    }
+
+    /** The OCR workflow step only recognizes the lines supplied by SEG. */
     suspend fun recognize(imageId: String, image: Bitmap, language: LocalOcrLanguage,
-                          regions: List<PixelRect>? = null, progress: (VisionProgress) -> Unit = {}): LocalOcrResult = execute("本地 OCR") {
+                          regions: List<PixelRect>?, textLines: List<DetectedTextLine>,
+                          progress: (VisionProgress) -> Unit = {}): LocalOcrResult = execute("本地 OCR") {
         validate(imageId,image)
         val started = System.nanoTime()
         progress(VisionProgress("加载 OCR 模型",0,1))
-        val detector = detector ?: PaddleDetector(models,settings.ocrBackend,report).also { detector = it; publishResources() }
         val recognizer = if (language == LocalOcrLanguage.KOREAN) koreanRecognizer ?: PaddleRecognizer(models,true,settings.ocrBackend,report).also { koreanRecognizer = it; publishResources() }
             else recognizer ?: PaddleRecognizer(models,false,settings.ocrBackend,report).also { recognizer = it; publishResources() }
         val cjk = language in setOf(LocalOcrLanguage.JAPANESE,LocalOcrLanguage.CHINESE_SIMPLIFIED,LocalOcrLanguage.CHINESE_TRADITIONAL)
-        val areas = regions ?: listOf(PixelRect(0f,0f,image.width.toFloat(),image.height.toFloat()))
-        require(areas.size <= 300 && areas.all { it.left >= 0 && it.top >= 0 && it.right <= image.width && it.bottom <= image.height && it.area > 0 }) {
-            "OCR 区域必须在当前图片内，最多 300 个"
-        }
-        val candidates = ArrayList<Pair<PixelRect,Float>>()
-        for ((areaIndex,area) in areas.withIndex()) {
-            val areaImage = crop(image,area)
-            val areaX = kotlin.math.floor(area.left); val areaY = kotlin.math.floor(area.top)
-            try {
-                val tiles = planTiles(areaImage.width,areaImage.height)
-                for ((index,tile) in tiles.withIndex()) {
-                    coroutineContext.ensureActive(); progress(VisionProgress("文字行检测 ${areaIndex+1}/${areas.size}",index,tiles.size))
-                    val source = Bitmap.createBitmap(areaImage,tile.x,tile.y,tile.width,tile.height)
-                    try {
-                        var boxes = detector.detect(source)
-                        if (cjk) {
-                            coroutineContext.ensureActive()
-                            val rotated = rotateCounterClockwise(source)
-                            val vertical = try {
-                                detector.detect(rotated).map { (r,score) ->
-                                    PixelRect(source.width-r.bottom,r.left,source.width-r.top,r.right) to score
-                                }.filter { it.first.height > it.first.width*1.5f }
-                            } finally { if (rotated !== source) rotated.recycle() }
-                            // 旋转后完整竖行优先于原检测产生的单字/短段。
-                            boxes = boxes.filter { b -> vertical.none { overlap(it.first,b.first)/b.first.area > .65f } } + vertical
-                        }
-                        boxes.forEach { (b,score) -> candidates += b.offset(tile.x+areaX,tile.y+areaY) to score }
-                    } finally { if (source !== areaImage) source.recycle() }
-                }
-            } finally { if (areaImage !== image) areaImage.recycle() }
-        }
-        val boxes = keepCompleteRegions(candidates,{ it.first },{ it.second })
-        require(boxes.size <= 1000) { "文字行过多，请分批处理图片" }
+        checkedAreas(image,regions)
+        val boxes = textLines.map { it.bounds to it.confidence }
+        require(boxes.size <= 1000 && boxes.all { (bounds, _) -> bounds.area > 0 && bounds.left >= 0 && bounds.top >= 0 && bounds.right <= image.width && bounds.bottom <= image.height }) { "文字行必须在当前图片内，最多 1000 个" }
         val lines = ArrayList<OcrLine>()
         for ((index,box) in boxes.withIndex()) {
             coroutineContext.ensureActive(); progress(VisionProgress("文字识别",index,boxes.size))
@@ -136,6 +136,46 @@ internal class LocalVisionSession(context: Context, private val settings: Vision
             (System.nanoTime()-started)/1_000_000)
     }
 
+    /** SEG detects text lines once; workflow OCR receives those boxes and only recognizes text. */
+    private suspend fun detectTextBoxes(image: Bitmap, areas: List<PixelRect>, vertical: Boolean, scoreThreshold: Float,
+        progress: (VisionProgress) -> Unit): List<Pair<PixelRect, Float>> {
+        progress(VisionProgress("加载文字检测模型",0,1))
+        val model = detector ?: PaddleDetector(models,settings.ocrBackend,report).also { detector = it; publishResources() }
+        val candidates = ArrayList<Pair<PixelRect,Float>>()
+        for ((areaIndex,area) in areas.withIndex()) {
+            val areaImage = crop(image,area)
+            val areaX = kotlin.math.floor(area.left); val areaY = kotlin.math.floor(area.top)
+            try {
+                val tiles = planTiles(areaImage.width,areaImage.height)
+                for ((index,tile) in tiles.withIndex()) {
+                    coroutineContext.ensureActive(); progress(VisionProgress("文字行检测 ${areaIndex+1}/${areas.size}",index,tiles.size))
+                    val source = Bitmap.createBitmap(areaImage,tile.x,tile.y,tile.width,tile.height)
+                    try {
+                        var boxes = model.detect(source,scoreThreshold)
+                        if (vertical) {
+                            coroutineContext.ensureActive()
+                            val rotated = rotateCounterClockwise(source)
+                            val upright = try {
+                                model.detect(rotated,scoreThreshold).map { (r,score) ->
+                                    PixelRect(source.width-r.bottom,r.left,source.width-r.top,r.right) to score
+                                }.filter { it.first.height > it.first.width*1.5f }
+                            } finally { if (rotated !== source) rotated.recycle() }
+                            boxes = boxes.filter { b -> upright.none { overlap(it.first,b.first)/b.first.area > .65f } } + upright
+                        }
+                        boxes.forEach { (b,score) ->
+                            // DB can predict a full-page box from letterbox padding on a blank image.
+                            // A uniformly colored crop has no text; test original pixels before adding it.
+                            if (hasPixelVariation(source,b)) candidates += b.offset(tile.x+areaX,tile.y+areaY) to score
+                        }
+                    } finally { if (source !== areaImage) source.recycle() }
+                }
+            } finally { if (areaImage !== image) areaImage.recycle() }
+        }
+        val boxes = keepCompleteRegions(candidates,{ it.first },{ it.second })
+        require(boxes.size <= 1000) { "文字行过多，请分批处理图片" }
+        return boxes
+    }
+
     /** 可在工作流空闲或内存紧张时释放；下次调用重新加载，不关闭进程共享 OrtEnvironment。 */
     suspend fun releaseModels() = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -146,10 +186,10 @@ internal class LocalVisionSession(context: Context, private val settings: Vision
             publishResources()
         }
     }
-    suspend fun retainModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>) = withContext(Dispatchers.IO) {
+    suspend fun retainModels(needSeg: Boolean, needTextDetection: Boolean, languages: Set<LocalOcrLanguage>) = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (!needSeg) { segmenter?.close(); segmenter = null }
-            if (languages.isEmpty()) { detector?.close(); detector = null }
+            if (!needTextDetection) { detector?.close(); detector = null }
             if (languages.none { it != LocalOcrLanguage.KOREAN }) { recognizer?.close(); recognizer = null }
             if (LocalOcrLanguage.KOREAN !in languages) { koreanRecognizer?.close(); koreanRecognizer = null }
             publishResources()
@@ -164,6 +204,26 @@ internal class LocalVisionSession(context: Context, private val settings: Vision
             catch (failure: LinkageError) { throw LocalVisionException("$stage 的本地运行库不可用：${failure.message}",failure) }
             finally { publishResources() }
         }
+    }
+    private fun checkedAreas(image: Bitmap, regions: List<PixelRect>?): List<PixelRect> {
+        val areas = regions ?: listOf(PixelRect(0f,0f,image.width.toFloat(),image.height.toFloat()))
+        require(areas.size <= 300 && areas.all { it.left >= 0 && it.top >= 0 && it.right <= image.width && it.bottom <= image.height && it.area > 0 }) {
+            "文字区域必须在当前图片内，最多 300 个"
+        }
+        return areas
+    }
+    private fun hasPixelVariation(image: Bitmap, bounds: PixelRect): Boolean {
+        val left = kotlin.math.floor(bounds.left).toInt().coerceIn(0,image.width-1)
+        val top = kotlin.math.floor(bounds.top).toInt().coerceIn(0,image.height-1)
+        val right = kotlin.math.ceil(bounds.right).toInt().coerceIn(left+1,image.width)
+        val bottom = kotlin.math.ceil(bounds.bottom).toInt().coerceIn(top+1,image.height)
+        val row = IntArray(right-left)
+        val first = image.getPixel(left,top) and 0xffffff
+        for(y in top until bottom) {
+            image.getPixels(row,0,row.size,left,y,row.size,1)
+            if(row.any { (it and 0xffffff) != first }) return true
+        }
+        return false
     }
     private fun validate(imageId: String, image: Bitmap) {
         require(imageId.isNotBlank() && !image.isRecycled && image.width > 1 && image.height > 1)

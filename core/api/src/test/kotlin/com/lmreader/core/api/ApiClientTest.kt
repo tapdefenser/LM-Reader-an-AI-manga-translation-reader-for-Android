@@ -19,11 +19,13 @@ class ApiClientTest {
             override suspend fun finish(id: String, outcome: ApiRequestOutcome) { outcomes += outcome }
         }
         val calls = AtomicInteger()
+        val capture = ApiTraceCapture()
         Server { e -> if(calls.incrementAndGet() == 1) e.reply(503, "{}") else e.reply(200, success, "text/event-stream") }.use { server ->
-            withContext(ApiTraceContext("manga", "合成漫画", "第7章", "第1页", "流式翻译")) {
+            withContext(ApiTraceContext("manga", "合成漫画", "第7章", "第1页", "流式翻译") + capture) {
                 ApiClient(pause = {}, journal = journal).stream(server.profile(), listOf(ApiMessage("user", "translate", listOf(ApiImage("image/jpeg", "AAAA".repeat(100)))))).toList()
             }
             assertEquals(listOf(1, 2), requests.map { it.attempt })
+            assertEquals("2", capture.requestId.get())
             assertEquals(listOf("FAILED", "SUCCESS"), outcomes.map { it.status })
             assertEquals("合成漫画", requests.first().context.mangaName)
             assertFalse(requests.first().request.contains("AAAA"))

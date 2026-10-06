@@ -44,7 +44,7 @@ object DatabaseProvider {
         database = database,
         sources = SourceRepositoryImpl(database, database.sourceDao()),
         mangas = MangaRepositoryImpl(database, database.mangaDao(), chapterOrder),
-        translations = TranslationRepositoryImpl(database.translationDao()),
+        translations = TranslationRepositoryImpl(database),
         shelf = ShelfRepositoryImpl(database),
         readingProgress = ReadingProgressRepositoryImpl(database.readingProgressDao()),
     )

@@ -13,6 +13,20 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ReaderPageArtifactStoreTest {
+    @Test fun maskExpansionSurvivesReloadAndOldTranslationsUseDefault() {
+        val saved=store.save("page","source-hash",LocalTranslationLanguage.ENGLISH,
+            LocalTranslationLanguage.CHINESE_SIMPLIFIED,200,300,regions("page"),emptyList(),0,
+            BubbleRenderSettings(freeTextMaskExpansionPercent=12))
+        assertEquals(12,store.load("page","source-hash")!!.renderSettings.freeTextMaskExpansionPercent)
+        val envelope=JSONObject(saved.dataFile.readText())
+        val document=JSONObject(envelope.getString("document"))
+        document.getJSONObject("render").remove("freeTextMaskExpansion")
+        val encoded=document.toString()
+        saved.dataFile.writeText(envelope.put("document",encoded).put("sha256",ReaderPageArtifactStore.sha256(encoded.toByteArray(Charsets.UTF_8))).toString())
+        val old=store.load("page","source-hash")!!
+        assertEquals(6,old.renderSettings.freeTextMaskExpansionPercent)
+        assertEquals(saved.regions,old.regions)
+    }
     private val context=ApplicationProvider.getApplicationContext<android.content.Context>()
     private val root=File(context.cacheDir,"artifact-fixture-"+UUID.randomUUID())
     private val store=ReaderPageArtifactStore(root)

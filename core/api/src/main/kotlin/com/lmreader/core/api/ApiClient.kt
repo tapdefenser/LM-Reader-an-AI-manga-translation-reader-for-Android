@@ -195,7 +195,8 @@ class ApiClient(
         val info = ApiRequestInfo(currentCoroutineContext()[ApiTraceContext] ?: ApiTraceContext(stepName = if(method == "GET") "模型列表" else "API 测试"),
             profile.name, profile.model, endpoint.newBuilder().query(null).fragment(null).username("").password("").build().toString(),
             method, profile.format.name, attempt, ApiLogPayload.sanitize(body))
-        return try { sink.begin(info) } catch(e: CancellationException) { throw e } catch(_: Exception) { null }
+        return try { sink.begin(info).also { currentCoroutineContext()[ApiTraceCapture]?.requestId?.set(it) } }
+        catch(e: CancellationException) { throw e } catch(_: Exception) { null }
     }
     private suspend fun finishTrace(id: String?, outcome: ApiRequestOutcome) {
         if(id == null) return

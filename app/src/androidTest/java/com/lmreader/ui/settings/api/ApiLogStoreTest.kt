@@ -9,6 +9,24 @@ import java.io.File
 import java.util.UUID
 
 class ApiLogStoreTest {
+    @Test fun outputFailurePreservesResponseAndSurvivesLateTransportFinish() = runBlocking {
+        val cache=InstrumentationRegistry.getInstrumentation().targetContext.cacheDir.canonicalFile
+        val root=File(cache,"api-log-fixture-${UUID.randomUUID()}")
+        try {
+            val store=ApiLogStore(root)
+            val id=store.begin(ApiRequestInfo(ApiTraceContext("fixture","Fixture",stepName="单页重译 · API 请求"),
+                "fixture","model","http://127.0.0.1/v1/chat/completions","POST","CHAT",1,"{}"))
+            store.recordOutputFailure(id,"Invalid JSON; image count: 1")
+            store.finish(id,ApiRequestOutcome("SUCCESS","Please upload an image.",httpCode=200))
+            val restored=checkNotNull(ApiLogStore(root).detail(id))
+            assertEquals("FAILED",restored.outcome.status)
+            assertEquals(200,restored.outcome.httpCode)
+            assertEquals("Please upload an image.",restored.outcome.response)
+            assertTrue(restored.outcome.error.contains("Invalid JSON"))
+        } finally {
+            if(root.canonicalFile.parentFile==cache && root.name.startsWith("api-log-fixture-")) root.deleteRecursively()
+        }
+    }
     @Test fun privateJournalRestoresBodiesAndMarksUnfinishedRequestsInterrupted() = runBlocking {
         val cache = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir.canonicalFile
         val root = File(cache, "api-log-fixture-${UUID.randomUUID()}")

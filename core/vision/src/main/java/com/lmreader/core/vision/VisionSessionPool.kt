@@ -34,15 +34,30 @@ class LocalVisionEngine(context: Context, private val settings: () -> VisionExec
         return minOf((cores / 2).coerceAtLeast(1), memorySlots.coerceAtLeast(1), heapSlots.coerceAtLeast(1), if (seg) 2 else 4)
     }
     suspend fun segment(imageId: String, image: Bitmap, threshold: Float = .35f,
-        progress: (VisionProgress) -> Unit = {}): SegResult =
-        segPool.use(segConcurrency, settings()) { it.segment(imageId, image, threshold, progress) }
+        textDetectionThreshold: Float = .45f,
+        progress: (VisionProgress) -> Unit = {}): SegResult {
+        val started = System.nanoTime()
+        val seg = segPool.use(segConcurrency, settings()) { it.segment(imageId, image, threshold, progress) }
+        // Detection is a SEG function but consumes the shared OCR concurrency and backend.
+        // Release the segmentation slot before taking an OCR slot so stages never hold both.
+        val lines = ocrPool.use(ocrConcurrency, settings()) { it.detectSegTextLines(seg, image, textDetectionThreshold, progress) }
+        val result = supplementFreeTextRegions(seg.copy(textLines = lines))
+        progress(VisionProgress("SEG 完成",1,1))
+        return result.copy(elapsedMillis = (System.nanoTime() - started) / 1_000_000)
+    }
     suspend fun recognize(imageId: String, image: Bitmap, language: LocalOcrLanguage,
-        regions: List<PixelRect>? = null, progress: (VisionProgress) -> Unit = {}): LocalOcrResult =
-        ocrPool.use(ocrConcurrency, settings()) { it.recognize(imageId, image, language, regions, progress) }
+        regions: List<PixelRect>? = null, textLines: List<DetectedTextLine>? = null, progress: (VisionProgress) -> Unit = {}): LocalOcrResult {
+        return ocrPool.use(ocrConcurrency, settings()) { session ->
+            val lines = textLines ?: session.detectTextLines(imageId, image, regions,
+                language in setOf(LocalOcrLanguage.JAPANESE, LocalOcrLanguage.CHINESE_SIMPLIFIED, LocalOcrLanguage.CHINESE_TRADITIONAL), progress)
+            session.recognize(imageId, image, language, regions, lines, progress)
+        }
+    }
     suspend fun releaseModels() { segPool.release(); ocrPool.release() }
     suspend fun retainModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>) {
-        segPool.retain(if (needSeg) segConcurrency else 0, needSeg, emptySet())
-        ocrPool.retain(if (languages.isNotEmpty()) ocrConcurrency else 0, false, languages)
+        segPool.retain(if (needSeg) segConcurrency else 0, needSeg, false, emptySet())
+        val needDetection = needSeg || languages.isNotEmpty()
+        ocrPool.retain(if (needDetection) ocrConcurrency else 0, false, needDetection, languages)
     }
 }
 
@@ -99,11 +114,11 @@ private class VisionSessionPool(private val context: Context, private val name: 
         }
         retainedSettings = null
     }
-    suspend fun retain(limit: Int, needSeg: Boolean, languages: Set<LocalOcrLanguage>) = configuration.withLock {
+    suspend fun retain(limit: Int, needSeg: Boolean, needTextDetection: Boolean, languages: Set<LocalOcrLanguage>) = configuration.withLock {
         slots.forEachIndexed { index, slot ->
             slot.mutex.withLock {
                 if (index >= limit) { slot.session?.releaseModels(); slot.session = null; slot.settings = null }
-                else slot.session?.retainModels(needSeg, languages)
+                else slot.session?.retainModels(needSeg, needTextDetection, languages)
             }
         }
         if (slots.all { it.session == null }) retainedSettings = null

@@ -44,4 +44,21 @@ class TaskServiceControllerTest {
         try { controller.acquire() } catch (_: Exception) { refused = true }
         assertTrue(refused); assertFalse(controller.canStart()); assertEquals(0, controller.leases.value); assertNotNull(controller.failure.value)
     }
+    @Test fun notificationResumeRequiresAnAcknowledgedForegroundOwnerAndRecoversAFailedStart() = runBlocking {
+        var starts = 0
+        val controller = TaskServiceController(container) { starts++; throw IllegalStateException("initial denial") }
+        controller.setVisible(true)
+        runCatching { controller.acquire() }
+        controller.setVisible(false)
+        val owner = Any()
+        assertTrue(runCatching { controller.allowNotificationResume(owner) }.isFailure)
+        assertFalse(controller.canStart())
+        controller.serviceReady(owner)
+        controller.allowNotificationResume(owner)
+        val lease = controller.acquire()
+        assertEquals(1, starts); assertTrue(controller.canStart()); assertEquals(1, controller.leases.value)
+        controller.release(lease)
+        assertTrue(controller.stopIfIdle {})
+        assertFalse(controller.canStart())
+    }
 }

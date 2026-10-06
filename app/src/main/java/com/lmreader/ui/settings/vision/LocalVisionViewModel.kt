@@ -12,7 +12,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.util.UUID
 
-internal enum class VisionTestMode(val label: String) { OCR("本地 OCR"), SEG("Seg 气泡分割"), BOTH("Seg + OCR") }
+internal enum class VisionTestMode(val label: String) { OCR("本地 OCR"), SEG("Seg 气泡与文字检测"), BOTH("Seg + OCR") }
 internal data class LocalVisionUiState(
     val image: Bitmap? = null, val imageId: String = "", val imageLabel: String = "",
     val language: LocalOcrLanguage = LocalOcrLanguage.ENGLISH, val mode: VisionTestMode = VisionTestMode.BOTH,
@@ -69,7 +69,7 @@ internal class LocalVisionViewModel(private val engine: LocalVisionEngine, priva
                     ensureActive(); mutable.update { it.copy(segmentation=result) }
                 }
                 if (snapshot.mode != VisionTestMode.SEG) {
-                    val result = engine.recognize(snapshot.imageId,image,snapshot.language,progress=progress)
+                    val result = engine.recognize(snapshot.imageId,image,snapshot.language,textLines=state.value.segmentation?.textLines,progress=progress)
                     ensureActive(); mutable.update { it.copy(ocr=result) }
                 }
             } catch (cancelled: CancellationException) {

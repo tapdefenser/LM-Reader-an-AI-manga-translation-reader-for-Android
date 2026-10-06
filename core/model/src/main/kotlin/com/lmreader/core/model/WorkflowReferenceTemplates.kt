@@ -1,6 +1,6 @@
 package com.lmreader.core.model
 
-/** Editable examples: standard page text, one manga text request, and direct bubble vision. */
+/** Editable examples for page text, bubble vision and one vision request per page. */
 object WorkflowReferenceTemplates {
     private fun declaration(id: String, name: String, type: WorkflowType) = WorkflowNode("new-$id", WorkflowKind.DECLARE, variable = WorkflowVariable(id, name, type))
     private fun prompt(text: String, extra: Map<String, WorkflowRef>) = WorkflowExpression.Template(text, linkedMapOf(
@@ -47,6 +47,28 @@ object WorkflowReferenceTemplates {
             chapter.copy(mode = WorkflowMode.SYNC, children = listOf(page.copy(mode = WorkflowMode.SYNC, children = listOf(apply("apply-manga-page", "manga-translations")))))))))
     }
     fun vision(profileId: String = "") = WorkflowTemplates.visionWithGlossary(profileId)
+
+    fun visionPage(profileId: String = ""): WorkflowProgram {
+        val images = WorkflowType.list(WorkflowType.IMAGE)
+        val translations = WorkflowType.list(WorkflowType.GLOSSARY_ENTRY)
+        val item = WorkflowVariable("page-vision-item", "当前对照", WorkflowType.GLOSSARY_ENTRY)
+        val base = WorkflowTemplates.blank(); val manga = base.rows.single(); val chapter = manga.children.single(); val page = chapter.children.single()
+        val rows = listOf(segmentation(), declaration("page-vision-images", "气泡图片列表", images),
+            WorkflowNode("collect-page-images", WorkflowKind.EACH, label = "按顺序收集本页裁图", mode = WorkflowMode.SYNC,
+                variable = WorkflowVariable(WorkflowSystem.BUBBLE, "气泡", WorkflowType.BUBBLE),
+                inputs = mapOf("items" to WorkflowSystem.ref(WorkflowSystem.PAGE, "bubbles"), "collectValue" to WorkflowSystem.ref(WorkflowSystem.BUBBLE, "image")),
+                collectTo = WorkflowRef("page-vision-images")),
+            declaration("page-vision-translations", "本页翻译列表", translations),
+            WorkflowNode("page-vision-api", WorkflowKind.API_STREAM, label = "整页裁图一次翻译", variable = item,
+                target = WorkflowRef("page-vision-translations"), resultType = translations,
+                inputs = mapOf("profile" to WorkflowExpression.Text(profileId), "images" to WorkflowSystem.ref("page-vision-images"),
+                    "expectedCount" to WorkflowSystem.ref("page-vision-images", "count"),
+                    "prompt" to prompt("附件按顺序提供当前页的 \${图片项数} 张文字区域裁图（气泡或游离文字）。将全部文字从\${源语言}翻译为\${目标语言}，遵守文风：\${文风}。结合整页对话理解人物、语气和指代，已有译名字典：\${译名字典}。只返回一个 JSON 列表，严格按图片顺序返回 \${图片项数} 项，每张图片对应一个对象，字段仅 source、translation，不返回序号或 bubbleId。source 是该区域完整原文，translation 是完整译文；同一区域多行／多块文字合并，不拆成多项。无可辨认文字的图片仍占一项，两个字段均为空字符串，不跳过或编造文字。字符串中的换行、双引号和反斜线必须按 JSON 规则转义，不要说明或 Markdown。", mapOf("图片项数" to WorkflowRef("page-vision-images", listOf("count"))))),
+                children = listOf(WorkflowNode("apply-page-vision-item", WorkflowKind.APPLY_ORDER,
+                    inputs = mapOf("items" to WorkflowSystem.ref(item.id), "index" to WorkflowSystem.ref(WorkflowSystem.STREAM_INDEX))))))
+        val translatedChapter = chapter.copy(mode = WorkflowMode.SYNC, children = listOf(page.copy(children = rows)))
+        return base.copy(rows = listOf(manga.copy(children = listOf(translatedChapter))))
+    }
 
     /** Copying a reference binds every request, including optional glossary extraction. */
     fun bindApi(program: WorkflowProgram, profileId: String): WorkflowProgram {

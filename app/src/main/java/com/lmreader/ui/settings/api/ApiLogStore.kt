@@ -12,7 +12,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
 
-data class ApiLogRecord(val id: String, val started: Long, val ended: Long?, val info: ApiRequestInfo, val outcome: ApiRequestOutcome)
+data class ApiLogRecord(val id: String, val started: Long, val ended: Long?, val info: ApiRequestInfo, val outcome: ApiRequestOutcome,
+    val outputError: String = "")
 
 /** App-private bounded journal. Summary flow carries no request/response bodies. */
 class ApiLogStore(private val root: File) : ApiRequestJournal {
@@ -25,8 +26,16 @@ class ApiLogStore(private val root: File) : ApiRequestJournal {
     } }
     override suspend fun finish(id: String, outcome: ApiRequestOutcome) = withContext(Dispatchers.IO) { mutex.withLock {
         val old = read(id) ?: return@withLock
-        val record = old.copy(ended = System.currentTimeMillis(), outcome = outcome)
+        val record = old.copy(ended = System.currentTimeMillis(), outcome = if(old.outputError.isEmpty()) outcome
+            else outcome.copy(status = "FAILED", error = "输出校验失败：${old.outputError}"))
         write(record); entries.value = entries.value.map { if(it.id == id) summary(record) else it }; prune()
+    } }
+    suspend fun recordOutputFailure(id: String, error: String) = withContext(Dispatchers.IO) { mutex.withLock {
+        val old = read(id) ?: return@withLock
+        val detail = error.take(4096)
+        val record = old.copy(ended = old.ended ?: System.currentTimeMillis(), outputError = detail,
+            outcome = old.outcome.copy(status = "FAILED", error = "输出校验失败：$detail"))
+        write(record); entries.value = entries.value.map { if(it.id == id) summary(record) else it }
     } }
     suspend fun detail(id: String): ApiLogRecord? = withContext(Dispatchers.IO) { mutex.withLock { read(id) } }
     private fun summary(r: ApiLogRecord) = r.copy(info = r.info.copy(request = ""), outcome = r.outcome.copy(response = "", thinking = ""))
@@ -37,7 +46,7 @@ class ApiLogStore(private val root: File) : ApiRequestJournal {
         ApiLogRecord(id, j.getLong("started"), if(j.isNull("ended")) null else j.getLong("ended"), ApiRequestInfo(
             ApiTraceContext(c.getString("mangaId"), c.getString("mangaName"), c.getString("chapterName"), c.getString("pageName"), c.getString("stepName")),
             j.getString("profileName"), j.getString("model"), j.getString("url"), j.getString("method"), j.getString("format"), j.getInt("attempt"), j.getString("request")),
-            ApiRequestOutcome(j.getString("status"), j.getString("response"), j.getString("thinking"), j.getString("error"), if(j.isNull("httpCode")) null else j.getInt("httpCode")))
+            ApiRequestOutcome(j.getString("status"), j.getString("response"), j.getString("thinking"), j.getString("error"), if(j.isNull("httpCode")) null else j.getInt("httpCode")), j.optString("outputError"))
     }.getOrNull()
     private fun write(r: ApiLogRecord) {
         check(root.isDirectory || root.mkdirs())
@@ -47,6 +56,7 @@ class ApiLogStore(private val root: File) : ApiRequestJournal {
             .put("profileName", r.info.profileName).put("model", r.info.model).put("url", r.info.url).put("method", r.info.method).put("format", r.info.format)
             .put("attempt", r.info.attempt).put("request", r.info.request.take(1_000_000)).put("status", o.status)
             .put("response", o.response.take(4_000_000)).put("thinking", o.thinking.take(1_000_000)).put("error", o.error.take(4096)).put("httpCode", o.httpCode ?: JSONObject.NULL)
+            .put("outputError", r.outputError.take(4096))
         val temp = File(root, r.id + ".part")
         try { FileOutputStream(temp).use { it.write(j.toString().toByteArray()); it.fd.sync() }; check(temp.renameTo(file(r.id))) }
         finally { temp.delete() }

@@ -536,6 +536,9 @@ internal class MangaRepositoryImpl(
             bubbleFont = settings.bubbleFont?.name,
             bubbleFontScale = settings.bubbleFontScalePercent,
             bubbleBold = settings.bubbleBold,
+            textDetectionThreshold = settings.textDetectionThreshold,
+            freeTextMaskExpansion = settings.freeTextMaskExpansionPercent,
+            freeTextMergeGapRatio = settings.freeTextMergeGapRatio,
         )
     }
 

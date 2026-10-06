@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -90,8 +91,8 @@ fun LibraryScreen(
     onOpenMenu: () -> Unit,
     onOpenManga: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    viewModel: LibraryViewModel = viewModel(factory = LibraryViewModel.factory(container)),
 ) {
-    val viewModel: LibraryViewModel = viewModel(factory = LibraryViewModel.factory(container))
     val state by viewModel.state.collectAsStateWithLifecycle()
 
     // 封面 URI 需要"来源树 URI + documentId"组合（开发文档 4.1），
@@ -101,6 +102,33 @@ fun LibraryScreen(
     var menuExpanded by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     var searchActive by remember { mutableStateOf(false) }
+    var showCategoryDialog by remember { mutableStateOf(false) }
+
+    if (showCategoryDialog && state.selectionMode) {
+        AlertDialog(
+            onDismissRequest = { showCategoryDialog = false },
+            title = { Text("选择书架分类") },
+            text = {
+                LazyColumn {
+                    items(state.categories, key = { it.categoryId }) { category ->
+                        TextButton(
+                            onClick = {
+                                showCategoryDialog = false
+                                viewModel.addSelectionToShelf(category.categoryId)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(category.name, modifier = Modifier.fillMaxWidth(), localize = false)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showCategoryDialog = false }) { Text("取消") }
+            },
+        )
+    }
 
     val listState = rememberLazyListState()
     val gridState = rememberLazyGridState()
@@ -205,8 +233,7 @@ fun LibraryScreen(
                     loadedCount = state.items.size,
                     onCancel = viewModel::clearSelection,
                     onInvertSelection = viewModel::invertSelection,
-                    onAddToShelf = { viewModel.addSelectionToShelf() },
-                    onRemoveFromShelf = viewModel::removeSelectionFromShelf,
+                    onAddToShelf = { showCategoryDialog = true },
                 )
             } else {
             TopAppBar(
@@ -387,7 +414,7 @@ fun LibraryScreen(
 /**
  * 选择态顶栏（用户要求的长按多选）。
  *
- * 只放与"已选中集合"有关的操作：批量加入/移出书架，以及全选/取消。
+ * 只放与"已选中集合"有关的操作：选择分类加入书架，以及反选/取消。
  * 翻译与导出属于 P3/P4，本步不放按钮——开发文档 17 的完成标准是
  * "不存在仅摆放未接线的核心控件"，放一个点了没反应的翻译按钮比不放更糟。
  */
@@ -399,7 +426,6 @@ private fun SelectionTopBar(
     onCancel: () -> Unit,
     onInvertSelection: () -> Unit,
     onAddToShelf: () -> Unit,
-    onRemoveFromShelf: () -> Unit,
 ) {
     var actionsExpanded by remember { mutableStateOf(false) }
     TopAppBar(
@@ -426,13 +452,6 @@ private fun SelectionTopBar(
                     onClick = {
                         actionsExpanded = false
                         onAddToShelf()
-                    },
-                )
-                DropdownMenuItem(
-                    text = { Text("移出书架") },
-                    onClick = {
-                        actionsExpanded = false
-                        onRemoveFromShelf()
                     },
                 )
             }

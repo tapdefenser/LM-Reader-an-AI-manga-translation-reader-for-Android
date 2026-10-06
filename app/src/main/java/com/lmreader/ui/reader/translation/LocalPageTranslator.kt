@@ -30,6 +30,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
     /** NMT and publication serialize; Seg/OCR and reader loads have independent locks. */
     val pageWriteMutex = Mutex()
     suspend fun segment(pageSource: PageSource, page: ReaderPage, segThreshold: Float,
+        textDetectionThreshold: Float = .45f,
         progress: (PageTranslationProgress) -> Unit = {}): SegmentedPage {
         var returned: SegmentedPage? = null
         try { return withContext(Dispatchers.IO) {
@@ -40,7 +41,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
             progress(PageTranslationProgress(PageTranslationStage.READING))
             val hash = copySource(pageSource, page, input)
             val decoded = decodePageAnalysisImage(context, input).also { image = it }
-            val seg = vision.segment(page.pageId, decoded, segThreshold) {
+            val seg = vision.segment(page.pageId, decoded, segThreshold, textDetectionThreshold) {
                 progress(PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total))
             }
             ensureActive()
@@ -50,15 +51,16 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
     }
     suspend fun recognize(segmented: SegmentedPage, source: LocalTranslationLanguage,
         scope: SegTextScope = SegTextScope.ALL,
+        freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO,
         progress: (PageTranslationProgress) -> Unit = {}): RecognizedPage = withContext(Dispatchers.IO) {
         try {
             progress(PageTranslationProgress(PageTranslationStage.OCR))
-            val regions = selectSegRegions(segmented.seg, scope)
+            val regions = selectSegRegions(segmented.seg, scope, freeTextMergeGapRatio)
             val lines = ArrayList<OcrLine>()
             var elapsed = 0L
             for (region in regions) {
                 val result = vision.recognizeRegion(segmented.page.pageId, segmented.image, ocrLanguage(source),
-                    region, segmented.seg.regions) {
+                    region, segmented.seg.regions, segmented.seg.textLines) {
                     progress(PageTranslationProgress(PageTranslationStage.OCR, it.completed, it.total))
                 }
                 lines += result.lines; elapsed += result.elapsedMillis
@@ -67,7 +69,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
                 ocrLanguage(source), lines.mapIndexed { i, line -> line.copy(id = "${segmented.page.pageId}:ocr:$i") }, elapsed)
             ensureActive()
             RecognizedPage(segmented.page, segmented.hash, segmented.image.width, segmented.image.height,
-                groupPageText(segmented.seg, ocr, scope), segmented.started)
+                groupPageText(segmented.seg, ocr, scope, freeTextMergeGapRatio), segmented.started)
         } finally { segmented.close() }
     }
     /** Caller holds pageWriteMutex, including queue state checks before publication. */
@@ -94,8 +96,9 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
         target: LocalTranslationLanguage, render: BubbleRenderSettings,
         mode: TranslationPageMode = TranslationPageMode.BUBBLE, segThreshold: Float = .35f,
         segTextScope: SegTextScope = SegTextScope.ALL,
+        textDetectionThreshold: Float = .45f,
         progress: (PageTranslationProgress) -> Unit = {}): ReaderPageTranslation {
-        val recognized = recognize(segment(pageSource, page, segThreshold, progress), source, segTextScope, progress)
+        val recognized = recognize(segment(pageSource, page, segThreshold, textDetectionThreshold, progress), source, segTextScope, progress = progress)
         return pageWriteMutex.withLock { translateRecognized(recognized, source, target, render, progress) }
     }
     suspend fun releaseModels() { vision.releaseModels(); translator.releaseModels() }

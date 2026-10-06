@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.lmreader.core.model.LibraryDisplayMode
+import com.lmreader.core.model.Category
 import com.lmreader.core.model.MangaAvailability
 import com.lmreader.core.model.MangaCard
 import com.lmreader.core.model.LibrarySource
@@ -34,6 +35,9 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 图库页（开发文档 8.1、6.4）。
@@ -99,16 +103,18 @@ class LibraryViewModel(
      */
     private var appliedSourceFilter: Set<String> = emptySet()
 
-    /**
-     * 库里当前可见的条目总数（订阅而来）。
-     *
-     * 用途只有一个：扫描结束时判断"分页会话是不是已经过期了"——会话宣告到底、而库里
-     * 比已加载的多，说明这批数据是扫描之前读的（见 init 里的扫描结束处理）。
-     */
-    private var visibleTotal: Int = 0
+    /** Serialize page queries; discard results belonging to a replaced filter/search session. */
+    private val pageLoadMutex = Mutex()
+    private var sessionRevision = 0L
 
     init {
         paging.requestInitial()
+        viewModelScope.launch {
+            shelfRepository.ensureUncategorized()
+            shelfRepository.observeCategories().collect { categories ->
+                _state.update { it.copy(categories = categories) }
+            }
+        }
         viewModelScope.launch {
             preferences.libraryDisplayMode.collect { mode ->
                 _state.update { it.copy(displayMode = mode) }
@@ -144,30 +150,23 @@ class LibraryViewModel(
                 if (paging.hasFreeSlot()) loadMore()
             }
         }
-        // 库里"可见总数"，用于判断分页会话是不是已经过期（见下面的扫描结束处理）。
+        // 新记录可能排到 OFFSET 之前（同名作品也按各自 ID 排序），追加查询会漏掉它。
+        // 扫描结束后从零核对已申请的范围，包括未到底的列表，保留用户的分页额度。
         viewModelScope.launch {
-            mangaRepository.observeVisibleCount(inShelfOnly = false, categoryId = null)
-                .collect { total -> visibleTotal = total }
-        }
-        // 扫描**结束**时，如果会话已经宣告"到底了"而库里其实更多，就重建会话。
-        //
-        // 为什么需要这条：点刷新时列表先按**当时的**库加载一次，几条旧记录会让分页会话
-        // 立刻进入 `exhausted`；随后扫描插入几百条新记录，而 `observeDiscoveryProgress`
-        // 只在"额度还有空位"时补位——已经到底的会话没有空位，于是列表纹丝不动。
-        // 真机/模拟器上的表现就是"点了刷新，扫描条说发现了 311 部，列表还是那 7 项"。
-        //
-        // 只在扫描结束时判一次（不是扫描中）：扫描中列表本来就该边扫边长，反复重建会把
-        // 用户滚了很远的位置打回第一页。
-        viewModelScope.launch {
+            var wasRunning = false
+            var lastFinishedAt: Long? = null
+            var initialized = false
             scanCoordinator.overall
-                .map { it.running }
+                .map { it.running to it.lastFinishedAt }
                 .distinctUntilChanged()
-                .collect { running ->
-                    if (running) return@collect
-                    if (!paging.exhausted) return@collect
-                    if (visibleTotal <= paging.items.size) return@collect
-                    resetSession()
-                    loadMore()
+                .collect { (running, finishedAt) ->
+                    // A short scan can finish between two StateFlow observations.
+                    val finished = !running && (wasRunning ||
+                        (initialized && finishedAt != null && finishedAt != lastFinishedAt))
+                    wasRunning = running
+                    lastFinishedAt = finishedAt
+                    initialized = true
+                    if (finished) reconcileScanResults()
                 }
         }
         // 可见集合**变小**时（扫描完整结束后把"本轮没再发现"的旧卡片标成陈旧），
@@ -284,23 +283,12 @@ class LibraryViewModel(
         }
     }
 
-    fun addSelectionToShelf(categoryId: Long = 0L) {
+    fun addSelectionToShelf(categoryId: Long) {
         val ids = _state.value.selection.toList()
         if (ids.isEmpty()) return
         viewModelScope.launch {
             ids.forEach { shelfRepository.addToShelf(it, categoryId) }
             _state.update { it.copy(selection = emptySet(), hint = "已加入书架：${ids.size} 部") }
-            paging.reset()
-            loadMore()
-        }
-    }
-
-    fun removeSelectionFromShelf() {
-        val ids = _state.value.selection.toList()
-        if (ids.isEmpty()) return
-        viewModelScope.launch {
-            ids.forEach { shelfRepository.removeFromShelf(it) }
-            _state.update { it.copy(selection = emptySet(), hint = "已移出书架：${ids.size} 部") }
             paging.reset()
             loadMore()
         }
@@ -325,6 +313,7 @@ class LibraryViewModel(
      * 队列指向的是**已经不在屏幕上**的卡片，继续取只是白花目录枚举。
      */
     private fun resetSession() {
+        sessionRevision++
         paging.reset()
         coverProbes.clear()
         chapterCounts.clear()
@@ -475,20 +464,13 @@ class LibraryViewModel(
         scanCoordinator.cancelAll()
     }
 
-    /** 长按卡片：加入书架（开发文档 8.2「加入书架」是分类单选弹窗的入口）。 */
-    fun addToShelf(mangaId: String, categoryId: Long = 0L) {
-        viewModelScope.launch {
-            shelfRepository.addToShelf(mangaId, categoryId)
-            loadMore()
-        }
-    }
-
-    private suspend fun loadMore() {
-        if (!paging.needsMore()) return
+    private suspend fun loadMore() = pageLoadMutex.withLock {
+        if (!paging.needsMore()) return@withLock
+        val revision = sessionRevision
         paging.beginLoad()
         _state.update { it.copy(loading = true) }
         try {
-            val query = queryFlow.value.trim()
+            val query = _state.value.appliedQuery.trim()
             val page = if (query.isEmpty()) {
                 // 图源筛选下推到 SQL：只勾一个来源时不必先读回全部行再丢弃。
                 mangaRepository.pageLibrary(
@@ -506,6 +488,7 @@ class LibraryViewModel(
                     sourceFilter = _state.value.effectiveSourceFilter,
                 )
             }
+            if(revision != sessionRevision) return@withLock
             paging.append(
                 PageSlice(items = page.items, nextOffset = page.nextOffset, exhausted = page.exhausted),
                 totalKnown = page.totalKnown,
@@ -519,14 +502,30 @@ class LibraryViewModel(
                     error = null,
                 )
             }
-        } catch (error: Exception) {
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
             // 读缓存失败是可恢复错误：给出原因与重试，而不是显示空列表（开发文档 3）。
-            _state.update {
+            if(revision == sessionRevision) _state.update {
                 it.copy(loading = false, error = error.message ?: "读取本地索引失败")
             }
         } finally {
             paging.endLoad()
         }
+    }
+
+    private suspend fun reconcileScanResults() = pageLoadMutex.withLock {
+        val revision = sessionRevision
+        val current = _state.value
+        val quota = paging.capacity.coerceAtLeast(PAGE_SIZE)
+        try {
+            val page = if(current.appliedQuery.isBlank()) mangaRepository.pageLibrary(0, quota, current.effectiveSourceFilter)
+                else mangaRepository.search(current.appliedQuery.trim(), 0, quota, current.effectiveSourceFilter)
+            if(revision != sessionRevision) return@withLock
+            paging.replaceWindow(PageSlice(page.items, page.nextOffset, page.exhausted), page.totalKnown)
+            _state.update { it.copy(items = paging.items.toList(), exhausted = paging.exhausted,
+                discoveredCount = paging.items.size, loading = false, error = null) }
+        } catch(cancelled: CancellationException) { throw cancelled }
+        catch(error: Exception) { if(revision == sessionRevision) _state.update { it.copy(error = error.message ?: "读取本地索引失败") } }
     }
 
     companion object {
@@ -590,6 +589,7 @@ data class LibraryUiState(
     // ---- 长按多选 ----
     /** 选中的 mangaId 集合；按 ID 存，滚动与加载更多都不会错位。 */
     val selection: Set<String> = emptySet(),
+    val categories: List<Category> = emptyList(),
     val hint: String? = null,
 ) {
     /** 图源筛选栏的来源列表（只有一张表）。 */

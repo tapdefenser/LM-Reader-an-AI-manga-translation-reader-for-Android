@@ -14,7 +14,6 @@ import com.lmreader.core.model.ReadingMode
 import com.lmreader.core.model.ReadingProgress
 import com.lmreader.core.model.ReadingProgressRepository
 import com.lmreader.core.model.TapAction
-import com.lmreader.core.model.withMangaOverride
 import com.lmreader.core.storage.reader.PageSource
 import com.lmreader.core.storage.reader.PageSourceFactory
 import com.lmreader.core.storage.reader.PageSourceOpenResult
@@ -86,10 +85,6 @@ class ReaderViewModel(
     private var savedProgress: ReadingProgress? = null
     private val progressSaveMutex = Mutex()
 
-    /** 这部漫画的阅读覆盖；每次设置流发射都要用它重新叠加。 */
-    private var mangaModeOverride: ReadingMode? = null
-    private var mangaOrientationOverride: ReaderOrientation? = null
-
     /** 已安排的章节加载任务，按章节 ID 保存。 */
     private val loadJobs = HashMap<String, Job>()
 
@@ -113,14 +108,13 @@ class ReaderViewModel(
     init {
         viewModelScope.launch {
             readerPreferences.settings.collect { global ->
-                val merged = global.withMangaOverride(mangaModeOverride, mangaOrientationOverride)
                 val previous = _state.value.settings
-                _state.update { it.copy(settings = merged) }
+                _state.update { it.copy(settings = global) }
                 // 过渡页开关改了要重组列表；预载页数改了要重算预取；
                 // 缓存章节数改小了要立刻淘汰（改大了下次重建自然会带上更多章）。
-                if (previous.showChapterTransitions != merged.showChapterTransitions ||
-                    previous.preloadPages != merged.preloadPages ||
-                    previous.cachedChaptersPerSide != merged.cachedChaptersPerSide
+                if (previous.showChapterTransitions != global.showChapterTransitions ||
+                    previous.preloadPages != global.preloadPages ||
+                    previous.cachedChaptersPerSide != global.cachedChaptersPerSide
                 ) {
                     rebuild()
                 }
@@ -137,17 +131,9 @@ class ReaderViewModel(
                     ?: error("漫画或来源已不存在")
                 if (target.chapters.isEmpty()) error("这部漫画还没有可读章节")
                 savedProgress = progressRepository.get(mangaId)
-                mangaModeOverride = target.manga.readerModeOverride
-                mangaOrientationOverride = target.manga.readerOrientationOverride
-                val merged = readerPreferences.settings.first()
-                    .withMangaOverride(mangaModeOverride, mangaOrientationOverride)
-                _state.update {
-                    it.copy(
-                        settings = merged,
-                        mangaModeOverride = mangaModeOverride,
-                        mangaOrientationOverride = mangaOrientationOverride,
-                    )
-                }
+                // 旧版漫画覆盖列保留以兼容备份，但阅读器始终使用全局偏好。
+                val global = readerPreferences.settings.first()
+                _state.update { it.copy(settings = global) }
                 val desired = requestedChapterId.takeUnless { it == RESUME_CHAPTER }
                     ?: savedProgress?.chapterId
                 val index = target.chapters.indexOfFirst { it.chapterId == desired }
@@ -835,56 +821,16 @@ class ReaderViewModel(
 
     // ------------------------------------------------------------ 设置
 
-    /**
-     * 用户改了阅读模式；写的是**这部漫画的覆盖**而不是全局默认。
-     */
+    /** 阅读中修改模式同样写入全局偏好，其他漫画与设置页立即共享。 */
     fun setReadingMode(mode: ReadingMode) {
-        viewModelScope.launch {
-            mangaModeOverride = mode
-            mangaRepository.updateReaderOverrides(
-                mangaId = mangaId,
-                mode = mode,
-                orientation = mangaOrientationOverride,
-            )
-            _state.update {
-                it.copy(
-                    settings = it.settings.withMangaOverride(mode, mangaOrientationOverride),
-                    mangaModeOverride = mode,
-                )
-            }
-        }
+        updateGlobalSettings { it.copy(readingMode = mode) }
     }
 
-    /** 清除阅读模式覆盖，回到全局默认。 */
-    fun clearReadingModeOverride() {
-        viewModelScope.launch {
-            mangaModeOverride = null
-            mangaRepository.updateReaderOverrides(mangaId, null, mangaOrientationOverride)
-            val global = readerPreferences.settings.first()
-            _state.update {
-                it.copy(
-                    settings = global.withMangaOverride(null, mangaOrientationOverride),
-                    mangaModeOverride = null,
-                )
-            }
-        }
+    fun setOrientation(orientation: ReaderOrientation) {
+        updateGlobalSettings { it.copy(orientation = orientation) }
     }
 
-    /** 设置这部漫画的屏幕方向覆盖；null 表示清除覆盖。 */
-    fun setOrientationOverride(orientation: ReaderOrientation?) {
-        viewModelScope.launch {
-            mangaOrientationOverride = orientation
-            mangaRepository.updateReaderOverrides(mangaId, mangaModeOverride, orientation)
-            _state.update {
-                it.copy(
-                    settings = it.settings.withMangaOverride(mangaModeOverride, orientation),
-                    mangaOrientationOverride = orientation,
-                )
-            }
-        }
-    }
-
-    /** 修改**全局**阅读设置（设置界面的"通用"与"自定义滤镜"两页）。 */
+    /** 所有阅读设置统一保存在全局 DataStore。 */
     fun updateGlobalSettings(transform: (ReaderSettings) -> ReaderSettings) {
         viewModelScope.launch { readerPreferences.update(transform) }
     }
@@ -1002,10 +948,6 @@ data class ReaderUiState(
     /** 已探测到的条带页高（dp），键为页 ID。 */
     val pageHeights: Map<String, Int> = emptyMap(),
     val settings: ReaderSettings = ReaderSettings(),
-    /** 这部漫画的阅读模式覆盖；null 表示跟随全局默认。 */
-    val mangaModeOverride: ReadingMode? = null,
-    /** 这部漫画的屏幕方向覆盖；null 表示跟随全局默认。 */
-    val mangaOrientationOverride: ReaderOrientation? = null,
     val error: String? = null,
 ) {
     /** 当前章在整部里的下标；用于「上一章 / 下一章」按钮的可用性。 */

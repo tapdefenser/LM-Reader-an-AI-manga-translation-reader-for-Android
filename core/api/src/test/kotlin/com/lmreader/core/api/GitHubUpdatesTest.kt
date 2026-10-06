@@ -17,6 +17,32 @@ import org.junit.Before
 import org.junit.Test
 
 class GitHubUpdatesTest {
+    @Test fun notesAndOnlyUploadedApksFromOurReleaseAreOffered() = runBlocking {
+        val name = "LM-Reader-v0.2.0-64bit.apk"
+        val url = "${ProjectLinks.RELEASES}/download/v0.2.0/$name"
+        val digest = "a".repeat(64)
+        server.enqueue(MockResponse().setBody("""{"tag_name":"v0.2.0","body":"修复游离文字\n保留段落","assets":[
+            {"name":"$name","state":"uploaded","size":1234,"digest":"sha256:$digest","browser_download_url":"$url"},
+            {"name":"LM-Reader-evil.apk","state":"uploaded","size":1234,"browser_download_url":"https://example.invalid/evil.apk"},
+            {"name":"LM-Reader-pending.apk","state":"new","size":1234,"browser_download_url":"${ProjectLinks.RELEASES}/download/v0.2.0/LM-Reader-pending.apk"},
+            {"name":"LICENSES.zip","state":"uploaded","size":1234,"browser_download_url":"$url"}
+        ]}"""))
+        val result = updates.check("0.1.4") as UpdateStatus.Release
+        assertEquals("修复游离文字\n保留段落", result.notes)
+        assertEquals(listOf(ReleaseApk(name, url, 1234, digest)), result.apks)
+        assertEquals(name, result.apkFor(listOf("arm64-v8a"))?.name)
+        assertEquals(name, result.apkFor(listOf("x86_64"))?.name)
+        assertNull(result.apkFor(listOf("armeabi-v7a")))
+    }
+
+    @Test fun architectureSpecificReleaseUsesDevicesPreferredAbi() {
+        val arm = ReleaseApk("LM-Reader-arm64-v8a.apk", "unused", 1)
+        val x86 = ReleaseApk("LM-Reader-x86_64.apk", "unused", 1)
+        val result = UpdateStatus.Release("v0.2.0", "unused", true, apks = listOf(x86, arm))
+        assertEquals(arm, result.apkFor(listOf("arm64-v8a", "armeabi-v7a")))
+        assertEquals(x86, result.apkFor(listOf("x86_64", "x86")))
+        assertNull(result.apkFor(listOf("armeabi-v7a")))
+    }
     private lateinit var server: MockWebServer
     private lateinit var updates: GitHubUpdates
     @Before fun startServer() {

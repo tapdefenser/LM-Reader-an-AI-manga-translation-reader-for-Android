@@ -11,12 +11,12 @@ object WorkflowLabels {
         WorkflowKind.APPEND -> "+="; WorkflowKind.MERGE_LIST -> "合并列表"; WorkflowKind.REPLACE -> "字典匹配替换"
         WorkflowKind.MESSAGE -> "新增上下文"; WorkflowKind.MERGE_GLOSSARY -> "新增译名（保留已有）"; WorkflowKind.RETURN -> "旧版返回结果"
     }
-    fun type(type: WorkflowType): String = when (type.kind) {
+    fun type(type: WorkflowType): String = "<" + when (type.kind) {
         WorkflowDataKind.TEXT -> "文本"; WorkflowDataKind.NUMBER -> "数字"; WorkflowDataKind.BOOLEAN -> "布尔"
         WorkflowDataKind.IMAGE -> "图片"; WorkflowDataKind.BUBBLE -> "气泡"; WorkflowDataKind.CONTEXT -> "上下文"
-        WorkflowDataKind.LIST -> "列表〈${type.element?.let(::type) ?: "?"}〉"
+        WorkflowDataKind.LIST -> "列表${type.element?.let(::type) ?: "<?>"}"
         WorkflowDataKind.RECORD -> when(type) { WorkflowType.TRANSLATION -> "气泡对照"; WorkflowType.PAGE_RECORD -> "页翻译记录"; WorkflowType.GLOSSARY_ENTRY -> "译名条目"; else -> "自定义记录" }; WorkflowDataKind.DICTIONARY -> "字典"
-    }
+    } + ">"
     fun field(key: String) = when (key) {
         "id" -> "ID"; "name" -> "名称"; "index" -> "序号"; "number" -> "页码"; "image" -> "图片"
         "source" -> "原文"; "translation" -> "译文"; "bubbles" -> "译文气泡列表"; "records" -> "翻译记录"

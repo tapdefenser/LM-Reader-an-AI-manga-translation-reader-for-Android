@@ -13,6 +13,37 @@ import org.junit.Test
  */
 class PagingStateTest {
 
+    @Test fun scanFinishingReconcilesInsertBeforeOffsetAndKeepsDistinctSameTitles() {
+        data class Card(val id: String, val title: String)
+        val paging = PagingState<Card>(idOf = { it.id })
+        val old = Card("kanmanha/abc", "abc")
+        val inserted = Card("mangalot/abc", "abc")
+        paging.requestInitial()
+        paging.append(PageSlice(listOf(old), 1, true), 1)
+        paging.replaceWindow(PageSlice(listOf(inserted, old), 2, true), 2)
+        assertEquals(listOf(inserted, old), paging.items)
+        assertEquals(30, paging.capacity)
+        assertEquals(2, paging.nextOffset)
+        assertEquals(2, paging.totalKnown)
+    }
+
+    @Test fun reconciliationKeepsScrolledQuotaAndTheCorrectNextOffset() {
+        val paging = state()
+        paging.requestInitial()
+        paging.append(page(1..30), 100)
+        paging.requestNextBatch()
+        paging.append(page(31..60), 100)
+        val reordered = listOf("new") + (1..59).map { "m$it" }
+        paging.replaceWindow(PageSlice(reordered, 60, false), 101)
+        assertEquals(60, paging.capacity)
+        assertEquals(reordered, paging.items)
+        paging.requestNextBatch()
+        paging.append(PageSlice((60..89).map { "m$it" }, 90, false), 101)
+        assertEquals(90, paging.items.size)
+        assertEquals(90, paging.capacity)
+        assertEquals(90, paging.items.map { it }.distinct().size)
+    }
+
     private fun state() = PagingState<String>(idOf = { it })
 
     private fun page(range: IntRange, exhausted: Boolean = false) = PageSlice(

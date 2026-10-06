@@ -50,6 +50,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
     @Volatile private var releasing: Job? = null
     @Volatile private var resourcesOwned = false
     private val resourceMutex = Mutex()
+    private val enqueueMutex = Mutex()
     val loadedResources get() = container.loadedTranslationResources
     private val _currentStep = MutableStateFlow<QueueCurrentStep?>(null)
     val currentStep = _currentStep.asStateFlow()
@@ -122,6 +123,26 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         release.start()
     }
     @Synchronized fun resume() { container.taskService.allowRetry(); container.queueOrder.setPaused(false); _paused.value = false; start() }
+    /** Notification resume restores paused items without silently retrying failed chapters. */
+    fun resumePaused(): Job {
+        val command = globalCommand.incrementAndGet()
+        return scope.launch {
+            val ids = dao.queueSnapshot().filter { it.state == "PAUSED" }.map { it.chapterId }
+            if(ids.isNotEmpty()) { dao.controlQueueItems(ids, "PENDING", now()); controlRevision.update { it + 1 } }
+            synchronized(this@TranslationQueueCoordinator) { if(command == globalCommand.get()) resume() }
+        }
+    }
+    /** A new batch starts an empty queue even if its previous batch was manually paused. */
+    suspend fun enqueue(mangaId: String, chapterIds: List<String>, request: TranslationRequest): Int = enqueueMutex.withLock {
+        container.startupReady.await()
+        val command = globalCommand.get()
+        val wasEmpty = dao.queueSnapshot().isEmpty()
+        val added = container.translationRepository.enqueue(mangaId, chapterIds, request)
+        synchronized(this) {
+            if (added > 0 && wasEmpty && command == globalCommand.get()) resume() else start()
+        }
+        added
+    }
     suspend fun pauseAndAwait() { pause(); runner?.cancelAndJoin(); releasing?.join() }
     fun startAll(): Job {
         val command = globalCommand.incrementAndGet()
@@ -201,8 +222,12 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
     }
     private suspend fun runManga(mangaId: String) {
         val task = ordered(dao.queueSnapshot()).firstOrNull { it.mangaId == mangaId && runnable(it) } ?: return
-        if (runCatching { JSONObject(task.configSnapshot!!).optInt("schema") }.getOrDefault(1) == 2) runProgramManga(task)
-        else runLegacyManga(mangaId)
+        when (runCatching { JSONObject(requireNotNull(task.configSnapshot)).getInt("schema") }.getOrNull()) {
+            2 -> runProgramManga(task)
+            1 -> runLegacyManga(mangaId)
+            else -> dao.setQueueState(task.chapterId, task.targetLanguage, "FAILED",
+                "无法运行此版本的工作流快照", task.translatedCount, now())
+        }
     }
     private suspend fun runProgramManga(first: ChapterTranslationEntity) = coroutineScope {
         val mangaId = first.mangaId
@@ -222,7 +247,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             val source = matchEngineLanguage(json.getString("sourceLanguage"), installedLanguages) ?: LocalTranslationLanguage.fromTag(json.getString("sourceLanguage"))
             val target = matchEngineLanguage(json.getString("targetLanguage"), installedLanguages) ?: LocalTranslationLanguage.fromTag(json.getString("targetLanguage"))
             val render = BubbleRenderSettings(BubbleFillMode.valueOf(json.getString("fillMode")), json.getInt("opacity"), json.getInt("padding"),
-                runCatching { BubbleFont.valueOf(json.optString("font")) }.getOrDefault(BubbleFont.SYSTEM), json.optInt("fontScale", 100), json.optBoolean("bold"))
+                runCatching { BubbleFont.valueOf(json.optString("font")) }.getOrDefault(BubbleFont.SYSTEM), json.optInt("fontScale", 100), json.optBoolean("bold"), json.optInt("freeTextMaskExpansion", 6))
             val manga = container.mangaRepository.getBackfillTarget(mangaId) ?: error("漫画或来源不存在")
             for (task in tasks) {
                 require(task.sourceLanguage == json.getString("sourceLanguage") && task.targetLanguage == json.getString("targetLanguage")) { "任务语言与快照不一致" }
@@ -259,7 +284,8 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             var wholeRequest: Job? = null
             val settings = WorkflowRunSettings(source, target, json.optString("style"), render, json.getDouble("segThreshold").toFloat(),
                 json.optJSONObject("apiProfiles")?.let { ApiProfileCodec.decode(it.toString()) }.orEmpty(),
-                SegTextScope.fromValue(json.optString("segTextScope").takeIf { it.isNotBlank() }))
+                SegTextScope.fromValue(json.optString("segTextScope").takeIf { it.isNotBlank() }), json.optDouble("textDetectionThreshold", .45).toFloat(),
+                json.optDouble("freeTextMergeGapRatio", 1.2).toFloat())
             val mangaName = container.mangaRepository.getCards(listOf(mangaId)).firstOrNull()?.displayName ?: mangaId
             val runHost = object : AndroidWorkflowHost(container.applicationContext, container, mangaId, mangaName, chapters, settings, budget) {
                 override fun continueScheduling(frame: WorkflowFrame?): Boolean = wholeBatch.get() || !stopping.value || frame?.identity(WorkflowSystem.PAGE) == protectedPage && protectedPage != null
@@ -439,7 +465,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                 container.translationModels.installedCatalog().route(source, target)
                 val render = BubbleRenderSettings(BubbleFillMode.valueOf(json.getString("fillMode")), json.getInt("opacity"), json.getInt("padding"),
                     runCatching { BubbleFont.valueOf(json.optString("font")) }.getOrDefault(BubbleFont.SYSTEM),
-                    json.optInt("fontScale", 100), json.optBoolean("bold", false))
+                    json.optInt("fontScale", 100), json.optBoolean("bold", false), json.optInt("freeTextMaskExpansion", 6))
                 val manga = container.mangaRepository.getBackfillTarget(task.mangaId) ?: error("漫画或来源不存在")
                 val chapter = manga.chapters.firstOrNull { it.chapterId == task.chapterId } ?: error("章节不存在")
                 val opened = container.pageSourceFactory.open(manga.sourceTreeUri, chapter)
@@ -452,7 +478,8 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                 if (eligible.isEmpty()) dao.setQueueState(task.chapterId, task.targetLanguage, "CANCELLED", null, 0, now())
                 works += eligible.map { QueuePageWork(task, pageSource, it, source, target, render,
                     json.getDouble("segThreshold").toFloat(), json.getInt("retries").coerceIn(0, 5),
-                    SegTextScope.fromValue(json.optString("segTextScope").takeIf { it.isNotBlank() })) }
+                    SegTextScope.fromValue(json.optString("segTextScope").takeIf { it.isNotBlank() }), json.optDouble("textDetectionThreshold", .45).toFloat(),
+                    json.optDouble("freeTextMergeGapRatio", 1.2).toFloat()) }
             } catch (failure: Exception) {
                 if (failure is CancellationException) throw failure
                 dao.setQueueState(task.chapterId, task.targetLanguage, "FAILED", failure.message, task.translatedCount, now())

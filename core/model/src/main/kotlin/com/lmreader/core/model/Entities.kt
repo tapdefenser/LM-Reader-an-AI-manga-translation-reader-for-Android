@@ -95,15 +95,9 @@ data class MangaRecord(
     val discoveryGeneration: Long,
     val discoveredAt: Long,
     val updatedAt: Long,
-    /**
-     * 漫画级阅读模式覆盖；null 表示使用全局默认（开发文档 15.3）。
-     *
-     * 与 UI 枚举相比刻意用**可空**而不是"默认值成员"：可空让"没覆盖过"与"覆盖成默认"
-     * 可区分，也让阅读器只需要合并一次就能得到有效设置
-     * （见 [ReaderSettings.withMangaOverride]）。
-     */
+    /** 旧版漫画级阅读覆盖，仅保留用于数据库和备份兼容；阅读器不再应用。 */
     val readerModeOverride: ReadingMode? = null,
-    /** 漫画级屏幕方向覆盖；null 表示使用全局默认。 */
+    /** 旧版屏幕方向覆盖，阅读器不再应用。 */
     val readerOrientationOverride: ReaderOrientation? = null,
     /**
      * 漫画级翻译设置（源/目标语言、自动识别、漫画自己的文风）。
@@ -115,11 +109,7 @@ data class MangaRecord(
 )
 
 /**
- * 把漫画级覆盖叠加到全局设置上，得到这部漫画**实际生效**的阅读设置。
- *
- * 为什么要合并而不是让阅读器各处分别判断覆盖：阅读器有约六十项设置、十几处读取点，
- * 任何一处漏判覆盖都会表现为"某些行为听全局、某些听漫画"，这种不一致极难排查。
- * 因此只允许在进入阅读器时合并一次，之后一律读合并结果。
+ * 旧版覆盖解析，用于兼容历史数据；当前阅读器直接使用全局设置。
  */
 fun ReaderSettings.withMangaOverride(
     modeOverride: ReadingMode?,

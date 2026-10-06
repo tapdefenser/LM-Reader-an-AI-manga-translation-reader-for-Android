@@ -190,7 +190,7 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
                         var rowMenu by remember(node.id) { mutableStateOf(false) }
                         val issue = validation.issues.firstOrNull { it.nodeId == node.id }
                         val refs = WorkflowEditing.references(validation.scopes[node.id].orEmpty())
-                        val after = WorkflowEditing.references(validation.scopes[node.id + ":end"].orEmpty())
+                        val after = WorkflowEditing.references(WorkflowEditing.outputs(program, node.id, validation))
                         Card(onClick = { selected = node }, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).testTag("workflow-row:" + node.id).animateItem(),
                             shape = RoundedCornerShape(12.dp),
                             border = BorderStroke(1.dp, if(issue != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outlineVariant.copy(alpha = .55f)),
@@ -229,11 +229,13 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
                                     WorkflowKind.PAGES -> WorkflowReferenceChoice(WorkflowRef(WorkflowSystem.PAGE), "本页", WorkflowSystem.pageType, false)
                                     else -> null
                                 }
-                                val outputs = listOfNotNull(node.target, node.collectTo).mapNotNull { r -> (refs + after).firstOrNull { it.ref == r } } + listOfNotNull(scopeOutput)
+                                val declared = listOfNotNull(node.variable).map { TypedChoice(it) }
+                                val written = listOfNotNull(node.target, node.collectTo).mapNotNull { r -> (refs + after).firstOrNull { it.ref == r } }.map { TypedChoice(it) }
+                                val destinations = (declared + written + listOfNotNull(scopeOutput?.let { TypedChoice(it) })).distinct()
                                 SummaryLine("Out", buildList {
-                                    outputs.forEach { add(SummaryValue(typedLabel(it), it.type)) }
-                                    node.variable?.let { add(SummaryValue(typedLabel(WorkflowReferenceChoice(WorkflowRef(it.id), it.name, it.type, false)), it.type)) }
-                                    if(node.kind in setOf(WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.APPLY_ORDER)) add(SummaryValue("文本 · 本页各气泡译文", WorkflowType.TEXT))
+                                    destinations.forEach { add(SummaryValue("${WorkflowLabels.type(it.type)} · ${it.name}", it.type)) }
+                                    if(node.kind in setOf(WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.APPLY_ORDER)) add(SummaryValue("<文本> · 本页各气泡译文", WorkflowType.TEXT))
+                                    if(node.mode == WorkflowMode.ASYNC) node.parallelLimit?.let { add(SummaryValue("并行上限 $it")) }
                                 })
                                 issue?.let { Text(it.message, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error) }
                             }
@@ -249,7 +251,7 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
     } }
     selected?.let { node ->
         val collectScope = if(node.children.isNotEmpty()) validation.scopes[node.children.last().id + ":end"].orEmpty() else validation.scopes[node.id + ":children"].orEmpty()
-        WorkflowNodeEditor(node, validation.scopes[node.id].orEmpty(), profiles, { selected = null }, readOnly = locked, collectScope = collectScope) { changed ->
+        WorkflowNodeEditor(node, validation.scopes[node.id].orEmpty(), WorkflowEditing.outputs(program, node.id, validation), profiles, { selected = null }, readOnly = locked, collectScope = collectScope) { changed ->
             change(WorkflowEditing.update(program, node.id) { changed }); selected = null
         }
     }
@@ -273,9 +275,9 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
             Row { Text("失败额外重试 $retries 次"); TextButton(enabled = retries > 0, onClick = { retries-- }) { Text("－") }; TextButton(enabled = retries < 5, onClick = { retries++ }) { Text("＋") } }
         }
     }, confirmButton = { TextButton(onClick = { metadata = false }) { Text("完成") } })
-    if(template) ChoiceDialog("填入模板（可以撤销）", listOf("blank" to "空白结构", "local" to "SEG → OCR → 本地机翻", "standard" to "标准翻译（每页文本 API）", "full" to "全文速译（整漫画一次 API）", "vl" to "VL 直接翻译（双语＋章末译名）"), { template = false }) {
+    if(template) ChoiceDialog("填入模板（可以撤销）", listOf("blank" to "空白结构", "local" to "SEG → OCR → 本地机翻", "standard" to "标准翻译（每页文本 API）", "vl" to "VL 直接翻译（双语＋章末译名）", "vl-page" to "VL 整页直接翻译（多图一次 API）"), { template = false }) {
         val id = profiles.firstOrNull { it.kind == ApiProfileKind.LLM }?.id.orEmpty()
-        change(when(it) { "blank" -> WorkflowTemplates.blank(); "local" -> WorkflowTemplates.localMachine(); "standard" -> WorkflowReferenceTemplates.standard(id); "full" -> WorkflowReferenceTemplates.fullManga(id); else -> WorkflowReferenceTemplates.vision(id) }); template = false
+        change(when(it) { "blank" -> WorkflowTemplates.blank(); "local" -> WorkflowTemplates.localMachine(); "standard" -> WorkflowReferenceTemplates.standard(id); "vl-page" -> WorkflowReferenceTemplates.visionPage(id); else -> WorkflowReferenceTemplates.vision(id) }); template = false
     }
     if(api) ChoiceDialog("为所有请求选择 API", profiles.filter { it.kind == ApiProfileKind.LLM }.map { it.id to ("${it.name} · ${it.model}") }, { api = false }) {
         if(!value.editable) onBindApi(it) else change(WorkflowReferenceTemplates.bindApi(program, it))
@@ -292,8 +294,8 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
     if(help) AlertDialog(onDismissRequest = { help = false }, title = { Text("猫爪工作流") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("漫画、每章节、每页为固定结构。步骤菜单可上下移动或移入其他作用域；需要的变量必须在目的位置可用。各作用域末尾新增行。")
-            Text("同步依次处理；异步受引擎并行数与缓存限制。循环后的行等待所有分支完成。每项循环在参数中选择收集值，按原顺序写入外层列表。")
-            Text("变量以“类型 · 名称”显示，颜色代表类型。{} 查看当前作用域的变量及字段。提示词变量条可左右滑动，点击插入光标处。")
+            Text("同步依次处理；异步受引擎并行数与缓存限制。异步模块可单独设置最大并行数，设为自动时跟随引擎上限。循环后的行等待所有分支完成。每项循环在参数中选择收集值，按原顺序写入外层列表。")
+            Text("变量以“<类型> · 名称”显示，颜色代表类型。{} 查看当前作用域的变量及字段。提示词变量条可左右滑动，点击插入光标处。")
             Text("漫画译名字典实时读取，后来同名译名不能覆盖已有内容。固定工作流可以统一绑定 API；固定标识只能由外部工具修改导出文件。")
         }
     }, confirmButton = { TextButton(onClick = { help = false }) { Text("关闭") } })
@@ -303,10 +305,16 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
 }
 
 @Composable
-internal fun <T> ChoiceDialog(title: String, choices: List<Pair<T, String>>, dismiss: () -> Unit, choose: (T) -> Unit) {
+internal fun <T> ChoiceDialog(title: String, choices: List<Pair<T, String>>, dismiss: () -> Unit, searchable: Boolean = false, choose: (T) -> Unit) {
+    var query by remember(title) { mutableStateOf("") }
+    val matches = workflowOptionMatcher(query)
+    val visible = choices.filter { matches(it.second) }
     AlertDialog(onDismissRequest = dismiss, title = { Text(title) }, text = {
-        LazyColumn { if(choices.isEmpty()) item { Text("没有匹配选项，请先新建变量或配置引擎") }
-            items(choices.size) { i -> TextButton(onClick = { choose(choices[i].first) }, modifier = Modifier.fillMaxWidth()) { Text(choices[i].second) } }
+        Column(Modifier.heightIn(max = 500.dp)) {
+            if(searchable) WorkflowOptionSearch(title, query) { query = it }
+            LazyColumn(Modifier.weight(1f, false)) { if(visible.isEmpty()) item { Text(if(query.isBlank()) "没有匹配选项，请先新建变量或配置引擎" else "无匹配选项") }
+                items(visible.size) { i -> TextButton(onClick = { choose(visible[i].first) }, modifier = Modifier.fillMaxWidth()) { Text(visible[i].second) } }
+            }
         }
     }, confirmButton = { TextButton(onClick = dismiss) { Text("关闭") } })
 }

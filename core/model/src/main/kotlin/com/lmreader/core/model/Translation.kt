@@ -105,6 +105,10 @@ data class MangaTranslationSettings(
     val bubbleBold: Boolean? = null,
     /** Per-manga SEG selection; old manga rows keep both kinds of text. */
     val segTextScope: SegTextScope = SegTextScope.ALL,
+    val textDetectionThreshold: Float? = null,
+    val freeTextMaskExpansionPercent: Int? = null,
+    /** Maximum inter-line gap relative to line thickness; zero keeps independent lines separate. */
+    val freeTextMergeGapRatio: Float? = null,
 )
 
 /**

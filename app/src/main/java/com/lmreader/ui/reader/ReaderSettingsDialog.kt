@@ -23,7 +23,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import com.lmreader.ui.i18n.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -47,18 +46,7 @@ import com.lmreader.ui.common.LabeledSlider
 /**
  * 阅读设置对话框（Mihon `ReaderSettingsDialog` 的三个分页）。
  *
- * 分页划分照搬 Mihon，因为它对应三种不同的读写范围，混在一起会让用户看不出
- * "这一项改的是这部漫画还是所有漫画"：
- *
- * | 分页 | 作用范围 | 写到哪里 |
- * |---|---|---|
- * | 阅读模式 | **这部漫画** | 数据库的覆盖列 |
- * | 通用 | 全局 | DataStore |
- * | 自定义滤镜 | 全局 | DataStore |
- *
- * 这是 Mihon "全局默认 + 每部漫画可覆盖"的实现方式（它存在 `mangas.viewer` 位域里）。
- * 我们拆成两个显式可空列而不是位域——位域在 Room 迁移与调试时不可读，
- * 而显式列让"这部漫画覆盖成什么"直接查得出来。
+ * 三个分页中的全部选项均为全局偏好，与「设置 → 阅读器」共享。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -66,8 +54,7 @@ internal fun ReaderSettingsDialog(
     state: ReaderUiState,
     onDismiss: () -> Unit,
     onReadingMode: (ReadingMode) -> Unit,
-    onClearReadingMode: () -> Unit,
-    onOrientation: (ReaderOrientation?) -> Unit,
+    onOrientation: (ReaderOrientation) -> Unit,
     onUpdateGlobal: ((ReaderSettings) -> ReaderSettings) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -76,6 +63,8 @@ internal fun ReaderSettingsDialog(
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
             Text("阅读设置", style = MaterialTheme.typography.titleLarge)
+            Text("全局设置，应用于所有漫画", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(12.dp))
             TabRow(selectedTabIndex = tab) {
                 listOf("阅读模式", "通用", "自定义滤镜").forEachIndexed { index, title ->
@@ -99,7 +88,6 @@ internal fun ReaderSettingsDialog(
                     0 -> ReadingModePage(
                         state = state,
                         onReadingMode = onReadingMode,
-                        onClearReadingMode = onClearReadingMode,
                         onOrientation = onOrientation,
                     )
 
@@ -112,27 +100,14 @@ internal fun ReaderSettingsDialog(
     }
 }
 
-/**
- * 阅读模式分页：只影响**这部漫画**。
- *
- * "恢复默认"按钮只在确实有覆盖时出现——Mihon 的 `ReadingModeSelectDialog` 也是这个
- * 条件（`onUseDefault` 仅在当前值不是 DEFAULT 时传入）。始终显示一个无效按钮会让用户
- * 以为自己设过覆盖。
- */
+/** 阅读模式与屏幕方向均应用于所有漫画。 */
 @Composable
 private fun ReadingModePage(
     state: ReaderUiState,
     onReadingMode: (ReadingMode) -> Unit,
-    onClearReadingMode: () -> Unit,
-    onOrientation: (ReaderOrientation?) -> Unit,
+    onOrientation: (ReaderOrientation) -> Unit,
 ) {
-    SectionTitle("这部漫画")
-    val hasOverride = state.mangaModeOverride != null
-    Text(
-        text = if (hasOverride) "已设置单独的阅读模式" else "当前跟随全局默认",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    SectionTitle("阅读模式")
     Spacer(Modifier.height(8.dp))
     ChipRow(
         options = ReadingMode.entries,
@@ -140,17 +115,12 @@ private fun ReadingModePage(
         label = { it.label },
         onSelect = onReadingMode,
     )
-    if (hasOverride) {
-        TextButton(onClick = onClearReadingMode) { Text("恢复全局默认") }
-    }
-
     Spacer(Modifier.height(20.dp))
-    SectionTitle("屏幕方向（这部漫画）")
-    val orientationOptions = listOf<ReaderOrientation?>(null) + ReaderOrientation.entries
+    SectionTitle("屏幕方向")
     ChipRow(
-        options = orientationOptions,
-        selected = state.mangaOrientationOverride,
-        label = { it?.label ?: "跟随默认" },
+        options = ReaderOrientation.entries,
+        selected = state.settings.orientation ?: ReaderOrientation.FREE,
+        label = { it.label },
         onSelect = onOrientation,
     )
 }

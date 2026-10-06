@@ -70,6 +70,12 @@ class PagingState<T>(
         this.totalKnown = totalKnown
     }
 
+    /** Reconcile the loaded window after inserts before an OFFSET cursor. Keep its quota. */
+    fun replaceWindow(page: PageSlice<T>, totalKnown: Int?) {
+        seen.clear(); mutableItems.clear()
+        append(page, totalKnown)
+    }
+
     var totalKnown: Int? = null
         private set
 

@@ -3,8 +3,10 @@ package com.lmreader.core.workflow
 import com.lmreader.core.model.*
 
 data class WorkflowIssue(val nodeId: String, val message: String)
-data class WorkflowAvailableVariable(val variable: WorkflowVariable, val readOnly: Boolean = false)
-data class WorkflowValidation(val issues: List<WorkflowIssue>, val scopes: Map<String, List<WorkflowAvailableVariable>>) {
+data class WorkflowAvailableVariable(val variable: WorkflowVariable, val readOnly: Boolean = false, val iterator: Boolean = false)
+/** [scopes] holds what each row can read; [outputs] also holds the variable that row declares. */
+data class WorkflowValidation(val issues: List<WorkflowIssue>, val scopes: Map<String, List<WorkflowAvailableVariable>>,
+    val outputs: Map<String, List<WorkflowAvailableVariable>> = emptyMap()) {
     val valid get() = issues.isEmpty()
 }
 
@@ -12,14 +14,13 @@ object WorkflowValidator {
     val fixedKinds = setOf(WorkflowKind.MANGA, WorkflowKind.CHAPTERS, WorkflowKind.PAGES)
     fun validate(program: WorkflowProgram): WorkflowValidation {
         val issues = mutableListOf<WorkflowIssue>(); val scopes = mutableMapOf<String, List<WorkflowAvailableVariable>>()
+        val outputs = mutableMapOf<String, List<WorkflowAvailableVariable>>()
         val ids = mutableSetOf<String>(); val variables = mutableSetOf<String>(); val counts = mutableMapOf<WorkflowKind, Int>()
         var rowCount = 0
         fun issue(n: WorkflowNode, message: String) { issues += WorkflowIssue(n.id, message) }
         fun refType(ref: WorkflowRef, scope: List<WorkflowAvailableVariable>): WorkflowType? {
-            var type = scope.lastOrNull { it.variable.id == ref.variableId }?.variable?.type ?: return null
-            for (field in ref.path) type = if (type.kind == WorkflowDataKind.LIST && field.toIntOrNull()?.let { it >= 0 } == true)
-                type.element ?: return null else type.fields[field] ?: return null
-            return type
+            val type = scope.lastOrNull { it.variable.id == ref.variableId }?.variable?.type ?: return null
+            return WorkflowReferencePaths.resolve(type, ref.path)?.type
         }
         fun expressionType(e: WorkflowExpression, n: WorkflowNode, scope: List<WorkflowAvailableVariable>): WorkflowType? = when (e) {
             is WorkflowExpression.Text -> WorkflowType.TEXT
@@ -33,10 +34,14 @@ object WorkflowValidator {
             }
             is WorkflowExpression.Record -> WorkflowType(WorkflowDataKind.RECORD, fields = e.fields.mapValues { expressionType(it.value, n, scope) ?: WorkflowType.TEXT })
         }
-        fun writable(ref: WorkflowRef, n: WorkflowNode, scope: List<WorkflowAvailableVariable>): Boolean {
+        /** [append] marks the commutative rows (+=, 合并列表), which may add to an outer list or text from an async branch. */
+        fun writable(ref: WorkflowRef, n: WorkflowNode, scope: List<WorkflowAvailableVariable>, append: Boolean = false): Boolean {
             val definition = scope.lastOrNull { it.variable.id == ref.variableId }
             if (definition == null) { issue(n, "输出变量在此处不可用"); return false }
-            if (definition.readOnly) { issue(n, "异步分支不能修改父层变量；请用收集结果"); return false }
+            if (WorkflowReferencePaths.resolve(definition.variable.type, ref.path)?.readOnly == true) {
+                issue(n, "列表项数只读"); return false
+            }
+            if (definition.readOnly && !append) { issue(n, "异步分支不能修改父层变量；请用收集结果"); return false }
             if (ref.variableId.startsWith("builtin.")) {
                 val allowed = ref.variableId == WorkflowSystem.PAGE && ref.path.firstOrNull() in setOf("bubbles", "records") ||
                     definition.variable.type.kind == WorkflowDataKind.BUBBLE && ref.path.firstOrNull() in setOf("source", "translation")
@@ -59,11 +64,14 @@ object WorkflowValidator {
                 if (!ids.add(n.id) || n.id.isBlank()) issue(n, "行 ID 不能为空或重复")
                 if (n.label.length > 80) issue(n, "行名称过长")
                 counts[n.kind] = (counts[n.kind] ?: 0) + 1
-                scopes[n.id] = scope
-                n.inputs.filterKeys { it != "collectValue" }.values.forEach { expressionType(it, n, scope) }
+                // Inputs read the scope left by the rows before them, never their own declaration.
+                val inputScope = scope
+                var declared: List<WorkflowAvailableVariable>? = null
+                scopes[n.id] = inputScope
+                n.inputs.filterKeys { it != "collectValue" }.values.forEach { expressionType(it, n, inputScope) }
                 fun input(key: String, type: WorkflowType? = null): WorkflowType? {
                     val e = n.inputs[key] ?: run { issue(n, "请设置参数：$key"); return null }
-                    return expressionType(e, n, scope).also { if (type != null && !compatible(it, type)) issue(n, "参数 $key 的类型不匹配") }
+                    return expressionType(e, n, inputScope).also { if (type != null && !compatible(it, type)) issue(n, "参数 $key 的类型不匹配") }
                 }
                 fun output(type: WorkflowType) {
                     val ref = n.target ?: run { issue(n, "请选择输出变量"); return }
@@ -77,7 +85,8 @@ object WorkflowValidator {
                     if(variable.id.startsWith("builtin.") && !(n.kind == WorkflowKind.EACH && (variable.id == WorkflowSystem.PAGE && variable.type == WorkflowSystem.pageType || variable.id == WorkflowSystem.BUBBLE && variable.type == WorkflowType.BUBBLE))) issue(n, "系统变量 ID 不能用于自定义变量")
                     if ((variable.id != WorkflowSystem.PAGE && !variables.add(variable.id)) || scope.any { it.variable.id == variable.id }) issue(n, "变量 ID 重复")
                     if (scope.any { it.variable.name == variable.name && !child }) issue(n, "此名称已经使用")
-                    return scope + WorkflowAvailableVariable(variable)
+                    declared = inputScope + WorkflowAvailableVariable(variable, iterator = n.kind == WorkflowKind.EACH)
+                    return scope + WorkflowAvailableVariable(variable, iterator = n.kind == WorkflowKind.EACH)
                 }
                 when (n.kind) {
                     WorkflowKind.MANGA -> {
@@ -145,11 +154,16 @@ object WorkflowValidator {
                         val type = n.variable?.type
                         fun canInitialize(t: WorkflowType): Boolean = t.kind !in setOf(WorkflowDataKind.IMAGE, WorkflowDataKind.BUBBLE) && t.fields.values.all(::canInitialize)
                         if(type != null && n.inputs["value"] == null && !canInitialize(type)) issue(n, "图片、气泡或含图片的记录需要设置初始引用")
-                        n.inputs["value"]?.let { if (type != null && !compatible(expressionType(it, n, scope), type)) issue(n, "初始值类型不匹配") }
+                        n.inputs["value"]?.let { if (type != null && !compatible(expressionType(it, n, inputScope), type)) issue(n, "初始值类型不匹配") }
                         scope = define(n.variable)
                     }
                     WorkflowKind.SET -> input("value")?.let(::output)
-                    WorkflowKind.SEG -> { input("image", WorkflowType.IMAGE); output(WorkflowType.list(WorkflowType.BUBBLE)) }
+                    WorkflowKind.SEG -> {
+                        input("image", WorkflowType.IMAGE); output(WorkflowType.list(WorkflowType.BUBBLE))
+                        if(refType(WorkflowRef(WorkflowSystem.PAGE), scope) == null) issue(n, "SEG 必须位于每页内")
+                        else writable(WorkflowRef(WorkflowSystem.PAGE, listOf("bubbles")), n, scope)
+                        if(scope.any { it.iterator && it.variable.type == WorkflowType.BUBBLE }) issue(n, "SEG 重建本页气泡，请放在气泡循环之外")
+                    }
                     WorkflowKind.OCR -> { input("image", WorkflowType.IMAGE); input("language", WorkflowType.TEXT); output(WorkflowType.TEXT) }
                     WorkflowKind.TRANSLATE -> { input("text", WorkflowType.TEXT); input("source", WorkflowType.TEXT); input("target", WorkflowType.TEXT); output(WorkflowType.TEXT) }
                     WorkflowKind.API, WorkflowKind.API_STREAM -> {
@@ -157,6 +171,10 @@ object WorkflowValidator {
                         if ((n.inputs["profile"] as? WorkflowExpression.Text)?.value?.isBlank() == true) issue(n, "请选择 API 配置")
                         n.inputs["context"]?.let { if (expressionType(it, n, scope)?.kind != WorkflowDataKind.CONTEXT) issue(n, "上下文参数必须是上下文") }
                         n.inputs["images"]?.let { val t = expressionType(it, n, scope); if (t?.kind != WorkflowDataKind.IMAGE && t != WorkflowType.list(WorkflowType.IMAGE)) issue(n, "附件必须是图片或图片列表") }
+                        n.inputs["attachCurrentImage"]?.let {
+                            if (it !is WorkflowExpression.Boolean) issue(n, "自动附带当前气泡图片必须是开关")
+                            if (it == WorkflowExpression.Boolean(true) && WorkflowEditing.currentBubble(scope) == null) issue(n, "自动附图需要位于气泡循环内")
+                        }
                         n.inputs["expectedBubbles"]?.let {
                             val t = expressionType(it, n, scope)
                             if(t !in setOf(WorkflowType.list(WorkflowType.BUBBLE), WorkflowType.list(WorkflowType.TRANSLATION), WorkflowType.list(WorkflowType.PAGE_RECORD))) issue(n, "期望气泡必须是气泡／对照／页记录列表")
@@ -165,6 +183,12 @@ object WorkflowValidator {
                         n.inputs["wholeManga"]?.let {
                             if(it != WorkflowExpression.Boolean(true) && it != WorkflowExpression.Boolean(false)) issue(n, "整漫画单请求必须明确开启或关闭")
                             if(it == WorkflowExpression.Boolean(true) && parent != WorkflowKind.MANGA) issue(n, "整漫画单请求必须位于漫画内")
+                        }
+                        n.inputs["expectedCount"]?.let {
+                            input("expectedCount", WorkflowType.NUMBER)
+                            if(n.resultType.kind != WorkflowDataKind.LIST) issue(n, "项数校验需要列表输出")
+                            if(it is WorkflowExpression.Number && (!it.value.isFinite() || it.value < 0 || it.value % 1 != 0.0 || it.value > Int.MAX_VALUE))
+                                issue(n, "期望输出项数必须是非负整数")
                         }
                         fun apiType(t: WorkflowType): Boolean = when (t.kind) {
                             WorkflowDataKind.TEXT, WorkflowDataKind.NUMBER, WorkflowDataKind.BOOLEAN, WorkflowDataKind.DICTIONARY -> true
@@ -196,7 +220,10 @@ object WorkflowValidator {
                     }
                     WorkflowKind.APPEND, WorkflowKind.MERGE_LIST -> {
                         val target = n.target; val t = target?.let { refType(it, scope) }
-                        if (target == null) issue(n, "请选择追加变量") else writable(target, n, scope)
+                        if (target == null) issue(n, "请选择追加变量") else {
+                            writable(target, n, scope, append = true)
+                            if (target.path.any { it.toIntOrNull() != null }) issue(n, "目标必须是整个列表，不能是列表中的某一项")
+                        }
                         val value = input("value")
                         if (t?.kind == WorkflowDataKind.TEXT && value != WorkflowType.TEXT) issue(n, "文本只能追加文本")
                         else if (t?.kind == WorkflowDataKind.LIST && !compatible(value, if (n.kind == WorkflowKind.APPEND) t.element!! else t)) issue(n, "追加条目的类型不匹配")
@@ -211,6 +238,8 @@ object WorkflowValidator {
                     WorkflowKind.RETURN -> input("value", n.resultType)
                 }
                 scopes[n.id + ":end"] = scope
+                // The next sibling reads this row's input scope plus whatever the row declared.
+                outputs[n.id] = declared ?: scope
             }
             scopes[(rows.lastOrNull()?.id ?: parent?.name.orEmpty()) + ":after"] = scope
         }
@@ -218,6 +247,6 @@ object WorkflowValidator {
         visit(program.rows, null, emptyList(), 0)
         fixedKinds.forEach { if (counts[it] != 1) issues += WorkflowIssue("", "漫画、每章节、每页结构各保留一个") }
         if (counts[WorkflowKind.SEG] == null) issues += WorkflowIssue(program.allNodes().firstOrNull { it.kind == WorkflowKind.PAGES }?.id.orEmpty(), "请添加 SEG 行生成译文气泡")
-        return WorkflowValidation(issues.distinct(), scopes)
+        return WorkflowValidation(issues.distinct(), scopes, outputs)
     }
 }

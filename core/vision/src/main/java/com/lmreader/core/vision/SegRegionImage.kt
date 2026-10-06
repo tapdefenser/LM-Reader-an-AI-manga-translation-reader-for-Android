@@ -17,7 +17,11 @@ fun cropSegRegion(image: Bitmap, region: SegRegion, pageRegions: List<SegRegion>
     val bottom = ceil(area.bottom).toInt().coerceIn(top + 1, image.height)
     val output = Bitmap.createBitmap(right - left, bottom - top, Bitmap.Config.ARGB_8888)
     try {
-        val allowed = regionPath(region)
+        // Text masks describe the overlay, not a safe glyph crop: tight contours can cut
+        // off bold outlines and accents. Keep padded original pixels for OCR and VL.
+        val allowed = if (region.kind == RegionKind.FREE_TEXT) Path().apply {
+            addRect(area.left, area.top, area.right, area.bottom, Path.Direction.CW)
+        } else regionPath(region)
         if (region.kind == RegionKind.FREE_TEXT) {
             // A caption's rectangle can intersect a balloon. Even free-text-only mode must
             // remove the balloon pixels using the unfiltered page detections.
@@ -46,9 +50,12 @@ private fun regionPath(region: SegRegion) = Path().apply {
 }
 
 suspend fun LocalVisionEngine.recognizeRegion(imageId: String, image: Bitmap, language: LocalOcrLanguage,
-    region: SegRegion, pageRegions: List<SegRegion>, progress: (VisionProgress) -> Unit = {}): LocalOcrResult {
+    region: SegRegion, pageRegions: List<SegRegion>, textLines: List<DetectedTextLine>? = null,
+    progress: (VisionProgress) -> Unit = {}): LocalOcrResult {
     return cropSegRegion(image, region, pageRegions).use { crop ->
-        val result = recognize(imageId, crop.bitmap, language, progress = progress)
+        val localLines = textLines?.let { selectRegionTextLines(region, pageRegions, it) }
+            ?.map { it.copy(bounds = it.bounds.offset(-crop.left.toFloat(), -crop.top.toFloat())) }
+        val result = recognize(imageId, crop.bitmap, language, textLines = localLines, progress = progress)
         result.copy(width = image.width, height = image.height,
             lines = result.lines.map { it.copy(bounds = it.bounds.offset(crop.left.toFloat(), crop.top.toFloat())) })
     }

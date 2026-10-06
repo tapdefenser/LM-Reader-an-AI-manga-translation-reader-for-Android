@@ -1,6 +1,7 @@
 package com.lmreader.core.database.repository
 
-import com.lmreader.core.database.dao.TranslationDao
+import androidx.room.withTransaction
+import com.lmreader.core.database.LmReaderDatabase
 import com.lmreader.core.database.entity.ChapterTranslationEntity
 import com.lmreader.core.database.entity.MangaGlossaryEntity
 import com.lmreader.core.model.*
@@ -8,7 +9,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 /** A chapter has one translation regardless of the language chosen for its next task. */
-internal class TranslationRepositoryImpl(private val dao: TranslationDao) : TranslationRepository {
+internal class TranslationRepositoryImpl(private val database: LmReaderDatabase) : TranslationRepository {
+    private val dao = database.translationDao()
+    private val shelf = ShelfRepositoryImpl(database)
     override suspend fun chapterTranslations(mangaId: String): Map<String, ChapterTranslation> =
         dao.byManga(mangaId).associate { it.chapterId to it.toDomain() }
 
@@ -16,16 +19,20 @@ internal class TranslationRepositoryImpl(private val dao: TranslationDao) : Tran
         if (chapterIds.isEmpty()) return 0
         require(translationSetupComplete(request.sourceLanguage, request.targetLanguage, request.autoDetectSource))
         require(!request.configSnapshot.isNullOrBlank()) { "翻译工作流配置不能为空" }
-        val states = dao.byChapters(chapterIds).associateBy { it.chapterId }
-        val rows = chapterIds.distinct().mapNotNull { id ->
-            val old = states[id]
-            if (old != null && old.state != TranslationState.CANCELLED.name) return@mapNotNull null
-            ChapterTranslationEntity(id, mangaId, request.targetLanguage, TranslationState.PENDING.name,
-                request.sourceLanguage, false, request.configSnapshot, request.at, old?.translatedAt,
-                old?.translatedCount ?: 0, null, request.at)
+        return database.withTransaction {
+            val states = dao.byChapters(chapterIds).associateBy { it.chapterId }
+            val rows = chapterIds.distinct().mapNotNull { id ->
+                val old = states[id]
+                if (old != null && old.state != TranslationState.CANCELLED.name) return@mapNotNull null
+                ChapterTranslationEntity(id, mangaId, request.targetLanguage, TranslationState.PENDING.name,
+                    request.sourceLanguage, false, request.configSnapshot, request.at, old?.translatedAt,
+                    old?.translatedCount ?: 0, null, request.at)
+            }
+            dao.upsertAll(rows)
+            // 同一事务收藏，队列开始运行前书架即可看到；重复入队也不改已有分类。
+            shelf.ensureOnShelf(mangaId)
+            rows.size
         }
-        dao.upsertAll(rows)
-        return rows.size
     }
 
     /** The caller removes page JSON under the queue's page lock before deleting these records. */

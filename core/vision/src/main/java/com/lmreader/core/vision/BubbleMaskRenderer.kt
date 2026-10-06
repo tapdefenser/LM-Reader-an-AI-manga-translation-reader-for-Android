@@ -31,7 +31,7 @@ class BubbleMaskRenderer {
     }
 
     fun prepare(source: Bitmap, regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings) =
-        prepareSource(source, regions.map { it.region }).layout(regions, settings)
+        prepareSource(source, regions.map { it.region }).layout(regions, settings, hideEmpty = true)
 
     /** Export composition only. Reader draws the very same prepared overlay directly on its Canvas. */
     fun render(source: Bitmap, regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings): Bitmap {
@@ -90,7 +90,9 @@ class BubbleMaskRenderer {
                 .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false).setLineSpacing(0f,1.05f)
                 .setBreakStrategy(LineBreaker.BREAK_STRATEGY_HIGH_QUALITY).build()
         }
-        fun fits(layout: StaticLayout)=layout.height<=height && (0 until layout.lineCount).all {layout.getLineWidth(it)<=width+.5f} &&
+        // Trailing spaces are consumed by wrapping, not visible overflow. Including
+        // them makes otherwise fitting paragraphs fail and shrinks the font too far.
+        fun fits(layout: StaticLayout)=layout.height<=height && (0 until layout.lineCount).all {layout.getLineMax(it)<=width+.5f} &&
             layout.getLineEnd(layout.lineCount-1)==text.length
         var low=0f;var high=max(width,height).toFloat()
         require(fits(build(low))) {"Text cannot fit inside its mask"}
@@ -99,6 +101,29 @@ class BubbleMaskRenderer {
     }
 
     private fun backgroundColor(image: Bitmap,region: PageTextRegion): Int {
+        if (region.kind == RegionKind.FREE_TEXT) {
+            // VL regions have no recognized line boxes. Sampling inside them chooses the
+            // heavy lettering as the background; upstream samples the surrounding artwork.
+            val r = region.bounds
+            val distance = max(1f, min(r.width, r.height) * .06f)
+            var red = 0L; var green = 0L; var blue = 0L; var count = 0
+            fun outside(x: Float, y: Float) {
+                if (x < 0 || y < 0 || x >= image.width || y >= image.height) return
+                val color = image.getPixel(x.toInt(), y.toInt())
+                red += Color.red(color); green += Color.green(color); blue += Color.blue(color); count++
+            }
+            val horizontal = ceil(r.width / 4).toInt().coerceIn(1, 512)
+            val vertical = ceil(r.height / 4).toInt().coerceIn(1, 512)
+            repeat(horizontal) { i ->
+                val x = r.left + (i + .5f) * r.width / horizontal
+                outside(x, r.top - distance); outside(x, r.bottom + distance)
+            }
+            repeat(vertical) { i ->
+                val y = r.top + (i + .5f) * r.height / vertical
+                outside(r.left - distance, y); outside(r.right + distance, y)
+            }
+            if (count > 0) return Color.rgb((red/count).toInt(), (green/count).toInt(), (blue/count).toInt())
+        }
         // Sample the untouched image. Quantized dominant color rejects sparse ink and panel lines.
         val buckets=linkedMapOf<Int,MutableList<Int>>()
         fun sample(px: Float,py: Float) {
@@ -125,27 +150,45 @@ class BubbleMaskRenderer {
         val colors=buckets.maxByOrNull {it.value.size}?.value ?: return Color.WHITE
         return Color.rgb(colors.map {Color.red(it)}.average().roundToInt(),colors.map {Color.green(it)}.average().roundToInt(),colors.map {Color.blue(it)}.average().roundToInt())
     }
-    companion object {const val VERSION=3}
+    companion object {const val VERSION=4}
 }
 
 internal data class OverlayBubble(val region: PageTextRegion, val path: Path, val fill: Paint,
     val textRect: RectF, val layout: StaticLayout?, val protectedInk: Path?)
 
 internal data class OverlaySeed(val region: PageTextRegion, val path: Path, val background: Int, val protectedInk: Path?) {
-    val textBounds = safeTextBounds(region)
+    // Caption contours follow the original ink, not the rectangular space available
+    // to a translated paragraph. Inscribing a rectangle can discard most of that space.
+    val textBounds = if(region.kind == RegionKind.FREE_TEXT) region.bounds else safeTextBounds(region)
+    fun maskPath(settings: BubbleRenderSettings): Path {
+        if (region.kind != RegionKind.FREE_TEXT || settings.freeTextMaskExpansionPercent == 0) return path
+        // Keep the original seed reusable: mask expansion changes immediately with style.
+        val expanded = Path(path); val border = Path()
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; strokeJoin = Paint.Join.ROUND
+            strokeWidth = (min(region.bounds.width, region.bounds.height) * settings.freeTextMaskExpansionPercent / 100).coerceAtMost(32f) * 2
+        }.getFillPath(path, border)
+        check(expanded.op(border, Path.Op.UNION))
+        return expanded
+    }
 }
 
 class BubbleOverlaySource internal constructor(seeds: List<OverlaySeed>) {
     private val byId = seeds.associateBy { it.region.id }
-    fun layout(regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings, hideEmpty: Boolean = false): BubbleOverlay {
+    fun layout(regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings, hideEmpty: Boolean = false,
+        includeEmptyForEditing: Boolean = false): BubbleOverlay {
         val renderer = BubbleMaskRenderer()
-        return BubbleOverlay(regions.filter { !hideEmpty || it.translatedText.isNotBlank() }.map { item ->
+        return BubbleOverlay(regions.filter { !hideEmpty || includeEmptyForEditing || it.translatedText.isNotBlank() }.map { item ->
             val seed = byId.getValue(item.region.id)
             require(seed.region.renderGeometry() == item.region.renderGeometry()) { "Bubble geometry changed; prepare the original again" }
             val color = if (settings.fillMode == BubbleFillMode.AUTO) seed.background else Color.WHITE
-            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; alpha = settings.opacityPercent * 255 / 100 }
+            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                this.color = color
+                alpha = if (hideEmpty && item.translatedText.isBlank()) 0 else settings.opacityPercent * 255 / 100
+            }
             val safe = seed.textBounds
-            val pad = min(safe.width, safe.height) * settings.textPaddingPercent / 100
+            val pad = min(safe.width, safe.height) * settings.textPaddingPercent / 100 *
+                if(item.region.kind == RegionKind.FREE_TEXT) .35f else 1f
             val rect = RectF(safe.left + pad, safe.top + pad, safe.right - pad, safe.bottom - pad)
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 this.color = if (Color.red(color) * .2126f + Color.green(color) * .7152f + Color.blue(color) * .0722f > 145) Color.BLACK else Color.WHITE
@@ -165,7 +208,7 @@ class BubbleOverlaySource internal constructor(seeds: List<OverlaySeed>) {
                     .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false).setLineSpacing(0f,1.05f)
                     .setBreakStrategy(LineBreaker.BREAK_STRATEGY_HIGH_QUALITY).build()
             }
-            OverlayBubble(item.region, seed.path, fill, rect, layout, seed.protectedInk)
+            OverlayBubble(item.region, seed.maskPath(settings), fill, rect, layout, seed.protectedInk)
         })
     }
 }
@@ -184,8 +227,23 @@ class BubbleOverlay internal constructor(private val bubbles: List<OverlayBubble
             val rect = bubble.textRect
             val save = canvas.save()
             try {
-                canvas.clipPath(bubble.path); canvas.clipRect(rect)
+                if(bubble.region.kind == RegionKind.FREE_TEXT) {
+                    val bounds = bubble.region.bounds
+                    canvas.clipRect(bounds.left, bounds.top, bounds.right, bounds.bottom)
+                } else { canvas.clipPath(bubble.path); canvas.clipRect(rect) }
                 canvas.translate(rect.left + (rect.width() - layout.width) / 2, rect.top + (rect.height() - layout.height) / 2)
+                // Keep captions legible where their new line wrapping crosses artwork
+                // outside the original ink mask. The artwork and mask contour stay intact.
+                if(bubble.region.kind == RegionKind.FREE_TEXT && layout.paint.textSize >= 4f) {
+                    val paint = layout.paint
+                    val color = paint.color; val stroke = paint.strokeWidth; val style = paint.style; val join = paint.strokeJoin
+                    try {
+                        paint.color = if(color == Color.BLACK) Color.WHITE else Color.BLACK
+                        paint.style = Paint.Style.STROKE; paint.strokeJoin = Paint.Join.ROUND
+                        paint.strokeWidth = (paint.textSize * .06f).coerceIn(1f, 4f)
+                        layout.draw(canvas)
+                    } finally { paint.color = color; paint.strokeWidth = stroke; paint.style = style; paint.strokeJoin = join }
+                }
                 layout.draw(canvas)
             } finally { canvas.restoreToCount(save) }
         }

@@ -104,6 +104,8 @@ class AppContainer(val application: Application) {
     val exportSettings by lazy { com.lmreader.ui.queue.ExportSettingsStore(application) }
     val exportQueue by lazy { com.lmreader.ui.queue.ExportQueueCoordinator(this) }
     val taskService by lazy { com.lmreader.tasks.TaskServiceController(this) }
+    val taskNotifications by lazy { com.lmreader.tasks.TaskNotifications(this) }
+    val appUpdates by lazy { com.lmreader.updates.AppUpdates(application, backgroundScope) }
     val backups by lazy { com.lmreader.ui.settings.backup.AppBackupManager(this) }
     val localPageTranslator by lazy { com.lmreader.ui.reader.translation.LocalPageTranslator(application,localVision,localTranslator,
         com.lmreader.ui.reader.translation.ReaderPageArtifactStore(java.io.File(application.filesDir,"reader-page-translations"),

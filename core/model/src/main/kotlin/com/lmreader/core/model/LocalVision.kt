@@ -26,8 +26,9 @@ enum class LocalOcrLanguage(val label: String) {
     JAPANESE("日语"), ENGLISH("英语"), CHINESE_SIMPLIFIED("简体中文"), CHINESE_TRADITIONAL("繁体中文"), KOREAN("韩语")
 }
 data class OcrLine(val id: String, val bounds: PixelRect, val text: String, val confidence: Float)
+data class DetectedTextLine(val bounds: PixelRect, val confidence: Float)
 data class SegResult(val imageId: String, val width: Int, val height: Int, val regions: List<SegRegion>,
-                     val elapsedMillis: Long, val backend: String)
+                     val elapsedMillis: Long, val backend: String, val textLines: List<DetectedTextLine> = emptyList())
 data class LocalOcrResult(val imageId: String, val width: Int, val height: Int, val language: LocalOcrLanguage,
                           val lines: List<OcrLine>, val elapsedMillis: Long) {
     val text get() = lines.joinToString("\n") { it.text }

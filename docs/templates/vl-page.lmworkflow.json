@@ -1,0 +1,317 @@
+{
+    "format": "lmreader.workflow",
+    "version": 1,
+    "editable": true,
+    "name": "参考：VL 整页直接翻译",
+    "description": "SEG → 按顺序收集本页裁图 → 一次视觉 API 流式翻译 → 逐项回填；严格校验图片与译文项数，不调用本地 OCR 或机翻。先复制并选择视觉 API。",
+    "parallelLimit": 8,
+    "retries": 2,
+    "program": {
+        "version": 1,
+        "rows": [
+            {
+                "id": "manga",
+                "kind": "MANGA",
+                "label": "",
+                "mode": "ASYNC",
+                "inputs": {},
+                "resultType": {
+                    "kind": "TEXT"
+                },
+                "children": [
+                    {
+                        "id": "chapters",
+                        "kind": "CHAPTERS",
+                        "label": "",
+                        "mode": "SYNC",
+                        "inputs": {},
+                        "resultType": {
+                            "kind": "TEXT"
+                        },
+                        "children": [
+                            {
+                                "id": "pages",
+                                "kind": "PAGES",
+                                "label": "",
+                                "mode": "ASYNC",
+                                "inputs": {},
+                                "resultType": {
+                                    "kind": "TEXT"
+                                },
+                                "children": [
+                                    {
+                                        "id": "seg",
+                                        "kind": "SEG",
+                                        "label": "",
+                                        "mode": "ASYNC",
+                                        "target": {
+                                            "variableId": "builtin.page",
+                                            "path": [
+                                                "bubbles"
+                                            ]
+                                        },
+                                        "inputs": {
+                                            "image": {
+                                                "kind": "ref",
+                                                "value": {
+                                                    "variableId": "builtin.page",
+                                                    "path": [
+                                                        "image"
+                                                    ]
+                                                }
+                                            }
+                                        },
+                                        "resultType": {
+                                            "kind": "TEXT"
+                                        },
+                                        "children": [],
+                                        "otherwise": []
+                                    },
+                                    {
+                                        "id": "new-page-vision-images",
+                                        "kind": "DECLARE",
+                                        "label": "",
+                                        "mode": "ASYNC",
+                                        "variable": {
+                                            "id": "page-vision-images",
+                                            "name": "气泡图片列表",
+                                            "type": {
+                                                "kind": "LIST",
+                                                "element": {
+                                                    "kind": "IMAGE"
+                                                }
+                                            }
+                                        },
+                                        "inputs": {},
+                                        "resultType": {
+                                            "kind": "TEXT"
+                                        },
+                                        "children": [],
+                                        "otherwise": []
+                                    },
+                                    {
+                                        "id": "collect-page-images",
+                                        "kind": "EACH",
+                                        "label": "按顺序收集本页裁图",
+                                        "mode": "SYNC",
+                                        "variable": {
+                                            "id": "builtin.bubble",
+                                            "name": "气泡",
+                                            "type": {
+                                                "kind": "BUBBLE",
+                                                "fields": {
+                                                    "id": {
+                                                        "kind": "TEXT"
+                                                    },
+                                                    "index": {
+                                                        "kind": "NUMBER"
+                                                    },
+                                                    "image": {
+                                                        "kind": "IMAGE"
+                                                    },
+                                                    "source": {
+                                                        "kind": "TEXT"
+                                                    },
+                                                    "translation": {
+                                                        "kind": "TEXT"
+                                                    },
+                                                    "confidence": {
+                                                        "kind": "NUMBER"
+                                                    },
+                                                    "kind": {
+                                                        "kind": "TEXT"
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "inputs": {
+                                            "items": {
+                                                "kind": "ref",
+                                                "value": {
+                                                    "variableId": "builtin.page",
+                                                    "path": [
+                                                        "bubbles"
+                                                    ]
+                                                }
+                                            },
+                                            "collectValue": {
+                                                "kind": "ref",
+                                                "value": {
+                                                    "variableId": "builtin.bubble",
+                                                    "path": [
+                                                        "image"
+                                                    ]
+                                                }
+                                            }
+                                        },
+                                        "resultType": {
+                                            "kind": "TEXT"
+                                        },
+                                        "children": [],
+                                        "otherwise": [],
+                                        "collectTo": {
+                                            "variableId": "page-vision-images",
+                                            "path": []
+                                        }
+                                    },
+                                    {
+                                        "id": "new-page-vision-translations",
+                                        "kind": "DECLARE",
+                                        "label": "",
+                                        "mode": "ASYNC",
+                                        "variable": {
+                                            "id": "page-vision-translations",
+                                            "name": "本页翻译列表",
+                                            "type": {
+                                                "kind": "LIST",
+                                                "element": {
+                                                    "kind": "RECORD",
+                                                    "fields": {
+                                                        "source": {
+                                                            "kind": "TEXT"
+                                                        },
+                                                        "translation": {
+                                                            "kind": "TEXT"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "inputs": {},
+                                        "resultType": {
+                                            "kind": "TEXT"
+                                        },
+                                        "children": [],
+                                        "otherwise": []
+                                    },
+                                    {
+                                        "id": "page-vision-api",
+                                        "kind": "API_STREAM",
+                                        "label": "整页裁图一次翻译",
+                                        "mode": "ASYNC",
+                                        "variable": {
+                                            "id": "page-vision-item",
+                                            "name": "当前对照",
+                                            "type": {
+                                                "kind": "RECORD",
+                                                "fields": {
+                                                    "source": {
+                                                        "kind": "TEXT"
+                                                    },
+                                                    "translation": {
+                                                        "kind": "TEXT"
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "target": {
+                                            "variableId": "page-vision-translations",
+                                            "path": []
+                                        },
+                                        "inputs": {
+                                            "profile": {
+                                                "kind": "text",
+                                                "value": ""
+                                            },
+                                            "images": {
+                                                "kind": "ref",
+                                                "value": {
+                                                    "variableId": "page-vision-images",
+                                                    "path": []
+                                                }
+                                            },
+                                            "expectedCount": {
+                                                "kind": "ref",
+                                                "value": {
+                                                    "variableId": "page-vision-images",
+                                                    "path": [
+                                                        "count"
+                                                    ]
+                                                }
+                                            },
+                                            "prompt": {
+                                                "kind": "template",
+                                                "text": "附件按顺序提供当前页的 ${图片项数} 张文字区域裁图（气泡或游离文字）。将全部文字从${源语言}翻译为${目标语言}，遵守文风：${文风}。结合整页对话理解人物、语气和指代，已有译名字典：${译名字典}。只返回一个 JSON 列表，严格按图片顺序返回 ${图片项数} 项，每张图片对应一个对象，字段仅 source、translation，不返回序号或 bubbleId。source 是该区域完整原文，translation 是完整译文；同一区域多行／多块文字合并，不拆成多项。无可辨认文字的图片仍占一项，两个字段均为空字符串，不跳过或编造文字。字符串中的换行、双引号和反斜线必须按 JSON 规则转义，不要说明或 Markdown。",
+                                                "bindings": {
+                                                    "源语言": {
+                                                        "variableId": "builtin.sourceLanguage",
+                                                        "path": []
+                                                    },
+                                                    "目标语言": {
+                                                        "variableId": "builtin.targetLanguage",
+                                                        "path": []
+                                                    },
+                                                    "文风": {
+                                                        "variableId": "builtin.style",
+                                                        "path": []
+                                                    },
+                                                    "译名字典": {
+                                                        "variableId": "builtin.glossary",
+                                                        "path": []
+                                                    },
+                                                    "图片项数": {
+                                                        "variableId": "page-vision-images",
+                                                        "path": [
+                                                            "count"
+                                                        ]
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "resultType": {
+                                            "kind": "LIST",
+                                            "element": {
+                                                "kind": "RECORD",
+                                                "fields": {
+                                                    "source": {
+                                                        "kind": "TEXT"
+                                                    },
+                                                    "translation": {
+                                                        "kind": "TEXT"
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "children": [
+                                            {
+                                                "id": "apply-page-vision-item",
+                                                "kind": "APPLY_ORDER",
+                                                "label": "",
+                                                "mode": "ASYNC",
+                                                "inputs": {
+                                                    "items": {
+                                                        "kind": "ref",
+                                                        "value": {
+                                                            "variableId": "page-vision-item",
+                                                            "path": []
+                                                        }
+                                                    },
+                                                    "index": {
+                                                        "kind": "ref",
+                                                        "value": {
+                                                            "variableId": "builtin.streamIndex",
+                                                            "path": []
+                                                        }
+                                                    }
+                                                },
+                                                "resultType": {
+                                                    "kind": "TEXT"
+                                                },
+                                                "children": [],
+                                                "otherwise": []
+                                            }
+                                        ],
+                                        "otherwise": []
+                                    }
+                                ],
+                                "otherwise": []
+                            }
+                        ],
+                        "otherwise": []
+                    }
+                ],
+                "otherwise": []
+            }
+        ]
+    }
+}

@@ -43,16 +43,31 @@ object WorkflowValueCodec {
                 WorkflowDataKind.TEXT -> { require(v is JsonPrimitive && v.isString && v.content.length <= 16384); WorkflowValue.Text(v.content) }
                 WorkflowDataKind.NUMBER -> { require(v is JsonPrimitive && !v.isString); val number = v.doubleOrNull ?: error("需要数字"); require(number.isFinite()); WorkflowValue.Number(number) }
                 WorkflowDataKind.BOOLEAN -> { require(v is JsonPrimitive && !v.isString); WorkflowValue.Boolean(v.booleanOrNull ?: error("需要布尔值")) }
-                WorkflowDataKind.LIST -> { require(v is JsonArray && v.size <= 10000); WorkflowValue.ListValue(v.map { decode(it, t.element!!, depth + 1) }) }
+                WorkflowDataKind.LIST -> {
+                    require(v is JsonArray) { "输出类型要求 JSON 列表（[...]），实际返回了非列表值" }
+                    require(v.size <= 10000) { "JSON 列表最多 10000 项" }
+                    WorkflowValue.ListValue(v.map { decode(it, t.element!!, depth + 1) })
+                }
                 WorkflowDataKind.RECORD -> {
-                    require(v is JsonObject && v.keys == t.fields.keys) { "JSON 字段与输出结构不一致" }
+                    require(v is JsonObject) {
+                        if(v is JsonArray) "输出类型要求单个 JSON 对象（{...}），实际返回了 JSON 列表（${v.size} 项）；请让提示词与输出类型一致"
+                        else "输出类型要求单个 JSON 对象（{...}），实际返回了非对象值"
+                    }
+                    require(v.keys == t.fields.keys) {
+                        "JSON 字段与输出结构不一致：" + listOfNotNull(
+                            (t.fields.keys - v.keys).takeIf { it.isNotEmpty() }?.let { "缺少字段 ${it.joinToString()}" },
+                            (v.keys - t.fields.keys).takeIf { it.isNotEmpty() }?.let { "多余字段 ${it.joinToString()}" }).joinToString("；")
+                    }
                     WorkflowValue.Record(t.fields.mapValues { decode(v.getValue(it.key), it.value, depth + 1) })
                 }
                 WorkflowDataKind.DICTIONARY -> { require(v is JsonObject && v.size <= 10000 && v.values.all { it is JsonPrimitive && it.isString }); WorkflowValue.Dictionary(v.mapValues { it.value.jsonPrimitive.content }) }
                 else -> error("此类型不能由 API 构造")
             }
         }
-        val result = decode(Json.parseToJsonElement(cleaned), type, 0)
+        val parsed = try { Json.parseToJsonElement(cleaned) } catch (failure: kotlinx.serialization.SerializationException) {
+            throw IllegalArgumentException("API 返回的正文不是有效 JSON，请查看 API 日志中的模型回复", failure)
+        }
+        val result = decode(parsed, type, 0)
         if (type == WorkflowType.list(WorkflowType.TRANSLATION) && expectedBubbleId != null) {
             val entries = (result as WorkflowValue.ListValue).items
             require(entries.size == 1 && ((entries.single() as WorkflowValue.Record).fields["bubbleId"] as WorkflowValue.Text).value == expectedBubbleId) {
@@ -61,6 +76,10 @@ object WorkflowValueCodec {
         }
         expectedItems?.let { requireMatchingTranslations(result, it) }
         return result
+    }
+    fun requireItemCount(result: WorkflowValue, expected: Int) {
+        val actual = (result as? WorkflowValue.ListValue)?.items?.size ?: error("项数校验需要列表输出")
+        require(actual == expected) { "API 输出项数不匹配：期望 $expected 项，实际 $actual 项" }
     }
     fun requireMatchingTranslations(result: WorkflowValue, expected: WorkflowValue.ListValue) {
         val rows = (result as? WorkflowValue.ListValue)?.items?.map { it as? WorkflowValue.Record ?: error("气泡输出必须是记录列表") } ?: error("气泡输出必须是列表")

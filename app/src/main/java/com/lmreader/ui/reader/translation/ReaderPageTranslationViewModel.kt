@@ -101,15 +101,16 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
                 val configuredTarget = com.lmreader.ui.translation.matchEngineLanguage(options.targetLanguage, installed) ?: LocalTranslationLanguage.fromTag(requireNotNull(options.targetLanguage))
                 val routes = if(workflow.program.uses(WorkflowKind.TRANSLATE)) setOf(configuredSource to configuredTarget) else emptySet()
                 routes.forEach { container.translationModels.installedCatalog().route(it.first, it.second) }
+                container.shelfRepository.ensureOnShelf(mangaId)
                 queue.prepareMangaResources(routes, workflow.program.uses(WorkflowKind.SEG), if(workflow.program.uses(WorkflowKind.OCR)) setOf(configuredSource) else emptySet())
                 val categoryId = container.shelfRepository.categoryIdOf(mangaId)
                 val categoryStyle = categoryId?.let { id -> container.shelfRepository.observeCategories().first().firstOrNull { it.categoryId == id }?.customStyle }
                 val settings = WorkflowRunSettings(configuredSource, configuredTarget,
-                    resolveTranslationStyle(options, categoryStyle, container.preferences.translationGlobalStyle.first()), render, options.effectiveSegThreshold(), container.apiProfiles.profiles.first(), options.segTextScope)
+                    resolveTranslationStyle(options, categoryStyle, container.preferences.translationGlobalStyle.first()), render, options.effectiveSegThreshold(), container.apiProfiles.profiles.first(), options.segTextScope, options.effectiveTextDetectionThreshold(), options.effectiveFreeTextMergeGapRatio())
                 val mangaName = container.mangaRepository.getCards(listOf(mangaId)).firstOrNull()?.displayName ?: mangaId
                 val host = object : AndroidWorkflowHost(container.applicationContext, container, mangaId, mangaName,
                     listOf(WorkflowChapterInput(item.chapter.chapterId, item.chapter.title, item.chapter.source, listOf(item.page))), settings,
-                    TranslationCacheBudget(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576), reusePages = false) {
+                    TranslationCacheBudget(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576), reusePages = false, requestOrigin = "单页重译") {
                     override fun step(node: WorkflowNode, frame: WorkflowFrame) {
                         val stage = when(node.kind) { WorkflowKind.SEG -> PageTranslationStage.SEGMENTING; WorkflowKind.OCR -> PageTranslationStage.OCR; else -> PageTranslationStage.TRANSLATING }
                         val progress = PageTranslationProgress(stage)

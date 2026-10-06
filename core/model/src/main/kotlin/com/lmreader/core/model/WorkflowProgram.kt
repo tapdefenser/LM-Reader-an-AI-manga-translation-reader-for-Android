@@ -47,7 +47,14 @@ data class WorkflowNode(
     val children: List<WorkflowNode> = emptyList(),
     val otherwise: List<WorkflowNode> = emptyList(),
     val collectTo: WorkflowRef? = null,
-)
+    /** Async branches of this row: null follows the engine limit, otherwise 1..[MAX_PARALLEL]. */
+    val parallelLimit: Int? = null,
+) {
+    init {
+        require(parallelLimit == null || parallelLimit in 1..MAX_PARALLEL) { "最大并行数应为 1～$MAX_PARALLEL" }
+    }
+    companion object { const val MAX_PARALLEL = 8 }
+}
 data class WorkflowProgram(val version: Int = 1, val rows: List<WorkflowNode>) {
     fun allNodes(): List<WorkflowNode> = rows.flatMap { node -> listOf(node) + WorkflowProgram(rows = node.children).allNodes() + WorkflowProgram(rows = node.otherwise).allNodes() }
     fun uses(kind: WorkflowKind) = allNodes().any { it.kind == kind }
@@ -101,17 +108,17 @@ object WorkflowTemplates {
     fun visionApi(profileId: String = ""): WorkflowProgram {
         val base = localMachine()
         val bubble = WorkflowSystem.BUBBLE
-        val output = WorkflowVariable("vision-result", "气泡对照", WorkflowType.list(WorkflowType.TRANSLATION))
-        val prompt = WorkflowExpression.Template("将附件气泡从\${源语言}翻译为\${目标语言}，遵守文风：\${文风}。已有译名字典：\${译名字典}。返回 JSON 列表，字段 bubbleId、source、translation。当前 bubbleId=\${气泡ID}；source 是图片中的原文，translation 是译文。只返回该 ID，不要编造文字。",
+        val output = WorkflowVariable("vision-result", "气泡对照", WorkflowType.GLOSSARY_ENTRY)
+        val prompt = WorkflowExpression.Template("附件是当前单个文字区域（气泡或游离文字）的裁图。将其中所有文字从\${源语言}翻译为\${目标语言}，遵守文风：\${文风}。已有译名字典：\${译名字典}。只返回一个 JSON 对象，字段 source、translation，不要返回列表或 bubbleId。source 是该区域中的完整原文，translation 是完整译文；同一区域的多行／多块文字按阅读顺序合并到这两个字段，不要拆成多个对象。没有文字时两个字段均为空字符串，不要编造文字。",
             mapOf("源语言" to WorkflowRef(WorkflowSystem.SOURCE), "目标语言" to WorkflowRef(WorkflowSystem.TARGET),
-                "文风" to WorkflowRef(WorkflowSystem.STYLE), "译名字典" to WorkflowRef(WorkflowSystem.GLOSSARY), "气泡ID" to WorkflowRef(bubble, listOf("id"))))
+                "文风" to WorkflowRef(WorkflowSystem.STYLE), "译名字典" to WorkflowRef(WorkflowSystem.GLOSSARY)))
         val steps = listOf(WorkflowNode("declare-vision", WorkflowKind.DECLARE, variable = output),
             WorkflowNode("api-vision", WorkflowKind.API, target = WorkflowRef(output.id), resultType = output.type,
                 inputs = mapOf("profile" to WorkflowExpression.Text(profileId), "prompt" to prompt, "images" to WorkflowSystem.ref(bubble, "image"))),
             WorkflowNode("vision-source", WorkflowKind.SET, target = WorkflowRef(bubble, listOf("source")),
-                inputs = mapOf("value" to WorkflowSystem.ref(output.id, "0", "source"))),
+                inputs = mapOf("value" to WorkflowSystem.ref(output.id, "source"))),
             WorkflowNode("vision-target", WorkflowKind.SET, target = WorkflowRef(bubble, listOf("translation")),
-                inputs = mapOf("value" to WorkflowSystem.ref(output.id, "0", "translation"))))
+                inputs = mapOf("value" to WorkflowSystem.ref(output.id, "translation"))))
         val manga = base.rows.single(); val chapter = manga.children.single(); val page = chapter.children.single()
         return base.copy(rows = listOf(manga.copy(children = listOf(chapter.copy(children = listOf(page.copy(
             children = listOf(page.children.first(), page.children.last().copy(children = steps)))))))))

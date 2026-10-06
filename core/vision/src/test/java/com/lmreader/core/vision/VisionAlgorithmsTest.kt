@@ -6,6 +6,17 @@ import java.nio.FloatBuffer
 import kotlin.test.*
 
 class VisionAlgorithmsTest {
+    @Test fun `text mask keeps disconnected strokes and accents in one complete contour`() {
+        val w = 20; val h = 20; val proto = FloatArray(w*h*32) { -1f }
+        for (y in 5..8) for (x in 2..9) proto[(y*w+x)*32] = 1f
+        for (y in 12..17) for (x in 12..17) proto[(y*w+x)*32] = 1f
+        proto[(2*w+3)*32] = 1f // a disconnected accent must survive
+        val contours = segContours(RawSeg(PixelRect(0f,0f,20f,20f),.9f,1,
+            FloatArray(32).apply { this[0] = 1f }), FloatBuffer.wrap(proto),w,h,Letterbox(w,h,w,h))
+        assertEquals(1, contours.size)
+        assertEquals(PixelRect(2f,2f,18f,18f), contourBounds(contours.single()))
+        assertTrue(polygonContains(contours.single(), 15f, 15f))
+    }
     @Test fun `merged prediction keeps a smaller disconnected balloon but discards isolated mask noise`() {
         val w = 20; val h = 20; val proto = FloatArray(w * h * 32) { -1f }
         for (y in 2..10) for (x in 2..9) proto[(y * w + x) * 32] = 1f
@@ -80,6 +91,20 @@ class VisionAlgorithmsTest {
     }
     @Test fun `blank page produces no db boxes`() {
         assertTrue(dbBoxes(FloatBuffer.wrap(FloatArray(100)),10,10,Letterbox(100,100,100,100)).isEmpty())
+    }
+    @Test fun `small confident text kernel survives the upstream component threshold`() {
+        val p=FloatArray(100)
+        for (i in 3..5) p[i*10+i]=.9f
+        assertEquals(1,dbBoxes(FloatBuffer.wrap(p),10,10,Letterbox(100,100,100,100)).size)
+        p[55]=0f
+        assertTrue(dbBoxes(FloatBuffer.wrap(p),10,10,Letterbox(100,100,100,100)).isEmpty())
+    }
+    @Test fun `user confidence threshold changes detected lines without changing geometry`() {
+        val p=FloatArray(100)
+        for (y in 3..5) for (x in 3..6) p[y*10+x]=.55f
+        val transform=Letterbox(100,100,100,100)
+        assertEquals(1,dbBoxes(FloatBuffer.wrap(p),10,10,transform,.4f).size)
+        assertTrue(dbBoxes(FloatBuffer.wrap(p),10,10,transform,.7f).isEmpty())
     }
     @Test fun `ctc blank separates repeated characters and preserves unicode`() {
         val chars=listOf("","你","好","😀"," ")

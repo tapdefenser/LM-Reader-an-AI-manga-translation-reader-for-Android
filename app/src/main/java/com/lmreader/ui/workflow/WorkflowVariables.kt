@@ -1,14 +1,39 @@
 package com.lmreader.ui.workflow
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import com.lmreader.ui.i18n.Text
+import com.lmreader.ui.i18n.UiTextTranslations
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import com.lmreader.core.model.*
 import com.lmreader.core.workflow.*
 
 internal fun typedLabel(choice: WorkflowReferenceChoice) = "${WorkflowLabels.type(choice.type)} · ${choice.label}"
+
+/** One summary line entry for a variable the row declares or writes, deduplicated by type and name. */
+internal data class TypedChoice(val name: String, val type: WorkflowType) {
+    constructor(variable: WorkflowVariable) : this(variable.name, variable.type)
+    constructor(choice: WorkflowReferenceChoice) : this(choice.label, choice.type)
+}
+
+@Composable
+internal fun WorkflowOptionSearch(label: String, query: String, changed: (String) -> Unit) {
+    OutlinedTextField(query, changed, label = { Text("搜索变量、字段或类型") }, singleLine = true,
+        modifier = Modifier.fillMaxWidth().testTag("workflow-search:$label"))
+}
+
+@Composable
+internal fun workflowOptionMatcher(query: String): (String) -> Boolean {
+    val context = LocalContext.current
+    val keyword = query.trim()
+    return { label -> keyword.isEmpty() || label.contains(keyword, true) || UiTextTranslations.translate(context, label).contains(keyword, true) }
+}
 
 @Composable
 internal fun variableColor(type: WorkflowType): Color {
@@ -33,10 +58,10 @@ internal fun TypedVariable(choice: WorkflowReferenceChoice) {
 
 internal fun expressionLabel(expression: WorkflowExpression, refs: List<WorkflowReferenceChoice>): String = when(expression) {
     is WorkflowExpression.Ref -> refs.firstOrNull { it.ref == expression.value }?.let(::typedLabel) ?: "引用 · 不可用变量"
-    is WorkflowExpression.Text -> "文本 · ${expression.value.take(40).ifBlank { "空文本" }}"
-    is WorkflowExpression.Template -> "文本 · 提示词模板"
-    is WorkflowExpression.Number -> "数字 · ${expression.value}"
-    is WorkflowExpression.Boolean -> "布尔 · ${expression.value}"
+    is WorkflowExpression.Text -> "${WorkflowLabels.type(WorkflowType.TEXT)} · ${expression.value.take(40).ifBlank { "空文本" }}"
+    is WorkflowExpression.Template -> "${WorkflowLabels.type(WorkflowType.TEXT)} · 提示词模板"
+    is WorkflowExpression.Number -> "${WorkflowLabels.type(WorkflowType.NUMBER)} · ${expression.value}"
+    is WorkflowExpression.Boolean -> "${WorkflowLabels.type(WorkflowType.BOOLEAN)} · ${expression.value}"
     is WorkflowExpression.Empty -> "${WorkflowLabels.type(expression.type)} · 初始值"
-    is WorkflowExpression.Record -> "记录 · ${expression.fields.keys.joinToString()}"
+    is WorkflowExpression.Record -> "${WorkflowLabels.type(WorkflowType(WorkflowDataKind.RECORD))} · ${expression.fields.keys.joinToString()}"
 }

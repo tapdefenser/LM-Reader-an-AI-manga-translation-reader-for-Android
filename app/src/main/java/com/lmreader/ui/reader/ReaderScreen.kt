@@ -224,8 +224,7 @@ fun ReaderScreen(
                 state = state,
                 onDismiss = { settingsOpen = false },
                 onReadingMode = {mode ->translationViewModel.requestNavigation {viewModel.setReadingMode(mode)}},
-                onClearReadingMode = {translationViewModel.requestNavigation {viewModel.clearReadingModeOverride()}},
-                onOrientation = viewModel::setOrientationOverride,
+                onOrientation = viewModel::setOrientation,
                 onUpdateGlobal = viewModel::updateGlobalSettings,
             )
         }

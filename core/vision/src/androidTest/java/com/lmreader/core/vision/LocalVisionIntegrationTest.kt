@@ -95,7 +95,8 @@ class LocalVisionIntegrationTest {
         "こんにちは".forEachIndexed { i,c -> canvas.drawText(c.toString(),350f,120f+i*75f,paint) }
         "世界".forEachIndexed { i,c -> canvas.drawText(c.toString(),150f,120f+i*75f,paint) }
         try {
-            val result=engine.recognize("vertical",image,LocalOcrLanguage.JAPANESE)
+            val seg=engine.segment("vertical",image)
+            val result=engine.recognize("vertical",image,LocalOcrLanguage.JAPANESE,textLines=seg.textLines)
             Log.i("VisionIntegration","VERTICAL: ${result.text} ${result.lines.map { it.bounds }} ${result.elapsedMillis}ms")
             Assert.assertTrue(result.text.contains("こんにちは")); Assert.assertTrue(result.text.contains("世界"))
             Assert.assertTrue(result.text.indexOf("こんにちは") < result.text.indexOf("世界")); assertCoordinates(result,image)
@@ -135,7 +136,9 @@ class LocalVisionIntegrationTest {
             Assert.assertTrue("No bubble from fixture",result.regions.any { it.kind==RegionKind.BUBBLE && it.contour.size>=4 })
             Assert.assertTrue(result.regions.all { it.bounds.left>=0 && it.bounds.top>=0 && it.bounds.right<=800 && it.bounds.bottom<=1000 })
             Assert.assertTrue(result.regions.flatMap { it.contour }.all { it.x in 0f..800f && it.y in 0f..1000f })
-            Assert.assertTrue(engine.segment("blank-seg",blank).regions.isEmpty())
+            val blankSeg=engine.segment("blank-seg",blank)
+            Log.i("VisionIntegration","BLANK SEG: ${blankSeg.regions}; lines=${blankSeg.textLines}")
+            Assert.assertTrue("Blank SEG regions: ${blankSeg.regions}; lines=${blankSeg.textLines}",blankSeg.regions.isEmpty())
             val long=Bitmap.createBitmap(800,3000,Bitmap.Config.ARGB_8888)
             try {
                 Canvas(long).apply { drawColor(Color.WHITE); drawBitmap(image,0f,2000f,null) }

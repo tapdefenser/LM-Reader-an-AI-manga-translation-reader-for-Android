@@ -61,6 +61,9 @@ interface ShelfDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertEntry(entity: ShelfEntryEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertEntryIfAbsent(entity: ShelfEntryEntity)
+
     @Query("DELETE FROM shelf_entries WHERE mangaId = :mangaId")
     suspend fun deleteEntry(mangaId: String)
 

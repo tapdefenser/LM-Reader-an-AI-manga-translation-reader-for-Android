@@ -737,7 +737,10 @@ interface MangaDao {
             translationBubblePadding = :bubblePadding,
             translationBubbleFont = :bubbleFont,
             translationBubbleFontScale = :bubbleFontScale,
-            translationBubbleBold = :bubbleBold
+            translationBubbleBold = :bubbleBold,
+            translationTextDetectionThreshold = :textDetectionThreshold,
+            translationFreeTextMaskExpansion = :freeTextMaskExpansion,
+            translationFreeTextMergeGapRatio = :freeTextMergeGapRatio
         WHERE mangaId = :mangaId
         """,
     )
@@ -758,6 +761,9 @@ interface MangaDao {
         bubbleFont: String?,
         bubbleFontScale: Int?,
         bubbleBold: Boolean?,
+        textDetectionThreshold: Float?,
+        freeTextMaskExpansion: Int?,
+        freeTextMergeGapRatio: Float?,
     )
 
     /**

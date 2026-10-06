@@ -109,6 +109,9 @@ internal fun MangaEntity.toDomain(): MangaRecord = MangaRecord(
         bubbleFont = translationBubbleFont?.let { name -> com.lmreader.core.model.BubbleFont.entries.firstOrNull { it.name == name } },
         bubbleFontScalePercent = translationBubbleFontScale?.takeIf { it in 50..150 },
         bubbleBold = translationBubbleBold,
+        textDetectionThreshold = translationTextDetectionThreshold,
+        freeTextMaskExpansionPercent = translationFreeTextMaskExpansion,
+        freeTextMergeGapRatio = translationFreeTextMergeGapRatio,
     ),
 )
 
@@ -153,6 +156,9 @@ internal fun MangaRecord.toEntity(sourceOrderIndex: Int): MangaEntity = MangaEnt
     translationBubbleFont = translationSettings.bubbleFont?.name,
     translationBubbleFontScale = translationSettings.bubbleFontScalePercent,
     translationBubbleBold = translationSettings.bubbleBold,
+    translationTextDetectionThreshold = translationSettings.textDetectionThreshold,
+    translationFreeTextMaskExpansion = translationSettings.freeTextMaskExpansionPercent,
+    translationFreeTextMergeGapRatio = translationSettings.freeTextMergeGapRatio,
 )
 
 internal fun ChapterEntity.toDomain(): ChapterRecord = ChapterRecord(

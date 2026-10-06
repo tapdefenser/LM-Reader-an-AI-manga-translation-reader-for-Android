@@ -13,6 +13,55 @@ import org.junit.runner.RunWith
 /** Generated fixtures only; this test package does not open or modify the reader's library. */
 @RunWith(AndroidJUnit4::class)
 class SegRegionIsolationTest {
+    @Test fun closeFreeTextRowsAndColumnsHaveIndependentApiAndOcrPixels() {
+        for (vertical in listOf(false, true)) {
+            fun orient(rect: PixelRect) = if (vertical) PixelRect(rect.top, rect.left, rect.bottom, rect.right) else rect
+            val image = Bitmap.createBitmap(460, 460, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+            val lines = listOf(orient(PixelRect(40f,35f,420f,65f)), orient(PixelRect(40f,73f,420f,103f)))
+            val parent = SegRegion("caption", RegionKind.FREE_TEXT, orient(PixelRect(20f,20f,440f,130f)), .9f)
+            val seg = SegResult("p", 460, 460, listOf(parent), 0, "fixture",
+                textLines = lines.map { DetectedTextLine(it, .9f) })
+            val canvas = Canvas(image)
+            lines.forEachIndexed { index, rect ->
+                canvas.drawRect(rect.left, rect.top, rect.right, rect.bottom,
+                    Paint().apply { color = if (index == 0) Color.RED else Color.BLUE })
+            }
+            fun count(bitmap: Bitmap, color: Int): Int = (0 until bitmap.height).sumOf { y ->
+                (0 until bitmap.width).count { x -> bitmap.getPixel(x, y) == color }
+            }
+            try {
+                val separate = selectSegRegions(seg, SegTextScope.FREE_TEXT)
+                assertEquals(2, separate.size)
+                separate.forEachIndexed { index, region ->
+                    cropSegRegion(image, region, seg.regions).use { crop ->
+                        assertTrue(count(crop.bitmap, if (index == 0) Color.RED else Color.BLUE) > 0)
+                        assertEquals(0, count(crop.bitmap, if (index == 0) Color.BLUE else Color.RED))
+                    }
+                    assertEquals(listOf(lines[index]), selectRegionTextLines(region, seg.regions, seg.textLines).map { it.bounds })
+                }
+                val joined = selectSegRegions(seg, SegTextScope.FREE_TEXT, .3f)
+                assertEquals(1, joined.size)
+                cropSegRegion(image, joined.single(), seg.regions).use { crop ->
+                    assertTrue(count(crop.bitmap, Color.RED) > 0)
+                    assertTrue(count(crop.bitmap, Color.BLUE) > 0)
+                }
+            } finally { image.recycle() }
+        }
+    }
+
+    @Test fun freeTextCropKeepsBoldOutlineOutsideTightMask() {
+        val image = Bitmap.createBitmap(100,100,Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        Canvas(image).drawRect(22f,22f,78f,78f,Paint().apply { color=Color.BLACK })
+        val region = SegRegion("bold",RegionKind.FREE_TEXT,PixelRect(20f,20f,80f,80f),.9f,
+            listOf(PixelPoint(30f,30f),PixelPoint(70f,30f),PixelPoint(70f,70f),PixelPoint(30f,70f)))
+        try {
+            cropSegRegion(image,region,listOf(region)).use { crop ->
+                assertEquals(Color.BLACK,crop.bitmap.getPixel(3,3))
+                assertEquals(Color.BLACK,crop.bitmap.getPixel(57,57))
+                assertEquals(Color.WHITE,crop.bitmap.getPixel(0,0))
+            }
+        } finally { image.recycle() }
+    }
     @Test fun realSegAndOcrRetainBothTextsInConnectedBalloonFixture() = runBlocking {
         val image = Bitmap.createBitmap(1000, 700, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(image); canvas.drawColor(Color.LTGRAY)
@@ -31,7 +80,7 @@ class SegRegionIsolationTest {
         try {
             val seg = engine.segment("connected-fixture", image)
             val targets = selectSegRegions(seg, SegTextScope.BUBBLES)
-            val recognized = targets.map { engine.recognizeRegion(seg.imageId, image, LocalOcrLanguage.ENGLISH, it, seg.regions).translationText }
+            val recognized = targets.map { engine.recognizeRegion(seg.imageId, image, LocalOcrLanguage.ENGLISH, it, seg.regions, seg.textLines).translationText }
             Log.i("SegIsolation", "raw=${seg.regions}; targets=${targets.size}; recognized=$recognized")
             assertTrue("No detected balloon targets", targets.isNotEmpty())
             assertTrue("First text missed: $recognized", recognized.any { it.contains("HELLO") && it.contains("FRIEND") })

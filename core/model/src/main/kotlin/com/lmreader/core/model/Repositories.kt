@@ -316,6 +316,8 @@ interface ShelfRepository {
     /** 删除分类后其收藏移到未分类，不删漫画（开发文档 8.2）。 */
     suspend fun reorderCategories(orderedIds: List<Long>)
     suspend fun addToShelf(mangaId: String, categoryId: Long)
+    /** 自动收藏到未分类；已收藏的漫画保留原分类和收藏时间。 */
+    suspend fun ensureOnShelf(mangaId: String)
     suspend fun removeFromShelf(mangaId: String)
 
     /**
@@ -358,6 +360,7 @@ interface TranslationRepository {
      * 入队：把选中章节置为待翻译（幂等，已经是 PENDING 的不重复写）。
      *
      * 已经在翻译中或已完成的章节**不动**——「翻译所选」不该把已完成的作品退回去重翻。
+     * 有效的非空请求同时将漫画加入书架，已收藏的漫画保留原分类。
      *
      * @return 真正新入队的章节数
      */

@@ -150,7 +150,7 @@ internal class PaddleModel(private val models: VisionModels, private val name: S
 internal class PaddleDetector(models: VisionModels, preference: OcrBackend = OcrBackend.CPU, report: (String) -> Unit = {}) : AutoCloseable {
     private val model = PaddleModel(models,"det.onnx",preference,report)
     val backend get() = model.backend
-    fun detect(image: Bitmap): List<Pair<PixelRect,Float>> {
+    fun detect(image: Bitmap, scoreThreshold: Float = .45f): List<Pair<PixelRect,Float>> {
         val width = model.inputShape[3].takeIf { it > 0 }?.toInt() ?: 960
         val height = model.inputShape[2].takeIf { it > 0 }?.toInt() ?: 960
         val transform = Letterbox(image.width,image.height,width,height)
@@ -160,6 +160,9 @@ internal class PaddleDetector(models: VisionModels, preference: OcrBackend = Ocr
         finally { if (resized !== image) resized.recycle() }
         val input = FloatArray(3*width*height)
         val means = floatArrayOf(.485f,.456f,.406f); val std = floatArrayOf(.229f,.224f,.225f)
+        // Match upstream's black RGB letterbox before normalization, rather than leaving
+        // a normalized gray border that the detector can mistake for a text rectangle.
+        for (c in 0..2) input.fill(-means[c]/std[c], c*width*height, (c+1)*width*height)
         for (y in 0 until transform.contentHeight) for (x in 0 until transform.contentWidth) {
             val pixel = pixels[y*transform.contentWidth+x]
             val index = (y+transform.top)*width+x+transform.left
@@ -169,7 +172,7 @@ internal class PaddleDetector(models: VisionModels, preference: OcrBackend = Ocr
             require(shape.size == 4 && shape[0] == 1L && shape[1] == 1L && shape[2] > 0 && shape[3] > 0) {
                 "文字检测输出必须为 [1,1,H,W]，实际为 ${shape.contentToString()}"
             }
-            dbBoxes(buffer,shape[3].toInt(),shape[2].toInt(),transform)
+            dbBoxes(buffer,shape[3].toInt(),shape[2].toInt(),transform,scoreThreshold)
         }
     }
     override fun close() = model.close()

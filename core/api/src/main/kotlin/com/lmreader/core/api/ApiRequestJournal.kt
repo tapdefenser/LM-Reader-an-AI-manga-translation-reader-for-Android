@@ -8,6 +8,12 @@ data class ApiTraceContext(val mangaId: String = "", val mangaName: String = "é…
     val chapterName: String = "", val pageName: String = "", val stepName: String = "") : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<ApiTraceContext>
 }
+
+/** One invocation links its HTTP attempts to later structured-output validation. */
+class ApiTraceCapture : AbstractCoroutineContextElement(Key) {
+    companion object Key : CoroutineContext.Key<ApiTraceCapture>
+    val requestId = java.util.concurrent.atomic.AtomicReference<String?>()
+}
 data class ApiRequestInfo(val context: ApiTraceContext, val profileName: String, val model: String,
     val url: String, val method: String, val format: String, val attempt: Int, val request: String)
 data class ApiRequestOutcome(val status: String, val response: String = "", val thinking: String = "",

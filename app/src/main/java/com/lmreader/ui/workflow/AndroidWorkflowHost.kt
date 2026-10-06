@@ -29,13 +29,14 @@ import kotlin.math.floor
 data class WorkflowChapterInput(val id: String, val name: String, val source: PageSource, val pages: List<ReaderPage>)
 data class WorkflowRunSettings(val source: LocalTranslationLanguage, val target: LocalTranslationLanguage,
     val style: String, val render: BubbleRenderSettings, val segThreshold: Float, val apiProfiles: List<ApiProfile> = emptyList(),
-    val segTextScope: SegTextScope = SegTextScope.ALL)
+    val segTextScope: SegTextScope = SegTextScope.ALL, val textDetectionThreshold: Float = .45f,
+    val freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO)
 
 /** One host owns a manga run. Image references survive page completion; decoded bitmaps use the SEG MB budget. */
 open class AndroidWorkflowHost(private val context: Context, protected val container: AppContainer,
     private val mangaId: String, mangaName: String, private val chapterInputs: List<WorkflowChapterInput>,
     private val settings: WorkflowRunSettings, private val budget: TranslationCacheBudget,
-    private val reusePages: Boolean = true) : WorkflowRuntimeHost {
+    private val reusePages: Boolean = true, private val requestOrigin: String = "") : WorkflowRuntimeHost {
     override val manga = record("id" to text(mangaId), "name" to text(mangaName))
     override val sourceLanguage get() = settings.source.tag
     override val targetLanguage get() = settings.target.tag
@@ -91,11 +92,22 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 progress(frame, PageTranslationProgress(PageTranslationStage.READING))
                 val state = image(reference.pageId)
                 try {
-                val seg = container.localVision.segment(reference.pageId, state.bitmap!!, settings.segThreshold) { progress(frame, PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total)) }
-                state.seg = seg
-                val regions = selectSegRegions(seg, settings.segTextScope)
+                val seg = container.localVision.segment(reference.pageId, state.bitmap!!, settings.segThreshold, settings.textDetectionThreshold) { progress(frame, PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total)) }
+                val regions = selectSegRegions(seg, settings.segTextScope, settings.freeTextMergeGapRatio)
                 require(regions.size <= 1000) { "气泡过多，请分批处理" }
-                list(regions.mapIndexed { index, region ->
+                // Invalidate only this page. A fresh generation prevents copied old iterators
+                // from resolving to new geometry when the detector reuses an indexed ID.
+                val generation = java.util.UUID.randomUUID().toString()
+                images.entries.filter { it.value.pageId == reference.pageId && it.key.startsWith("bubble:") }.forEach { entry ->
+                    if(images.remove(entry.key, entry.value)) {
+                        val id = entry.key.removePrefix("bubble:")
+                        geometry.remove(id); ocrBounds.remove(id)
+                    }
+                }
+                cached.remove(reference.pageId); prepared.remove(reference.pageId); published.remove(reference.pageId)
+                state.seg = seg
+                list(regions.mapIndexed { index, detected ->
+                    val region = detected.copy(id = "${detected.id}:seg:$generation")
                     geometry[region.id] = region; images["bubble:${region.id}"] = ImageRef(reference.pageId, region.bounds)
                     record("id" to text(region.id), "index" to number(index + 1), "image" to WorkflowValue.Image("bubble:${region.id}"),
                         "source" to text(""), "translation" to text(""), "confidence" to WorkflowValue.Number(region.confidence.toDouble()), "kind" to text(region.kind.name))
@@ -111,9 +123,11 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 val region = key.takeIf { it.startsWith("bubble:") }?.removePrefix("bubble:")?.let { geometry[it] }
                 val report: (VisionProgress) -> Unit = { progress(frame, PageTranslationProgress(PageTranslationStage.OCR, it.completed, it.total)) }
                 val result = if (region != null) container.localVision.recognizeRegion(reference.pageId, state.bitmap!!,
-                    language, region, state.seg!!.regions, report)
+                    language, region, state.seg!!.regions, state.seg!!.textLines, report)
                 else container.localVision.recognize(reference.pageId, state.bitmap!!, language,
-                    reference.area?.let { kotlin.collections.listOf(it) }, report)
+                    reference.area?.let { kotlin.collections.listOf(it) }, state.seg?.textLines?.filter { line ->
+                        reference.area?.let { area -> line.bounds.left >= area.left && line.bounds.top >= area.top && line.bounds.right <= area.right && line.bounds.bottom <= area.bottom } ?: true
+                    }, report)
                 if (key.startsWith("bubble:")) ocrBounds[key.removePrefix("bubble:")] = result.lines.map { it.bounds }
                 text(result.translationText)
                 } finally { releaseReader(state) }
@@ -137,30 +151,59 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         val live = profiles.firstOrNull { it.id == call.profileId } ?: error("API 配置已删除，请重新选择")
         container.apiClient.configureProfiles(if(settings.apiProfiles.isNotEmpty()) settings.apiProfiles else profiles)
         val profile = settings.apiProfiles.firstOrNull { it.id == call.profileId }?.copy(apiKey = live.apiKey) ?: live
-        require(call.images.size <= 16) { "一次最多附带 16 张气泡图片，请按气泡或分批请求" }
         val attachments = call.images.map { encodeImage(it) }
         require(attachments.sumOf { it.base64.length } <= 16_000_000) { "API 图片附件超过 16 MB，请分批处理" }
         val example = schemaExample(call.resultType).let { structure ->
             call.expectedBubbleId?.let { structure.replace("\"bubbleId\":\"文本\"", "\"bubbleId\":" + org.json.JSONObject.quote(it)) } ?: structure
         }
-        val schema = if (call.resultType == WorkflowType.TEXT) "" else "\n只返回完整 JSON，不要说明或 Markdown。所有字段必须提供且不能添加字段。输出结构：$example"
+        val shape = when(call.resultType.kind) {
+            WorkflowDataKind.RECORD, WorkflowDataKind.DICTIONARY -> "只返回一个 JSON 对象，不要返回列表。"
+            WorkflowDataKind.LIST -> "只返回一个完整 JSON 列表。"
+            else -> "只返回完整 JSON。"
+        }
+        val schema = if (call.resultType == WorkflowType.TEXT) "" else "\n${shape}不要说明或 Markdown。所有字段必须提供且不能添加字段。输出结构：$example"
+        val emptyRegionHint = if(call.resultType == WorkflowType.GLOSSARY_ENTRY && call.images.singleOrNull()?.key?.startsWith("bubble:") == true)
+            "如果附件只有图案而没有可辨认文字，返回 {\"source\":\"\",\"translation\":\"\"}。" else ""
+        val imageHint = if(attachments.isEmpty()) "" else "\n本次消息已附带 ${attachments.size} 张实际图片，内容可能是气泡或游离文字区域。请直接读取图片，不要要求用户再次上传。$emptyRegionHint"
         val messages = call.messages.mapIndexed { index, message -> ApiMessage(message.role,
-            message.content + if (index == call.messages.lastIndex) schema else "", if (index == call.messages.lastIndex) attachments else emptyList()) }
+            message.content + if (index == call.messages.lastIndex) imageHint + schema else "", if (index == call.messages.lastIndex) attachments else emptyList()) }
         val result = StringBuilder()
         val bubbleId = call.expectedBubbleId ?: call.images.singleOrNull()?.key?.takeIf { it.startsWith("bubble:") }?.removePrefix("bubble:")
         val parser = if(item != null) WorkflowJsonStream(call.resultType, call.expectedItems, bubbleId) else null
         val trace = ApiTraceContext(mangaId, manga.string("name"),
             runCatching { frame.text(WorkflowSystem.CHAPTER, "name") }.getOrDefault(""),
-            runCatching { frame.text(WorkflowSystem.PAGE, "name") }.getOrDefault(""), call.stepName)
-        withContext(trace) {
-            container.apiClient.stream(profile, messages).collect { event -> if(event is ApiStreamEvent.Text && !event.thinking) {
+            runCatching { frame.text(WorkflowSystem.PAGE, "name") }.getOrDefault(""), listOf(requestOrigin, call.stepName).filter { it.isNotBlank() }.joinToString(" · "))
+        val capture = ApiTraceCapture()
+        var transportComplete = false
+        var outputFailed = false
+        val parameters = org.json.JSONObject(profile.customParameters.ifBlank { "{}" })
+        val responseFormat = if(profile.format == ApiFormat.CHAT && !parameters.has("response_format")) WorkflowJsonSchema.responseFormat(call.resultType) else null
+        val constrainedProfile = responseFormat?.let { profile.copy(customParameters = parameters.put("response_format", org.json.JSONObject(it)).toString()) } ?: profile
+        try { return withContext(trace + capture) {
+            suspend fun collectResponse(requestProfile: ApiProfile) = container.apiClient.stream(requestProfile, messages).collect { event -> if(event is ApiStreamEvent.Text && !event.thinking) {
                 require(result.length + event.value.length <= 4_000_000) { "API 输出超过 4 MB" }; result.append(event.value)
-                if(parser != null) parser.append(event.value, requireNotNull(item))
+                if(parser != null) try { parser.append(event.value, requireNotNull(item)) }
+                    catch(failure: IllegalArgumentException) { outputFailed = true; throw failure }
             } }
+            try { collectResponse(constrainedProfile) } catch(failure: ApiException) {
+                val unsupported = failure.httpCode in setOf(400, 422) && Regex("response_format|json_schema|json schema|structured output", RegexOption.IGNORE_CASE).containsMatchIn(failure.message.orEmpty())
+                if(responseFormat != null && result.isEmpty() && unsupported) collectResponse(profile) else throw failure
+            }
+            transportComplete = true
+            require(result.isNotBlank()) { "API 没有返回正文" }
+            val parsed = if(parser != null) parser.finish()
+                else WorkflowValueCodec.parseResponse(result.toString(), call.resultType, bubbleId, call.expectedItems)
+            call.expectedCount?.let { WorkflowValueCodec.requireItemCount(parsed, it) }
+            parsed
+        } } catch(cancelled: CancellationException) { throw cancelled }
+        catch(failure: Exception) {
+            if(transportComplete || outputFailed) {
+                val detail = (failure.message ?: "API 输出校验失败") + "\n本次请求已附带 ${attachments.size} 张图片。"
+                withContext(NonCancellable) { capture.requestId.get()?.let { runCatching { container.apiLogs.recordOutputFailure(it, detail) } } }
+                throw IllegalArgumentException(detail, failure)
+            }
+            throw failure
         }
-        require(result.isNotBlank()) { "API 没有返回正文" }
-        if(parser != null) return parser.finish()
-        return WorkflowValueCodec.parseResponse(result.toString(), call.resultType, bubbleId, call.expectedItems)
     }
     private suspend fun encodeImage(image: WorkflowValue.Image): ApiImage {
         val reference = images[image.key] ?: error("图片引用不存在")
@@ -177,8 +220,10 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
             } ?: bitmap
             try {
                 val output = ByteArrayOutputStream()
-                check(crop.compress(Bitmap.CompressFormat.JPEG, 92, output))
-                ApiImage("image/jpeg", Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP))
+                val format = if (region != null) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG
+                check(crop.compress(format, 92, output))
+                ApiImage(if (format == Bitmap.CompressFormat.PNG) "image/png" else "image/jpeg",
+                    Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP))
             } finally {
                 if (crop !== bitmap) crop.recycle()
             }
@@ -249,15 +294,18 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         pagePreviewed(frame, saved)
     }
     protected open suspend fun pagePreviewed(frame: WorkflowFrame, saved: ReaderPageTranslation) {}
+    override suspend fun segmentedPage(frame: WorkflowFrame) = previewPage(frame)
     private suspend fun translatedRegions(frame: WorkflowFrame, id: String): List<PageTranslatedRegion> {
         val bubbles = (frame.read(WorkflowRef(WorkflowSystem.PAGE, kotlin.collections.listOf("bubbles"))) as WorkflowValue.ListValue).items
+        val seg = states[id]?.seg ?: error("本页没有执行 SEG，无法建立译文气泡")
         require(bubbles.size <= 1000 && bubbles.map { (it as WorkflowValue.Record).string("id") }.distinct().size == bubbles.size) { "气泡列表重复或过多" }
         return bubbles.map { value ->
             val bubble = value as WorkflowValue.Record; val bubbleId = bubble.string("id")
             val area = geometry[bubbleId] ?: error("气泡几何必须来自 SEG")
             require(bubbleId.startsWith("$id:")) { "不能把其他页的气泡回填到本页" }
             PageTranslatedRegion(PageTextRegion(bubbleId, area.kind, area.bounds, area.contour,
-                bubble.string("source"), ocrBounds[bubbleId].orEmpty()), bubble.string("translation"))
+                bubble.string("source"), ocrBounds[bubbleId] ?:
+                    selectRegionTextLines(area, seg.regions, seg.textLines).map { it.bounds }), bubble.string("translation"))
         }
     }
     override suspend fun completePreparationPage(frame: WorkflowFrame): WorkflowValue.ListValue {

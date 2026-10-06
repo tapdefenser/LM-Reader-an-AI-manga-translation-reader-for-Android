@@ -16,6 +16,24 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ReaderBubbleOverlayTest {
+    @Test fun untranslatedBubbleCanBeSelectedForEditingWithoutCoveringOriginalText() {
+        val image=Bitmap.createBitmap(100,100,Bitmap.Config.ARGB_8888).apply {eraseColor(Color.WHITE)}
+        Canvas(image).drawRect(30f,30f,70f,70f,Paint().apply {color=Color.BLACK})
+        val region=PageTextRegion("empty",RegionKind.BUBBLE,PixelRect(10f,10f,90f,90f),emptyList(),"",emptyList())
+        val seed=BubbleMaskRenderer().prepareSource(image,listOf(region))
+        val regions=listOf(PageTranslatedRegion(region,""))
+        val normal=seed.layout(regions,BubbleRenderSettings(),hideEmpty=true)
+        val editable=seed.layout(regions,BubbleRenderSettings(),hideEmpty=true,includeEmptyForEditing=true)
+        val drawn=image.copy(Bitmap.Config.ARGB_8888,true)
+        try {
+            assertNull(normal.hitTest(50f,50f))
+            assertEquals("empty",editable.hitTest(50f,50f))
+            editable.draw(Canvas(drawn))
+            assertTrue(image.sameAs(drawn))
+            editable.drawEditing(Canvas(drawn),"empty",2f)
+            assertFalse(image.sameAs(drawn))
+        } finally {drawn.recycle();image.recycle()}
+    }
     @Test fun streamingTextReusesMaskGeometryAfterOriginalReleaseAndLeavesPendingBubbleVisible() {
         val original = Bitmap.createBitmap(400, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
         Canvas(original).drawRect(240f, 70f, 280f, 110f, Paint().apply { color = Color.BLACK })

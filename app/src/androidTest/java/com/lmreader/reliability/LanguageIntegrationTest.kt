@@ -23,7 +23,7 @@ class LanguageIntegrationTest {
         for (tag in listOf("en-US", "ja-JP", "ko-KR", "fr-FR", "ar", "zh-TW", "zh-Hant")) {
             val context = context(tag)
             assertEquals(tag, "All files access information", context.getString(R.string.lmreader_all_files_access_title))
-            assertEquals(tag, "Pause all", context.getString(R.string.lmreader_task_pause))
+            assertEquals(tag, "Pause", context.getString(R.string.lmreader_task_pause_one))
             assertEquals(tag, "Settings", UiTextTranslations.translate(context, "设置"))
         }
     }
@@ -31,7 +31,7 @@ class LanguageIntegrationTest {
         for (tag in listOf("zh-CN", "zh-SG", "zh-Hans")) {
             val context = context(tag)
             assertEquals(tag, "全部文件访问说明", context.getString(R.string.lmreader_all_files_access_title))
-            assertEquals(tag, "全部暂停", context.getString(R.string.lmreader_task_pause))
+            assertEquals(tag, "暂停", context.getString(R.string.lmreader_task_pause_one))
             assertEquals(tag, "设置", UiTextTranslations.translate(context, "设置"))
         }
     }
@@ -46,5 +46,15 @@ class LanguageIntegrationTest {
         assertEquals("en", preferences.effectiveLanguageTag)
         preferences.setLanguageTag(null)
         assertEquals(null, preferences.languageTag); assertEquals("en", preferences.effectiveLanguageTag)
+    }
+    @Test fun workflowTemplatesCountsAndDynamicCopyHaveReviewedEnglishTranslations() {
+        val english = context("en-US")
+        assertEquals("Reference: VL page translation", UiTextTranslations.translate(english, "参考：VL 整页直接翻译"))
+        assertEquals("<Number> · 我的图片 · Item count", UiTextTranslations.translate(english, "<数字> · 我的图片 · 项数"))
+        assertEquals("API output item count mismatch: expected 3, received 2", UiTextTranslations.translate(english, "API 输出项数不匹配：期望 3 项，实际 2 项"))
+        assertEquals(" · Revision 2 · 14 rows", UiTextTranslations.translate(english, " · 版本 2 · 14 行"))
+        assertEquals("VL page translation (one API request for all crops)", UiTextTranslations.translate(english, "VL 整页直接翻译（多图一次 API）"))
+        val chinese = context("zh-Hans")
+        assertEquals("参考：VL 整页直接翻译", UiTextTranslations.translate(chinese, "参考：VL 整页直接翻译"))
     }
 }

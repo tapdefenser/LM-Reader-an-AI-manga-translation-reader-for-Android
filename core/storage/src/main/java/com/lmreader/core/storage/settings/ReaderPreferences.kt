@@ -22,8 +22,7 @@ import kotlinx.coroutines.flow.map
  * 无法识别时只回退该字段的默认值，不影响其余字段；整段损坏时整份回退默认值。这比 JSON
  * 少一个依赖，而这里的数据是扁平标量与枚举，不需要 JSON 的表达力。
  *
- * 与 `AppPreferences` 的分工（开发文档 15.3）：全局偏好归 DataStore，漫画级阅读偏好
- * （每部漫画的阅读模式与屏幕方向）归数据库。
+ * 全部阅读偏好均为全局设置，包括阅读模式和屏幕方向。
  */
 class ReaderPreferences(private val context: Context) {
 

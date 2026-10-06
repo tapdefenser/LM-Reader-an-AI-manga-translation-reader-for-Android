@@ -352,6 +352,9 @@ fun LmReaderNavHost(
                         onOpenTranslationOptions = { prompt ->
                             navController.navigate(Routes.translationOptions(mangaId, prompt))
                         },
+                        onOpenGlossary = {
+                            navController.navigate(Routes.translationGlossary(mangaId))
+                        },
                     )
                 }
 
@@ -372,9 +375,6 @@ fun LmReaderNavHost(
                         mangaId = mangaId,
                         showSetupPrompt = entry.arguments?.getBoolean("prompt") == true,
                         onBack = { navController.popBackStack() },
-                        onOpenGlossary = {
-                            navController.navigate(Routes.translationGlossary(mangaId))
-                        },
                     )
                 }
 

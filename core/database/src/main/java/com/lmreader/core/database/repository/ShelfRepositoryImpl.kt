@@ -1,6 +1,7 @@
 package com.lmreader.core.database.repository
 
 import com.lmreader.core.database.LmReaderDatabase
+import androidx.room.withTransaction
 import com.lmreader.core.database.entity.CategoryEntity
 import com.lmreader.core.database.entity.ShelfEntryEntity
 import com.lmreader.core.database.entity.toDomain
@@ -97,6 +98,13 @@ internal class ShelfRepositoryImpl(private val database: LmReaderDatabase) : She
     }
 
     override suspend fun categoryIdOf(mangaId: String): Long? = dao.getEntry(mangaId)?.categoryId
+
+    override suspend fun ensureOnShelf(mangaId: String) {
+        database.withTransaction {
+            if (dao.getEntry(mangaId) != null) return@withTransaction
+            dao.insertEntryIfAbsent(ShelfEntryEntity(mangaId, ensureUncategorized(), now()))
+        }
+    }
 
     override suspend fun removeFromShelf(mangaId: String) {
         // 只删收藏关系：漫画仍在图库、原文件仍在（开发文档 8.2「移出书架」）。

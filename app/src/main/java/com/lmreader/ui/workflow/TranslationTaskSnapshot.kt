@@ -5,6 +5,8 @@ import com.lmreader.core.model.MangaTranslationSettings
 import com.lmreader.core.model.TranslationWorkflow
 import com.lmreader.core.model.effectiveBubbleRender
 import com.lmreader.core.model.effectiveSegThreshold
+import com.lmreader.core.model.effectiveTextDetectionThreshold
+import com.lmreader.core.model.effectiveFreeTextMergeGapRatio
 import org.json.JSONObject
 import com.lmreader.core.workflow.WorkflowProgramCodec
 import com.lmreader.core.workflow.WorkflowValidator
@@ -46,6 +48,8 @@ fun translationTaskSnapshot(
         .put("targetLanguage", target)
         .put("style", style)
         .put("segThreshold", settings.effectiveSegThreshold().toDouble())
+        .put("textDetectionThreshold", settings.effectiveTextDetectionThreshold().toDouble())
+        .put("freeTextMergeGapRatio", settings.effectiveFreeTextMergeGapRatio().toDouble())
         .put("segTextScope", settings.segTextScope.name)
         .put("fillMode", render.fillMode.name)
         .put("opacity", render.opacityPercent)
@@ -53,5 +57,6 @@ fun translationTaskSnapshot(
         .put("font", render.font.name)
         .put("fontScale", render.fontScalePercent)
         .put("bold", render.bold)
+        .put("freeTextMaskExpansion", render.freeTextMaskExpansionPercent)
         .toString()
 }

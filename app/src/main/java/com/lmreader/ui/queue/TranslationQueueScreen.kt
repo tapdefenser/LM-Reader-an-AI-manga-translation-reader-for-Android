@@ -22,7 +22,6 @@ import com.lmreader.core.database.entity.ChapterTranslationEntity
 import com.lmreader.core.model.ChapterRecord
 import com.lmreader.core.model.InferenceEngineKind
 import com.lmreader.di.AppContainer
-import com.lmreader.ui.reader.translation.PageTranslationStage
 import kotlin.math.abs
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -37,7 +36,6 @@ fun TranslationQueueScreen(container: AppContainer, onBack: () -> Unit) {
     var menuOpen by remember { mutableStateOf(false) }
     var resourcesOpen by remember { mutableStateOf(false) }
     val resources by queue.loadedResources.collectAsStateWithLifecycle()
-    val currentStep by queue.currentStep.collectAsStateWithLifecycle()
     val activeSeg by queue.activeSeg.collectAsStateWithLifecycle()
     val activeOcr by queue.activeOcr.collectAsStateWithLifecycle()
     val activeApi by queue.activeApi.collectAsStateWithLifecycle()
@@ -90,18 +88,6 @@ fun TranslationQueueScreen(container: AppContainer, onBack: () -> Unit) {
         Column(Modifier.fillMaxSize().padding(padding)) {
         serviceFailure?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            val step = currentStep
-            val label = step?.let {
-                val stage = when (it.progress.stage) {
-                    PageTranslationStage.READING -> "读取图片"
-                    PageTranslationStage.SEGMENTING -> "SEG 气泡检测"
-                    PageTranslationStage.OCR -> "OCR 文字识别"
-                    PageTranslationStage.TRANSLATING -> "机翻"
-                    PageTranslationStage.SAVING -> "保存译文"
-                }
-                "${it.pageName} · ${it.rowLabel ?: stage}" + if (it.progress.total > 0) " ${it.progress.completed}/${it.progress.total}" else ""
-            } ?: if (paused) "已暂停" else "等待任务"
-            Text("当前步骤：$label", style = MaterialTheme.typography.bodyMedium)
             Text("当前并行：SEG $activeSeg · OCR $activeOcr · API $activeApi", style = MaterialTheme.typography.bodySmall)
         }
         HorizontalDivider()

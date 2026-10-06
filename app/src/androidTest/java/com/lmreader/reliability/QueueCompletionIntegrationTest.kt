@@ -18,6 +18,9 @@ class QueueCompletionIntegrationTest {
     @Before fun setup() = runBlocking {
         container = AppContainer(IsolatedApp(ApplicationProvider.getApplicationContext()))
         container.startupReady.await()
+        seedRow(container, "library_sources", mapOf("sourceId" to "source", "kind" to "IMAGE_DIRECTORY", "treeUri" to "content://fixture/source", "mode" to "MULTI_CHAPTER", "permission" to "OK"))
+        seedRow(container, "mangas", mapOf("mangaId" to "m", "sourceId" to "source", "anchorDocumentId" to "root", "sourceKind" to "IMAGE_DIRECTORY", "layoutMode" to "MULTI_CHAPTER", "availability" to "AVAILABLE"))
+        for(id in listOf("c", "failed", "legacy")) seedRow(container, "chapters", mapOf("chapterId" to id, "mangaId" to "m", "documentId" to id, "kind" to "IMAGE_DIRECTORY"))
         seedRow(container, "chapter_translation", mapOf("chapterId" to "c", "mangaId" to "m",
             "targetLanguage" to "简体中文", "sourceLanguage" to "英语", "configSnapshot" to "{}",
             "state" to "RUNNING", "translatedCount" to 1))

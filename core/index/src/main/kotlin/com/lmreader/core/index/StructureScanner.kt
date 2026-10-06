@@ -142,8 +142,9 @@ private class ScanRun(
      * - **图片目录**漫画的锚点章节是"枚举/排序后第一个被确认为叶子的子目录"，
      *   不保证是自然序第一章（归档漫画不适用：第 1 条会登记全部归档）。封面与简介由
      *   补全阶段按自然序重取（开发文档 7.2），不影响展示；
-     * - 因此也不再深入"已判定为漫画"的目录去找更深的作品（开发文档 5.1 第 12 行
-     *   的样例属于这种情况，本实现按用户要求以跳过换取性能）；
+     * - 图片目录漫画被判定后仍会跳过其余子目录（开发文档 5.1 第 12 行的样例属于这种
+     *   情况，本实现按用户要求以跳过换取性能）；但**归档**漫画不会：归档不是它的章节，
+     *   所以子目录照常继续扫描——否则站点目录里一个顺手下载的 `.zip` 会吞掉整个站点；
      * - 混放目录（既直接含归档、又含图片子目录）只取归档为章节，发诊断但继续，
      *   按开发文档 5.1 第 6/11 行的"优先解释为多章节"处理。
      *
@@ -159,7 +160,8 @@ private class ScanRun(
             diagnose(dir.path, MESSAGE_MIXED)
         }
 
-        // 1) 直接含归档文件：**全部**按名称自然序登记为章节，其余子项跳过。
+        // 1) 直接含归档文件：**全部**按名称自然序登记为章节；子目录不当作章节，
+        //    而是继续向下扫描（同级的 `.zip` 与作品目录可以共存，见下方说明）。
         //
         //    为什么这里不像子目录那样"只取第一个"：归档文件的章节清单**零额外 IO**——
         //    子项列表已经在第 150 行拿到手，逐个归档变成 ChapterSpec 只是内存里的 map，
@@ -177,9 +179,8 @@ private class ScanRun(
         //    阅读进度（`reading_progress` 没有外键级联）。
         //
         //    因为归档完备而断言"章节数已知"是成立的：本分支已经列出了该目录的
-        //    **全部**直接归档。只有当目录同时还直接含图片子目录时，那些子目录可能是
-        //    本目录的章节而非更深的作品；那种混放形态本身就不可靠（上面已经发诊断），
-        //    且历史上也取不到它们，因此不为它保留"部分枚举"的退化行为。
+        //    **全部**直接归档，而子目录按下面的规则不算本目录的章节（它们会作为
+        //    更深的作品各自被发现），因此这个声明不会被"目录里还有子目录"推翻。
         val archives = children
             .filter { it.isArchiveFile() }
             .sortedWith(CHAPTER_NAME_ORDER)
@@ -197,6 +198,16 @@ private class ScanRun(
                 anchorChildren = children,
                 chaptersFullyEnumerated = true,
             )
+            // 本目录的章节是这些压缩包，但它的**子目录不是章节**：目录里同时有压缩包和子目录时，
+            // 子目录更可能是更深的作品目录。旧实现在这里直接 return，于是一个"站点目录里躺着一个
+            // 顺手下载的 .zip"的形态会把整个站点压成一张以站点命名的卡片，站点下所有漫画再也
+            // 不会被发现。真机样例：`/Tachiyomi/downloads/Sunday Web Every (JA)/` 里同时有
+            // `ジャイアントお嬢様.zip` 与 `ジャイアントお嬢様/`（224 章）、`メガトンチルドレン/`，
+            // 结果另一站点同名的那部被整站吞掉，搜索只剩一部。因此这里发诊断后继续向下扫描。
+            if (childDirs.isNotEmpty()) {
+                diagnose(dir.path, MESSAGE_ARCHIVE_MIXED)
+                descend(dir, childDirs, depth)
+            }
             return
         }
 
@@ -250,8 +261,19 @@ private class ScanRun(
         }
 
         // 走到这里说明这个目录不是漫画（没有直接章节），继续向下找。
+        descend(dir, childDirs, depth)
+    }
+
+    /**
+     * 把 [children] 当作漫画候选继续向下扫描。
+     *
+     * 递归开关只在**根的直接子目录以下**生效：`depth == 0` 那一层永远要进。
+     * 已判定为漫画的目录也要用同一套规则检查它剩下的子目录（见归档分支），
+     * 否则"站点目录里有一个压缩包"这种形态会把整个站点吞成一张卡片。
+     */
+    private suspend fun descend(dir: DirRef, children: List<ChildNode>, depth: Int) {
         if (!request.recursive && depth > 0) return
-        for (child in childDirs) {
+        for (child in children) {
             // 打开下一个目录之前检查取消：`openChild` 与随后的枚举都可能真的落盘，
             // 而循环本身不必然挂起——不检查就会出现"取消之后又读了一个目录"
             // （验收 A09：取消后不得继续产生结果）。
@@ -653,6 +675,7 @@ private class ScanRun(
         val CHAPTER_NAME_ORDER = Comparator<ChildNode> { a, b -> NaturalOrder.compare(a.name, b.name) }
 
         const val MESSAGE_MIXED = "目录同时包含图片和子目录，未按叶子章节处理（开发文档 5.1）"
+        const val MESSAGE_ARCHIVE_MIXED = "目录同时包含压缩包和子目录：压缩包按本目录的章节，子目录继续作为漫画扫描（开发文档 5.1）"
         const val MESSAGE_ROOT_LEAF = "根目录自身是叶子图片目录，按根特例生成共 1 章的漫画（开发文档 5.1）"
 
         /**

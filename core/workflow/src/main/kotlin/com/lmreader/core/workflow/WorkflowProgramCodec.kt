@@ -16,6 +16,7 @@ object WorkflowProgramCodec {
         fun readNode(value: JsonElement, depth: Int): WorkflowNode {
             require(depth <= 16 && ++count <= 500) { "工作流最多 500 行、16 层" }
             val j = value.jsonObject
+            require(j["parallelLimit"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.int?.let { it in 1..WorkflowNode.MAX_PARALLEL } != false) { "最大并行数应为 1～${WorkflowNode.MAX_PARALLEL}" }
             return WorkflowNode(j.string("id"), WorkflowKind.valueOf(j.string("kind")), j.string("label", ""),
                 WorkflowMode.valueOf(j.string("mode", "ASYNC")),
                 j["variable"]?.takeUnless { it is JsonNull }?.let { v -> v.jsonObject.let {
@@ -26,7 +27,8 @@ object WorkflowProgramCodec {
                 j["resultType"]?.let(::readType) ?: WorkflowType.TEXT,
                 j["children"]?.jsonArray?.map { readNode(it, depth + 1) }.orEmpty(),
                 j["otherwise"]?.jsonArray?.map { readNode(it, depth + 1) }.orEmpty(),
-                j["collectTo"]?.takeUnless { it is JsonNull }?.let(::readRef))
+                j["collectTo"]?.takeUnless { it is JsonNull }?.let(::readRef),
+                j["parallelLimit"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.int)
         }
         return WorkflowProgram(rows = root.getValue("rows").jsonArray.map { readNode(it, 0) })
     }
@@ -86,6 +88,7 @@ object WorkflowProgramCodec {
         put("inputs", JsonObject(value.inputs.mapValues { expression(it.value) })); put("resultType", type(value.resultType))
         put("children", JsonArray(value.children.map(::node))); put("otherwise", JsonArray(value.otherwise.map(::node)))
         value.collectTo?.let { put("collectTo", ref(it)) }
+        value.parallelLimit?.let { put("parallelLimit", it) }
     }
     private fun JsonObject.string(key: String, fallback: String? = null): String = this[key]?.jsonPrimitive?.content ?: fallback ?: error("缺少字段：$key")
 }

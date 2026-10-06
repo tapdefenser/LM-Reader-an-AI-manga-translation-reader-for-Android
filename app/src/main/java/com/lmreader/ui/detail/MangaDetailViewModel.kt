@@ -463,7 +463,7 @@ class MangaDetailViewModel(
                 resolveTranslationStyle(settings, categoryStyle, globalStyle), bubblePreferences.settings.first(), apiProfiles()) }
                 .getOrElse { failure -> _state.update { it.copy(message = failure.message ?: "工作流配置无效") }; return@launch }
             val queued = runCatching {
-                translationRepository.enqueue(
+                translationQueue.enqueue(
                     mangaId = mangaId,
                     chapterIds = chapterIds,
                     request = TranslationRequest(

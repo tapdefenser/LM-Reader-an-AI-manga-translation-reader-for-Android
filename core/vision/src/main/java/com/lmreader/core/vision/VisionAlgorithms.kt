@@ -126,26 +126,34 @@ internal fun segContours(raw: RawSeg, prototypes: FloatBuffer, protoWidth: Int, 
     }
     val parts = components(w,h) { foreground[it] }.sortedByDescending { it.indices.size }
     val largestSize = parts.firstOrNull()?.indices?.size ?: return emptyList()
-    return parts.filter { it.indices.size >= max(6, (largestSize * .04f).toInt()) }.map { part ->
+    // Text masks may have disconnected lines, dots and accents. They form one text target;
+    // balloon components still need separate identities to isolate connected speech.
+    val retained = if (raw.classId == 1) listOf(parts.flatMap { it.indices.asIterable() }.toIntArray())
+        else parts.filter { it.indices.size >= max(6, (largestSize * .04f).toInt()) }.map { it.indices }
+    return retained.map { indices ->
         val minX = IntArray(h) { w }; val maxX = IntArray(h) { -1 }
-        part.indices.forEach { i -> minX[i/w] = min(minX[i/w],i%w); maxX[i/w] = max(maxX[i/w],i%w) }
+        indices.forEach { i -> minX[i/w] = min(minX[i/w],i%w); maxX[i/w] = max(maxX[i/w],i%w) }
         val rows = (0 until h).filter { maxX[it] >= 0 }
         val sampled = rows.filterIndexed { index, _ -> index % max(1, rows.size/48) == 0 || index == rows.lastIndex }
-        fun point(x: Int,y: Int) = transform.point((left+x+.5f)/sx,(top+y+.5f)/sy)
-        sampled.map { point(minX[it],it) } + sampled.asReversed().map { point(maxX[it],it) }
+        fun point(x: Int,y: Int) = transform.point((left+x)/sx,(top+y)/sy)
+        sampled.map { point(minX[it],it) } +
+            listOf(point(minX[rows.last()], rows.last()+1), point(maxX[rows.last()]+1, rows.last()+1)) +
+            sampled.asReversed().map { point(maxX[it]+1,it) }
     }
 }
 
-internal fun dbBoxes(probabilities: FloatBuffer, width: Int, height: Int, transform: Letterbox): List<Pair<PixelRect,Float>> {
+internal fun dbBoxes(probabilities: FloatBuffer, width: Int, height: Int, transform: Letterbox,
+    scoreThreshold: Float = .45f): List<Pair<PixelRect,Float>> {
     require(probabilities.limit() == width*height)
+    require(scoreThreshold.isFinite() && scoreThreshold in 0f..1f)
     return components(width,height) {
         val value=probabilities[it]
         require(value.isFinite() && value in 0f..1.001f) { "文字检测输出不是有限概率" }
         value > .2f
     }.mapNotNull { c ->
-        if (c.indices.size < 6) return@mapNotNull null
+        if (c.indices.size < 3) return@mapNotNull null // upstream retains small text kernels
         val score = c.indices.sumOf { probabilities[it].toDouble() }.toFloat()/c.indices.size
-        if (score < .45f) return@mapNotNull null
+        if (score < scoreThreshold) return@mapNotNull null
         val box = c.bounds
         val expansion = box.area * 1.5f / (2 * (box.width+box.height))
         val sx = transform.targetWidth.toFloat()/width; val sy = transform.targetHeight.toFloat()/height

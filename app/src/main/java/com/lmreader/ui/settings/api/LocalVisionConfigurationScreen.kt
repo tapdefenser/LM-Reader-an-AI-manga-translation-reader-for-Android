@@ -33,7 +33,9 @@ fun LocalVisionConfigurationScreen(container: AppContainer, seg: Boolean, onTest
     val title = if (seg) "SEG 配置" else "本地 OCR 配置"
     Scaffold(topBar = { ApiTopBar(title, onBack) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(if (seg) "本地气泡分割模型" else "本地 OCR 模型", style = MaterialTheme.typography.titleMedium)
+            Text(if (seg) "本地气泡分割与文字区域检测" else "本地文字检测与识别模型", style = MaterialTheme.typography.titleMedium)
+            Text(if (seg) "SEG 检测气泡与游离文字区域，OCR 或视觉 API 将所选区域转为文本。"
+                else "文字检测与文字识别共用并发数和加速方式；工作流中的文字检测由 SEG 步骤调用。", style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("并发数")
                 Box {
@@ -57,12 +59,13 @@ fun LocalVisionConfigurationScreen(container: AppContainer, seg: Boolean, onTest
             }
             if (seg) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text("GPU 加速")
+                    Text("气泡分割 GPU 加速")
                     Switch(prefs.segGpu, { checked -> scope.launch {
                         container.visionExecutionPreferences.update { it.copy(segGpu = checked) }
                     } })
                 }
                 Text("LiteRT GPU 后端，设备支持时使用 GPU，初始化或推理失败时回退 CPU。", style = MaterialTheme.typography.bodySmall)
+                Text("文字检测共用本地 OCR 的并发上限与加速方式。", style = MaterialTheme.typography.bodySmall)
             } else {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text("OCR 加速方式")
