@@ -49,7 +49,7 @@ jobs:
         run: |
           chmod +x gradlew
           python3 tools/ci_run.py debug-tests ./gradlew :app:assembleDebug :app:lintDebug test --max-workers=2 --no-parallel -Dorg.gradle.jvmargs=-Xmx4g --console=plain
-          python3 tools/ci_run.py release ./gradlew :app:assembleRelease :app:lintRelease --max-workers=2 --no-parallel -Dorg.gradle.jvmargs=-Xmx4g --console=plain
+          python3 tools/ci_run.py release ./gradlew :app:assembleRelease :app:lintRelease --max-workers=2 --no-parallel -Dorg.gradle.jvmargs=-Xmx4g --console=plain --stacktrace
           python3 tools/ci_run.py native-jni .scratch/ci-python/bin/python tools/verify_native_jni.py --apk app/build/outputs/apk/release/app-release-unsigned.apk
       - name: Upload release APK
         uses: actions/upload-artifact@v7
@@ -65,6 +65,7 @@ jobs:
           name: verification-reports
           retention-days: 7
           if-no-files-found: warn
+          include-hidden-files: true
           path: |
             app/build/reports/
             app/build/test-results/
