@@ -60,3 +60,9 @@ suspend fun LocalVisionEngine.recognizeRegion(imageId: String, image: Bitmap, la
             lines = result.lines.map { it.copy(bounds = it.bounds.offset(crop.left.toFloat(), crop.top.toFloat())) })
     }
 }
+
+suspend fun LocalVisionEngine.cachedRecognizeRegion(imageId: String, sourceHash: String, image: Bitmap, language: LocalOcrLanguage,
+    region: SegRegion, pageRegions: List<SegRegion>, textLines: List<DetectedTextLine>? = null,
+    progress: (VisionProgress) -> Unit = {}): LocalOcrResult = preprocessingCache.recognize(imageId, sourceHash, language, region, pageRegions, textLines) {
+    recognizeRegion(imageId, image, language, region, pageRegions, textLines, progress)
+}

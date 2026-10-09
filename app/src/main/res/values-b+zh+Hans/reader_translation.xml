@@ -36,7 +36,12 @@
     <string name="reader_bubble_unsaved">本页有未保存修改</string>
     <string name="reader_bubble_select">点选气泡后修改或删除</string>
     <string name="reader_bubble_selected">已选中气泡</string>
-    <string name="reader_bubble_no_translation">本页尚未翻译；已翻译页面可编辑</string>
+    <string name="reader_bubble_no_translation">点击新建气泡，为本页添加译文</string>
+    <string name="reader_bubble_add">新建气泡</string>
+    <string name="reader_bubble_creating">创建中…</string>
+    <string name="reader_bubble_font_increase">A+</string>
+    <string name="reader_bubble_font_decrease">A−</string>
+    <string name="reader_bubble_handle_hint">拖动气泡移动；使用把手缩放、旋转。</string>
     <string name="reader_bubble_no_regions">本页没有文字区域</string>
     <string name="reader_bubble_text">修改译文</string>
     <string name="reader_bubble_delete">删除气泡</string>

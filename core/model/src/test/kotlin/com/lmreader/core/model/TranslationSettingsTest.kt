@@ -13,20 +13,22 @@ import org.junit.Test
  * 得到一段空文风比回退更糟（模型会收到一条空指令）。
  */
 class TranslationSettingsTest {
-    @Test fun `mask opacity defaults to sixty and free text defaults to independent lines`() {
-        assertEquals(60,BubbleRenderSettings().opacityPercent)
-        assertEquals(60,MangaTranslationSettings().effectiveBubbleRender(BubbleRenderSettings()).opacityPercent)
+    @Test fun `new defaults preserve saved opacity and free text overrides`() {
+        assertEquals(85,BubbleRenderSettings().opacityPercent)
+        assertEquals(7,BubbleRenderSettings().textPaddingPercent)
+        assertEquals(85,MangaTranslationSettings().effectiveBubbleRender(BubbleRenderSettings()).opacityPercent)
         assertEquals(100,MangaTranslationSettings(bubbleOpacityPercent=100).effectiveBubbleRender(BubbleRenderSettings()).opacityPercent)
-        assertEquals(0f,MangaTranslationSettings().effectiveFreeTextMergeGapRatio())
+        assertEquals(.45f,MangaTranslationSettings().effectiveFreeTextMergeGapRatio())
         assertEquals(.35f,MangaTranslationSettings(freeTextMergeGapRatio=.35f).effectiveFreeTextMergeGapRatio())
         listOf(Float.NaN,Float.POSITIVE_INFINITY,-1f,3f).forEach {
-            assertEquals(0f,MangaTranslationSettings(freeTextMergeGapRatio=it).effectiveFreeTextMergeGapRatio())
+            assertEquals(.45f,MangaTranslationSettings(freeTextMergeGapRatio=it).effectiveFreeTextMergeGapRatio())
         }
     }
-    @Test fun `text quality options retain old defaults and ignore invalid persisted values`() {
-        assertEquals(.45f,MangaTranslationSettings().effectiveTextDetectionThreshold())
+    @Test fun `text quality options use new defaults and ignore invalid persisted values`() {
+        assertEquals(.35f,MangaTranslationSettings().effectiveSegThreshold())
+        assertEquals(.35f,MangaTranslationSettings().effectiveTextDetectionThreshold())
         assertEquals(6,MangaTranslationSettings().effectiveBubbleRender(BubbleRenderSettings()).freeTextMaskExpansionPercent)
-        assertEquals(.45f,MangaTranslationSettings(textDetectionThreshold=Float.NaN).effectiveTextDetectionThreshold())
+        assertEquals(.35f,MangaTranslationSettings(textDetectionThreshold=Float.NaN).effectiveTextDetectionThreshold())
         assertEquals(6,MangaTranslationSettings(freeTextMaskExpansionPercent=30).effectiveBubbleRender(BubbleRenderSettings()).freeTextMaskExpansionPercent)
         assertEquals(12,MangaTranslationSettings(freeTextMaskExpansionPercent=12).effectiveBubbleRender(BubbleRenderSettings()).freeTextMaskExpansionPercent)
     }

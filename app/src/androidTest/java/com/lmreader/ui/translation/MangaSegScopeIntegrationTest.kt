@@ -11,6 +11,7 @@ import com.lmreader.di.AppContainer
 import com.lmreader.ui.workflow.*
 import com.lmreader.core.workflow.WorkflowProgramCodec
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 import org.junit.*
 import org.junit.Assert.*
@@ -18,28 +19,31 @@ import java.util.UUID
 
 /** Owns two generated manga rows. Run with an isolated test application ID. */
 class MangaSegScopeIntegrationTest {
-    @Test fun freeTextGapPersistsPerMangaAndFreshMaskDefaultIsSixty() {
+    @Test fun freeTextGapPersistsPerMangaAndFreshDefaultsMatchTranslationOptions() {
         lateinit var vm: TranslationOptionsViewModel
         val id = mangaIds.first()
         compose.runOnIdle { vm = TranslationOptionsViewModel(id,container.mangaRepository,container.shelfRepository,container.preferences,container.bubbleRenderPreferences) }
         compose.setContent { MaterialTheme { TranslationOptionsScreen(container,id,onBack={},viewModel=vm) } }
         compose.waitUntil(5000) { !vm.state.value.loading }
-        assertEquals(60,vm.state.value.settings.effectiveBubbleRender(BubbleRenderSettings()).opacityPercent)
-        assertEquals(0f,vm.state.value.settings.effectiveFreeTextMergeGapRatio(),.001f)
+        assertEquals(85,vm.state.value.settings.effectiveBubbleRender(BubbleRenderSettings()).opacityPercent)
+        assertEquals(7,vm.state.value.settings.effectiveBubbleRender(BubbleRenderSettings()).textPaddingPercent)
+        assertEquals(.35f,vm.state.value.settings.effectiveSegThreshold(),.001f)
+        assertEquals(.35f,vm.state.value.settings.effectiveTextDetectionThreshold(),.001f)
+        assertEquals(.45f,vm.state.value.settings.effectiveFreeTextMergeGapRatio(),.001f)
         compose.onNodeWithTag("translation-option:游离文字行间合并距离").performScrollTo().assertIsDisplayed()
             .performSemanticsAction(SemanticsActions.SetProgress) { it(35f) }
         compose.waitUntil(5000) { runBlocking { container.mangaRepository.translationSettings(id).freeTextMergeGapRatio == .35f } }
         val captured = JSONObject(translationTaskSnapshot(TranslationWorkflow.LOCAL_MACHINE,runBlocking {
             container.mangaRepository.translationSettings(id) },"en","zh-Hans","",BubbleRenderSettings()))
         assertEquals(.35,captured.getDouble("freeTextMergeGapRatio"),.0001)
-        assertEquals(60,captured.getInt("opacity"))
+        assertEquals(85,captured.getInt("opacity"))
         compose.runOnIdle { vm.setFreeTextMergeGap(0f) }
         compose.waitUntil(5000) { runBlocking { container.mangaRepository.translationSettings(id).freeTextMergeGapRatio == 0f } }
         compose.runOnIdle { vm.reload() }
         compose.waitUntil(5000) { vm.state.value.settings.freeTextMergeGapRatio == 0f }
         assertEquals(.35,captured.getDouble("freeTextMergeGapRatio"),.0001)
         val other = runBlocking { container.mangaRepository.translationSettings(mangaIds.last()) }
-        assertEquals(0f,other.effectiveFreeTextMergeGapRatio(),.001f)
+        assertEquals(.45f,other.effectiveFreeTextMergeGapRatio(),.001f)
     }
     @Test fun qualityOptionsPersistPerMangaAndQueuedSnapshotStaysFixed() {
         val id=mangaIds.first()
@@ -69,7 +73,7 @@ class MangaSegScopeIntegrationTest {
         assertEquals(.25,snapshot.getDouble("textDetectionThreshold"),.0001)
         assertEquals(12,snapshot.getInt("freeTextMaskExpansion"))
         val other=runBlocking { container.mangaRepository.translationSettings(mangaIds.last()) }
-        assertEquals(.45f,other.effectiveTextDetectionThreshold(),.0001f)
+        assertEquals(.35f,other.effectiveTextDetectionThreshold(),.0001f)
         assertEquals(6,other.effectiveBubbleRender(BubbleRenderSettings()).freeTextMaskExpansionPercent)
     }
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
@@ -77,8 +81,13 @@ class MangaSegScopeIntegrationTest {
     private val token = UUID.randomUUID().toString()
     private val sourceId = "seg-source-$token"
     private val mangaIds = listOf("seg-manga-a-$token", "seg-manga-b-$token")
+    private var renderBefore: BubbleRenderSettings? = null
+    private var fixtureWorkflowId: String? = null
+    private val fixtureApiId = "seg-api-$token"
 
     @Before fun createFixtures() = runBlocking {
+        renderBefore=container.bubbleRenderPreferences.settings.first()
+        container.bubbleRenderPreferences.reset()
         val db = container.database.openHelper.writableDatabase
         db.execSQL("INSERT INTO library_sources (sourceId, kind, treeUri, displayPath, recursive, mode, orderIndex, permission, revision) VALUES (?, 'IMAGE_DIRECTORY', ?, 'SEG fixture', 1, 'MULTI_CHAPTER', 0, 'OK', 1)", arrayOf(sourceId, "content://fixture/$token"))
         mangaIds.forEach { id ->
@@ -89,6 +98,47 @@ class MangaSegScopeIntegrationTest {
         val db = container.database.openHelper.writableDatabase
         mangaIds.forEach { db.execSQL("DELETE FROM mangas WHERE mangaId = ?", arrayOf(it)) }
         db.execSQL("DELETE FROM library_sources WHERE sourceId = ?", arrayOf(sourceId))
+        renderBefore?.let { before -> container.bubbleRenderPreferences.update { before } }
+        fixtureWorkflowId?.let { container.translationWorkflows.delete(it) }
+        container.apiProfiles.delete(fixtureApiId)
+    }
+
+    @Test fun mangaApiOverrideAndOfflineDownloadEntryAreUsable() {
+        val id = mangaIds.first()
+        var downloads = 0
+        lateinit var vm: TranslationOptionsViewModel
+        compose.runOnIdle { vm = TranslationOptionsViewModel(id, container.mangaRepository,
+            container.shelfRepository, container.preferences, container.bubbleRenderPreferences) }
+        compose.setContent { MaterialTheme { TranslationOptionsScreen(container, id, onBack = {},
+            onDownloadOfflinePacks = { downloads++ }, viewModel = vm) } }
+        compose.waitUntil(5000) { !vm.state.value.loading }
+        compose.onNodeWithTag("translation-download-offline").performScrollTo().performClick()
+        compose.runOnIdle { assertEquals(1, downloads) }
+        val workflow = runBlocking {
+            container.apiProfiles.save(ApiProfile(fixtureApiId, ApiProfileKind.LLM, name = "Fixture API", model = "fixture",
+                url = "http://127.0.0.1:65530/v1", retryCount = 0))
+            val imported = container.translationWorkflows.import(TranslationWorkflow.LOCAL_MACHINE.copy(builtIn = false,
+                name = "API options fixture", program = WorkflowReferenceTemplates.standard("workflow-original-api")))
+            fixtureWorkflowId = imported.id
+            imported
+        }
+        compose.runOnIdle { vm.setWorkflow(workflow.id) }
+        compose.waitUntil(5000) { vm.state.value.settings.workflowId == workflow.id }
+        compose.onNodeWithTag("manga-api-choice").performScrollTo().performClick()
+        compose.onAllNodesWithText("跟随工作流默认").assertCountEquals(2)
+        compose.onNodeWithText("Fixture API · fixture").performClick()
+        compose.waitUntil(5000) { runBlocking { container.mangaRepository.translationSettings(id).apiProfileId == fixtureApiId } }
+        val snapshot = JSONObject(translationTaskSnapshot(workflow, vm.state.value.settings, "en", "zh-Hans", "",
+            BubbleRenderSettings(), apiProfiles = runBlocking { container.apiProfiles.profiles.first() }))
+        val program = WorkflowProgramCodec.decode(snapshot.getJSONObject("program").toString())
+        assertTrue(program.allNodes().filter { it.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM) }
+            .all { it.inputs["profile"] == WorkflowExpression.Text(fixtureApiId) })
+        assertTrue(workflow.program.allNodes().filter { it.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM) }
+            .all { it.inputs["profile"] == WorkflowExpression.Text("workflow-original-api") })
+        compose.onNodeWithTag("manga-api-choice").performScrollTo().performClick()
+        compose.onNodeWithText("跟随工作流默认").performClick()
+        compose.waitUntil(5000) { runBlocking { container.mangaRepository.translationSettings(id).apiProfileId == null } }
+        assertEquals(null, runBlocking { container.mangaRepository.translationSettings(mangaIds.last()).apiProfileId })
     }
 
     @Test fun scopeLivesInMangaOptionsPersistsAndDoesNotChangeExistingSnapshot() {

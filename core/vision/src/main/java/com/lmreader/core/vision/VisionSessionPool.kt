@@ -21,6 +21,9 @@ class LocalVisionEngine(context: Context, private val settings: () -> VisionExec
         .stateIn(CoroutineScope(SupervisorJob() + Dispatchers.IO), SharingStarted.Eagerly, emptyList())
     val activeSeg = segPool.activeTasks
     val activeOcr = ocrPool.activeTasks
+    @Volatile private var preprocessingCacheLimit = 128L * 1_048_576
+    val preprocessingCache = VisionPreprocessingCache(java.io.File(this.context.filesDir, "vision-preprocessing")) { preprocessingCacheLimit }
+    suspend fun setPreprocessingCacheLimit(bytes: Long) { preprocessingCacheLimit = bytes; preprocessingCache.trim() }
     val segConcurrency get() = concurrency(settings().segConcurrency, true)
     val ocrConcurrency get() = concurrency(settings().ocrConcurrency, false)
     private fun concurrency(value: Int, seg: Boolean): Int {
@@ -34,8 +37,13 @@ class LocalVisionEngine(context: Context, private val settings: () -> VisionExec
         return minOf((cores / 2).coerceAtLeast(1), memorySlots.coerceAtLeast(1), heapSlots.coerceAtLeast(1), if (seg) 2 else 4)
     }
     suspend fun segment(imageId: String, image: Bitmap, threshold: Float = .35f,
-        textDetectionThreshold: Float = .45f,
+        textDetectionThreshold: Float = .35f, sourceSha256: String? = null,
         progress: (VisionProgress) -> Unit = {}): SegResult {
+        if (sourceSha256 != null) return withContext(Dispatchers.IO) {
+            preprocessingCache.segment(imageId, sourceSha256, image.width, image.height, threshold, textDetectionThreshold) {
+                segment(imageId, image, threshold, textDetectionThreshold, progress = progress)
+            }
+        }
         val started = System.nanoTime()
         val seg = segPool.use(segConcurrency, settings()) { it.segment(imageId, image, threshold, progress) }
         // Detection is a SEG function but consumes the shared OCR concurrency and backend.

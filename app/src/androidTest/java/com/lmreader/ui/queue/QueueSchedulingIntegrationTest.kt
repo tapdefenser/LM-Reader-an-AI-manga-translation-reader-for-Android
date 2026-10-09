@@ -4,10 +4,15 @@ import android.graphics.*
 import android.os.Environment
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.activity.ComponentActivity
+import androidx.test.ext.junit.rules.ActivityScenarioRule
 import com.lmreader.core.database.entity.ChapterTranslationEntity
 import com.lmreader.core.model.*
 import com.lmreader.di.AppContainer
 import com.lmreader.ui.workflow.translationTaskSnapshot
+import com.lmreader.core.workflow.WorkflowEditing
+import com.lmreader.core.workflow.WorkflowPosition
+import com.lmreader.core.workflow.WorkflowValidator
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import org.junit.*
@@ -24,30 +29,42 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Real model scheduling against generated pages in an isolated, uniquely named fixture. */
 @RunWith(AndroidJUnit4::class)
 class QueueSchedulingIntegrationTest {
+    @get:Rule val activity = ActivityScenarioRule(ComponentActivity::class.java)
     private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val container = AppContainer.from(context)
     private val token = UUID.randomUUID().toString()
     private val sourceId = "scheduling-source-$token"
     private val mangaA = "scheduling-a-$token"
     private val mangaB = "scheduling-b-$token"
+    private val mangaC = "scheduling-c-$token"
+    private val mangaD = "scheduling-d-$token"
+    private val fixtureMangas get() = listOf(mangaA,mangaB,mangaC,mangaD)
     private val a1 = "scheduling-a1-$token"
     private val a2 = "scheduling-a2-$token"
     private val b1 = "scheduling-b1-$token"
-    private val ids = listOf(a1, a2, b1)
+    private val c1 = "scheduling-c1-$token"
+    private val d1 = "scheduling-d1-$token"
+    private val ids = listOf(a1, a2, b1, c1, d1)
     private val root = File(Environment.getExternalStorageDirectory(), "LMReaderScheduleFixture-$token")
     private var pausedBefore = true
     private lateinit var preferencesBefore: VisionExecutionSettings
     private var cacheBefore = 128
+    private var priorityBefore = TranslationSchedulingPriority.RESOURCES
     private val pages = mutableListOf<Pair<String, File>>()
     private val apiProfileId = "scheduling-api-$token"
 
     @Before fun setup() = runBlocking {
+        container.startupReady.await()
+        container.taskService.setVisible(true)
+        container.taskService.allowRetry()
         assumeTrue(container.treeAccess.usesDirectFileAccess())
         assumeTrue(runCatching { container.translationModels.installedCatalog().route(LocalTranslationLanguage.ENGLISH,
             LocalTranslationLanguage.CHINESE_SIMPLIFIED) }.isSuccess)
         pausedBefore = container.translationQueue.paused.value
+        priorityBefore = container.translationQueue.schedulingPriority.value
         container.translationQueue.pause(); container.translationQueue.awaitCurrentPage()
         container.translationQueue.awaitResourceRelease()
+        container.translationQueue.setSchedulingPriority(TranslationSchedulingPriority.ORDER)
         container.apiProfiles.delete(apiProfileId)
         assumeTrue(container.database.translationDao().queueSnapshot().none { it.state in listOf("PENDING", "RUNNING") })
         preferencesBefore = container.visionExecutionPreferences.settings.first()
@@ -58,8 +75,8 @@ class QueueSchedulingIntegrationTest {
         val db = container.database.openHelper.writableDatabase
         val uri = "content://com.android.externalstorage.documents/tree/primary%3A${root.name}"
         db.execSQL("INSERT INTO library_sources (sourceId, kind, treeUri, displayPath, recursive, mode, orderIndex, permission, revision) VALUES (?, 'IMAGE_DIRECTORY', ?, ?, 1, 'MULTI_CHAPTER', 0, 'OK', 1)", arrayOf(sourceId, uri, root.absolutePath))
-        for (manga in listOf(mangaA, mangaB)) db.execSQL("INSERT INTO mangas (mangaId, anchorDocumentId, sourceId, sourceKind, layoutMode, displayName, sortKey, sourceOrderIndex, hasMetadata, chapterCountKnown, availability, discoveryGeneration, discoveredAt, updatedAt, translationAutoDetectSource) VALUES (?, ?, ?, 'IMAGE_DIRECTORY', 'MULTI_CHAPTER', 'Scheduling fixture', 'fixture', 0, 0, 1, 'AVAILABLE', 1, 0, 0, 0)", arrayOf(manga, File(root, manga).absolutePath, sourceId))
-        for ((chapter, manga) in listOf(a1 to mangaA, a2 to mangaA, b1 to mangaB)) {
+        for (manga in fixtureMangas) db.execSQL("INSERT INTO mangas (mangaId, anchorDocumentId, sourceId, sourceKind, layoutMode, displayName, sortKey, sourceOrderIndex, hasMetadata, chapterCountKnown, availability, discoveryGeneration, discoveredAt, updatedAt, translationAutoDetectSource) VALUES (?, ?, ?, 'IMAGE_DIRECTORY', 'MULTI_CHAPTER', 'Scheduling fixture', 'fixture', 0, 0, 1, 'AVAILABLE', 1, 0, 0, 0)", arrayOf(manga, File(root, manga).absolutePath, sourceId))
+        for ((chapter, manga) in listOf(a1 to mangaA, a2 to mangaA, b1 to mangaB, c1 to mangaC, d1 to mangaD)) {
             val folder = File(root, chapter).apply { assertTrue(mkdirs()) }
             repeat(if (chapter == a1) 2 else 1) { ordinal ->
                 val bitmap = Bitmap.createBitmap(800, 1000, Bitmap.Config.ARGB_8888)
@@ -80,14 +97,19 @@ class QueueSchedulingIntegrationTest {
         container.database.translationDao().cancelQueueItems(ids, System.currentTimeMillis())
         container.translationQueue.awaitCurrentPage()
         container.translationQueue.awaitResourceRelease()
-        for ((id, _) in pages) container.localPageTranslator.artifacts.delete(id)
+        for ((id, _) in pages) {
+            container.localPageTranslator.artifacts.delete(id)
+            container.localVision.preprocessingCache.commitPage(id)
+        }
         container.apiProfiles.delete(apiProfileId)
         val db = container.database.openHelper.writableDatabase
-        for (manga in listOf(mangaA, mangaB)) db.execSQL("DELETE FROM mangas WHERE mangaId = ?", arrayOf(manga))
+        for (manga in fixtureMangas) db.execSQL("DELETE FROM mangas WHERE mangaId = ?", arrayOf(manga))
         db.execSQL("DELETE FROM library_sources WHERE sourceId = ?", arrayOf(sourceId))
         if (::preferencesBefore.isInitialized) container.visionExecutionPreferences.update { preferencesBefore }
         container.translationCachePreferences.setMegabytes(cacheBefore)
+        container.translationQueue.setSchedulingPriority(priorityBefore)
         if (pausedBefore) container.translationQueue.pause() else container.translationQueue.resume()
+        container.taskService.setVisible(false)
         if (root.canonicalFile.parentFile == Environment.getExternalStorageDirectory().canonicalFile && root.name == "LMReaderScheduleFixture-$token") root.deleteRecursively()
     }
     @Test fun reorderSwitchesAfterPageAndPauseCancelAndClearKeepOneTranslation() = runBlocking {
@@ -176,7 +198,16 @@ class QueueSchedulingIntegrationTest {
         assertFalse(engine.loadedResources.value.any { it.id.startsWith("ja-en-") })
         val image = BitmapFactory.decodeFile(pages[0].second.absolutePath)
         try {
-            container.localVision.segment("generated", image) { assertEquals(1, container.localVision.activeSeg.value) }
+            var sawSeg = false
+            var sawDetection = false
+            container.localVision.segment("generated", image) {
+                val seg = container.localVision.activeSeg.value
+                val ocr = container.localVision.activeOcr.value
+                assertTrue(seg + ocr in 0..1)
+                if(seg == 1) sawSeg = true
+                if(ocr == 1) sawDetection = true
+            }
+            assertTrue(sawSeg && sawDetection)
             container.localVision.recognize("generated", image, LocalOcrLanguage.ENGLISH) { assertEquals(1, container.localVision.activeOcr.value) }
             container.localVision.recognize("generated", image, LocalOcrLanguage.KOREAN)
             container.localVision.retainModels(true, setOf(LocalOcrLanguage.KOREAN))
@@ -255,6 +286,80 @@ class QueueSchedulingIntegrationTest {
         container.translationQueue.sortManga(listOf(mangaA, mangaB))
         container.translationQueue.sortChapters(mangaA, listOf(a1, a2))
     }
+    @Test fun resourcesPriorityAdvancesOtherApiAndLocalMangaWhileSameApiWaits() = runBlocking {
+        val serverA=DelayedApiServer(pageRequests=true)
+        val serverB=DelayedApiServer(pageRequests=true)
+        val bProfileId="$apiProfileId-b"
+        try {
+            container.translationQueue.setSchedulingPriority(TranslationSchedulingPriority.RESOURCES)
+            container.translationCachePreferences.setMegabytes(128)
+            val profileA=ApiProfile(apiProfileId,ApiProfileKind.LLM,"A","http://127.0.0.1:${serverA.port}/v1",model="fixture",parallelLimit=2,retryCount=0)
+            val profileB=profileA.copy(id=bProfileId,name="B",url="http://127.0.0.1:${serverB.port}/v1")
+            container.apiProfiles.save(profileA);container.apiProfiles.save(profileB)
+            val base=WorkflowReferenceTemplates.standard(profileA.id)
+            val firstApi=base.allNodes().single { it.kind==WorkflowKind.API }
+            val second=firstApi.copy(id="second-api",inputs=firstApi.inputs+("profile" to WorkflowExpression.Text(profileB.id)))
+            val multi=WorkflowEditing.insert(base,WorkflowPosition("pages",5),second)
+            assertTrue(WorkflowValidator.validate(multi).valid)
+            val apiA=TranslationWorkflow.STANDARD_API.copy(id="fixture-a",builtIn=false,program=multi)
+            val apiB=apiA.copy(id="fixture-b",program=WorkflowReferenceTemplates.standard(profileB.id))
+            val apiD=apiA.copy(id="fixture-d",program=base)
+            val settings=MangaTranslationSettings(sourceLanguage="en",targetLanguage="zh-Hans")
+            val at=System.currentTimeMillis()
+            val tasks=listOf(Triple(a1,mangaA,apiA),Triple(b1,mangaB,apiB),Triple(c1,mangaC,TranslationWorkflow.LOCAL_MACHINE),Triple(d1,mangaD,apiD))
+            val dao=container.database.translationDao()
+            dao.upsertAll(tasks.map { (chapter,manga,workflow) -> ChapterTranslationEntity(chapter,manga,"zh-Hans","PENDING","en",false,
+                translationTaskSnapshot(workflow,settings,"en","zh-Hans","",BubbleRenderSettings(),listOf(profileA,profileB)),at,null,0,null,at) })
+            container.translationQueue.sortManga(fixtureMangas)
+            container.translationQueue.resume()
+            withTimeout(90_000) { serverA.requested.await();serverB.requested.await()
+                dao.observeQueue().first { dao.byChapter(c1).firstOrNull()?.state=="DONE" }
+            }
+            assertEquals("PENDING",dao.byChapter(d1).single().state)
+            assertTrue(dao.byChapter(a1).single().state=="RUNNING")
+            assertTrue(dao.byChapter(b1).single().state=="RUNNING")
+            assertTrue(container.localPageTranslator.artifacts.has(pages[4].first))
+            serverA.reply.complete(Unit);serverB.reply.complete(Unit)
+            withTimeout(90_000) { dao.observeQueue().first { rows -> rows.none { it.chapterId in listOf(a1,b1,c1,d1) && it.state in listOf("PENDING","RUNNING") } } }
+            for((chapter,_,_) in tasks) assertEquals(dao.byChapter(chapter).single().failure,"DONE",dao.byChapter(chapter).single().state)
+        } finally {
+            serverA.reply.complete(Unit);serverB.reply.complete(Unit)
+            container.translationQueue.pause();container.translationQueue.awaitCurrentPage()
+            container.apiProfiles.delete(bProfileId);serverA.close();serverB.close()
+        }
+    }
+    @Test fun waitingOnApiPresegmentsTheNextPageAndItsRealSegReusesTheCache() = runBlocking {
+        val server=DelayedApiServer(pageRequests=true)
+        try {
+            container.translationQueue.setSchedulingPriority(TranslationSchedulingPriority.RESOURCES)
+            val profile=ApiProfile(apiProfileId,ApiProfileKind.LLM,"Prefetch","http://127.0.0.1:${server.port}/v1",model="fixture",parallelLimit=1,retryCount=0)
+            container.apiProfiles.save(profile)
+            val program=WorkflowEditing.update(WorkflowReferenceTemplates.standard(profile.id),"pages") { it.copy(mode=WorkflowMode.SYNC) }
+            assertTrue(WorkflowValidator.validate(program).valid)
+            val workflow=TranslationWorkflow.STANDARD_API.copy(id="prefetch-fixture",builtIn=false,program=program)
+            val at=System.currentTimeMillis()
+            val dao=container.database.translationDao()
+            dao.upsertAll(listOf(ChapterTranslationEntity(a1,mangaA,"zh-Hans","PENDING","en",false,
+                translationTaskSnapshot(workflow,MangaTranslationSettings(sourceLanguage="en",targetLanguage="zh-Hans"),"en","zh-Hans","",BubbleRenderSettings(),listOf(profile)),at,null,0,null,at)))
+            val hits=container.localVision.preprocessingCache.hits.value
+            container.translationQueue.resume()
+            withTimeout(60_000) { server.requested.await() }
+            withTimeout(60_000) { while(true) {
+                val directory=File(context.filesDir,"vision-preprocessing")
+                val ready=runCatching {
+                    val pins=JSONObject(File(directory,"pending.json").readText())
+                    pins.keys().asSequence().any { pins.getString(it)==pages[1].first && File(directory,"$it.json").isFile }
+                }.getOrDefault(false)
+                if(ready && container.translationQueue.activeSeg.value==0 && container.translationQueue.activeOcr.value==0) break
+                delay(50)
+            } }
+            assertFalse(container.localPageTranslator.artifacts.has(pages[1].first))
+            server.reply.complete(Unit)
+            withTimeout(90_000) { dao.observeQueue().first { it.none { row -> row.chapterId==a1 && row.state in listOf("PENDING","RUNNING") } } }
+            assertEquals(dao.byChapter(a1).single().failure,"DONE",dao.byChapter(a1).single().state)
+            assertTrue(container.localVision.preprocessingCache.hits.value>hits)
+        } finally { server.reply.complete(Unit);server.close() }
+    }
     @Test fun fullApiKeepsOneRequestAcrossReorderAndPauseThenSavesInNewChapterOrder() = runBlocking {
         val server = DelayedApiServer()
         val events = java.util.Collections.synchronizedList(mutableListOf<String>())
@@ -298,7 +403,7 @@ class QueueSchedulingIntegrationTest {
         } finally { server.close() }
     }
     /** Local protocol fixture, never sends an image or prompt to a user service. */
-    private class DelayedApiServer {
+    private class DelayedApiServer(private val pageRequests: Boolean = false) {
         private val server = ServerSocket(0)
         val port get() = server.localPort
         val calls = AtomicInteger()
@@ -329,8 +434,9 @@ class QueueSchedulingIntegrationTest {
                     val body = ByteArray(contentLength); var count = 0
                     while(count < contentLength) { val n = input.read(body, count, contentLength - count); require(n > 0); count += n }
                     val prompt = JSONObject(String(body, Charsets.UTF_8)).getJSONArray("messages").getJSONObject(0).getString("content")
-                    val start = prompt.indexOf("所有气泡按章节和页顺序提供：") + "所有气泡按章节和页顺序提供：".length
-                    val end = prompt.indexOf("。只返回完整 JSON 列表", start)
+                    val marker = if(pageRequests) "输入：" else "所有气泡按章节和页顺序提供："
+                    val start = prompt.indexOf(marker) + marker.length
+                    val end = prompt.indexOf(if(pageRequests) "。返回完整 JSON 列表" else "。只返回完整 JSON 列表", start)
                     val originals = JSONArray(prompt.substring(start, end))
                     val translated = JSONArray()
                     for(i in originals.length() - 1 downTo 0) translated.put(originals.getJSONObject(i).put("translation", "合成队列译文"))

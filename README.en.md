@@ -14,7 +14,7 @@
   <a href="https://github.com/tapdefenser/LM-Reader/issues">Feedback</a>
 </p>
 
-> **v0.1.0 first release:** [Download the signed APK](https://github.com/tapdefenser/LM-Reader/releases/tag/v0.1.0). Android 8.0+, arm64-v8a / x86_64. See [release notes](docs/releases/v0.1.0.md) for known limitations.
+> **v0.1.5:** [Download the signed APK](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.5). Android 8.0+, arm64-v8a / x86_64. See [release notes](docs/releases/v0.1.5.md) for changes and known limitations.
 
 ## Read, translate and create
 
@@ -81,7 +81,7 @@ On Windows, use `gradlew.bat`. Missing formal signing environment variables prod
 - [English documentation](docs/README.en.md) · [中文文档](docs/README.md)
 - [User guide](docs/USAGE.en.md) · [Workflows](docs/WORKFLOWS.en.md) · [Backup/recovery](docs/BACKUP.en.md)
 - [Architecture](docs/ARCHITECTURE.md) · [Models and language packs](docs/MODEL_PACKS.md)
-- [Release notes](docs/releases/v0.1.0.md) · [Changelog](CHANGELOG.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+- [Release notes](docs/releases/v0.1.5.md) · [Changelog](CHANGELOG.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ```text
 app/          UI, reader, queues, backup and export

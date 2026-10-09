@@ -51,7 +51,9 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
     fun save(pageId: String, hash: String, source: LocalTranslationLanguage, target: LocalTranslationLanguage,
         width: Int, height: Int, regions: List<PageTranslatedRegion>, packs: List<String>, elapsed: Long,
         render: BubbleRenderSettings = BubbleRenderSettings(), expectedRevision: String? = null,
+        requireAbsent: Boolean = false,
         checkCancelled: () -> Unit = {}): ReaderPageTranslation {
+        if (requireAbsent && read(pageId) != null) throw PageTranslationRevisionConflict()
         if (expectedRevision != null && read(pageId)?.revision != expectedRevision) throw PageTranslationRevisionConflict()
         val result = ReaderPageTranslation(pageId, UUID.randomUUID().toString(), file(pageId), source, target,
             hash, width, height, regions, packs, elapsed, render)
@@ -72,7 +74,8 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
 
     fun saveEdits(saved: ReaderPageTranslation, regions: List<PageTranslatedRegion>, checkCancelled: () -> Unit = {}) =
         save(saved.pageId, saved.sourceSha256, saved.source, saved.target, saved.width, saved.height, regions,
-            saved.modelPacks, saved.elapsedMillis, saved.renderSettings, saved.revision, checkCancelled)
+            saved.modelPacks, saved.elapsedMillis, saved.renderSettings, saved.revision.takeIf { it.isNotEmpty() },
+            requireAbsent = saved.revision.isEmpty(), checkCancelled = checkCancelled)
 
     /** Import old metadata before removing its private PNG. No comic source is opened. */
     @Synchronized
@@ -146,7 +149,7 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
                 rect(item.getJSONArray("bounds")), (0 until contour.length()).map { j ->
                     contour.getJSONArray(j).let { PixelPoint(it.getDouble(0).toFloat(), it.getDouble(1).toFloat()) }
                 }, item.getString("sourceText"), (0 until boxes.length()).map { rect(boxes.getJSONArray(it)) }),
-                item.getString("translatedText"))
+                item.getString("translatedText"), item.optInt("fontScale", 100), item.optDouble("rotation", 0.0).toFloat())
         }
         val packs = json.getJSONArray("modelPacks")
         return ReaderPageTranslation(pageId, revision, file(pageId), LocalTranslationLanguage.fromTag(json.getString("source")),
@@ -167,6 +170,7 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
         data.regions.forEach { item ->
             val r = item.region
             require(r.id.startsWith(data.pageId + ":") && r.sourceText.length <= 4096 && item.translatedText.length <= 16384)
+            require(item.fontScalePercent in 25..400 && item.rotationDegrees.isFinite())
             require(validRect(r.bounds) && r.contour.size <= 2048 && r.textBounds.size <= 1000 && r.textBounds.all(::validRect))
             require(r.contour.all { it.x.isFinite() && it.y.isFinite() && it.x in 0f..data.width.toFloat() && it.y in 0f..data.height.toFloat() })
         }
@@ -183,6 +187,7 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
             val r = item.region
             put(JSONObject().put("id", r.id).put("kind", r.kind.name).put("bounds", rectJson(r.bounds)).put("sourceText", r.sourceText)
                 .put("translatedText", item.translatedText).put("contour", JSONArray().apply { r.contour.forEach { put(JSONArray(listOf(it.x, it.y))) } })
+                .put("fontScale", item.fontScalePercent).put("rotation", item.rotationDegrees.toDouble())
                 .put("textBounds", JSONArray().apply { r.textBounds.forEach { put(rectJson(it)) } }))
         } })
 

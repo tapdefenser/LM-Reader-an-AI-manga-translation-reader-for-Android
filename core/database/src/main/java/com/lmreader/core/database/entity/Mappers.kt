@@ -99,6 +99,7 @@ internal fun MangaEntity.toDomain(): MangaRecord = MangaRecord(
         },
         customStyle = translationCustomStyle,
         workflowId = translationWorkflowId,
+        apiProfileId = translationApiProfileId,
         pageMode = translationPageMode?.let { name -> TranslationPageMode.entries.firstOrNull { it.name == name } },
         segThreshold = translationSegThreshold?.takeIf { it.isFinite() && it in 0f..1f },
         segTextScope = com.lmreader.core.model.SegTextScope.entries.firstOrNull { it.name == translationSegTextScope }
@@ -147,6 +148,7 @@ internal fun MangaRecord.toEntity(sourceOrderIndex: Int): MangaEntity = MangaEnt
     translationStyleMode = translationSettings.styleMode?.name,
     translationCustomStyle = translationSettings.customStyle,
     translationWorkflowId = translationSettings.workflowId,
+    translationApiProfileId = translationSettings.apiProfileId,
     translationPageMode = translationSettings.pageMode?.name,
     translationSegThreshold = translationSettings.segThreshold,
     translationSegTextScope = translationSettings.segTextScope.name,

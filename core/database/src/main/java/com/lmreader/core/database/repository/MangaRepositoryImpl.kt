@@ -527,6 +527,7 @@ internal class MangaRepositoryImpl(
             styleMode = settings.styleMode?.name,
             customStyle = settings.customStyle,
             workflowId = settings.workflowId,
+            apiProfileId = settings.apiProfileId,
             pageMode = settings.pageMode?.name,
             segThreshold = settings.segThreshold,
             segTextScope = settings.segTextScope.name,

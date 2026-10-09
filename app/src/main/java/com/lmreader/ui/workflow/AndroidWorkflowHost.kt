@@ -29,7 +29,7 @@ import kotlin.math.floor
 data class WorkflowChapterInput(val id: String, val name: String, val source: PageSource, val pages: List<ReaderPage>)
 data class WorkflowRunSettings(val source: LocalTranslationLanguage, val target: LocalTranslationLanguage,
     val style: String, val render: BubbleRenderSettings, val segThreshold: Float, val apiProfiles: List<ApiProfile> = emptyList(),
-    val segTextScope: SegTextScope = SegTextScope.ALL, val textDetectionThreshold: Float = .45f,
+    val segTextScope: SegTextScope = SegTextScope.ALL, val textDetectionThreshold: Float = .35f,
     val freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO)
 
 /** One host owns a manga run. Image references survive page completion; decoded bitmaps use the SEG MB budget. */
@@ -47,17 +47,29 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     private class ImageState {
         val mutex = Mutex(); var bitmap: Bitmap? = null; var hash = ""; var lease: TranslationCacheBudget.Lease? = null
         var closed = false; var readers = 0; var seg: SegResult? = null; val started = System.nanoTime()
-        var width = 0; var height = 0; var prepared = false
+        var width = 0; var height = 0
+        @Volatile var prepared = false
+        var collectingConsumers = 0
+        var releaseWhenIdle = false
+        @Volatile var resultBytes = 0L
+        val ocrBytes = ConcurrentHashMap<String, Long>()
+        var cachePinned = false
     }
     private val states = ConcurrentHashMap<String, ImageState>()
     private val images = ConcurrentHashMap<String, ImageRef>()
     private val cached = ConcurrentHashMap<String, ReaderPageTranslation>()
     private val prepared = ConcurrentHashMap<String, WorkflowValue.Record>()
     private val waitingForBitmap = AtomicInteger()
+    private val prefetchLock = Mutex()
     private val geometry = ConcurrentHashMap<String, SegRegion>()
     private val ocrBounds = ConcurrentHashMap<String, List<PixelRect>>()
     val published = ConcurrentHashMap<String, ReaderPageTranslation>()
     init { inputs.keys.forEach { images["page:$it"] = ImageRef(it) } }
+    override fun parallelism(node: WorkflowNode): Int = WorkflowResourceCapacities(
+        container.localVision.segConcurrency, container.localVision.ocrConcurrency, 1,
+        settings.apiProfiles.associate { it.id to it.parallelLimit },
+        (container.translationCachePreferences.megabytes.value / 16 /
+            container.translationQueue.activeMangas.value.size.coerceAtLeast(1)).coerceAtLeast(1)).parallelism(node)
     override suspend fun chapters() = chapterInputs.mapIndexed { index, chapter -> record("id" to text(chapter.id),
         "name" to text(chapter.name), "index" to number(index + 1), "records" to list(emptyList())) }
     override suspend fun pages(chapter: WorkflowValue.Record) = chapters.getValue(chapter.string("id")).pages.mapIndexed { index, page ->
@@ -72,6 +84,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     }
     override suspend fun admitPage(frame: WorkflowFrame, job: Job): WorkflowPageAdmission {
         val id = requireNotNull(frame.identity(WorkflowSystem.PAGE))
+        states[id]?.let { state -> state.mutex.withLock { state.prepared = false; state.lease?.setCanAdvance(true) } }
         prepared[id]?.let { frame.define(WorkflowSystem.PAGE, it, WorkflowSystem.pageType) }
         if (reusePages) {
             val (source, page) = inputs.getValue(id)
@@ -92,7 +105,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 progress(frame, PageTranslationProgress(PageTranslationStage.READING))
                 val state = image(reference.pageId)
                 try {
-                val seg = container.localVision.segment(reference.pageId, state.bitmap!!, settings.segThreshold, settings.textDetectionThreshold) { progress(frame, PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total)) }
+                val seg = container.localVision.segment(reference.pageId, state.bitmap!!, settings.segThreshold, settings.textDetectionThreshold, sourceSha256 = state.hash) { progress(frame, PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total)) }
                 val regions = selectSegRegions(seg, settings.segTextScope, settings.freeTextMergeGapRatio)
                 require(regions.size <= 1000) { "气泡过多，请分批处理" }
                 // Invalidate only this page. A fresh generation prevents copied old iterators
@@ -106,6 +119,10 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 }
                 cached.remove(reference.pageId); prepared.remove(reference.pageId); published.remove(reference.pageId)
                 state.seg = seg
+                state.mutex.withLock {
+                    state.resultBytes = seg.regions.sumOf { 256L + it.contour.size * 8L } + seg.textLines.size * 48L
+                    accountPage(state)
+                }
                 list(regions.mapIndexed { index, detected ->
                     val region = detected.copy(id = "${detected.id}:seg:$generation")
                     geometry[region.id] = region; images["bubble:${region.id}"] = ImageRef(reference.pageId, region.bounds)
@@ -122,17 +139,22 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 val language = LocalPageTranslator.ocrLanguage(LocalTranslationLanguage.fromTag(value("language")))
                 val region = key.takeIf { it.startsWith("bubble:") }?.removePrefix("bubble:")?.let { geometry[it] }
                 val report: (VisionProgress) -> Unit = { progress(frame, PageTranslationProgress(PageTranslationStage.OCR, it.completed, it.total)) }
-                val result = if (region != null) container.localVision.recognizeRegion(reference.pageId, state.bitmap!!,
+                val result = if (region != null) container.localVision.cachedRecognizeRegion(reference.pageId, state.hash, state.bitmap!!,
                     language, region, state.seg!!.regions, state.seg!!.textLines, report)
                 else container.localVision.recognize(reference.pageId, state.bitmap!!, language,
                     reference.area?.let { kotlin.collections.listOf(it) }, state.seg?.textLines?.filter { line ->
                         reference.area?.let { area -> line.bounds.left >= area.left && line.bounds.top >= area.top && line.bounds.right <= area.right && line.bounds.bottom <= area.bottom } ?: true
                     }, report)
                 if (key.startsWith("bubble:")) ocrBounds[key.removePrefix("bubble:")] = result.lines.map { it.bounds }
+                state.mutex.withLock {
+                    state.ocrBytes[key] = result.lines.sumOf { 96L + it.text.length * 2L }
+                    accountPage(state)
+                }
                 text(result.translationText)
                 } finally { releaseReader(state) }
             }
             WorkflowKind.TRANSLATE -> {
+                frame.identity(WorkflowSystem.PAGE)?.let { parkBitmap(it) }
                 val input = value("text")
                 if (input.isBlank()) text("") else {
                     val source = LocalTranslationLanguage.fromTag(value("source")); val target = LocalTranslationLanguage.fromTag(value("target"))
@@ -152,6 +174,8 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         container.apiClient.configureProfiles(if(settings.apiProfiles.isNotEmpty()) settings.apiProfiles else profiles)
         val profile = settings.apiProfiles.firstOrNull { it.id == call.profileId }?.copy(apiKey = live.apiKey) ?: live
         val attachments = call.images.map { encodeImage(it) }
+        (call.images.mapNotNull { images[it.key]?.pageId } + listOfNotNull(frame.identity(WorkflowSystem.PAGE))).distinct()
+            .forEach { parkBitmap(it) }
         require(attachments.sumOf { it.base64.length } <= 16_000_000) { "API 图片附件超过 16 MB，请分批处理" }
         val example = schemaExample(call.resultType).let { structure ->
             call.expectedBubbleId?.let { structure.replace("\"bubbleId\":\"文本\"", "\"bubbleId\":" + org.json.JSONObject.quote(it)) } ?: structure
@@ -179,7 +203,16 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         val parameters = org.json.JSONObject(profile.customParameters.ifBlank { "{}" })
         val responseFormat = if(profile.format == ApiFormat.CHAT && !parameters.has("response_format")) WorkflowJsonSchema.responseFormat(call.resultType) else null
         val constrainedProfile = responseFormat?.let { profile.copy(customParameters = parameters.put("response_format", org.json.JSONObject(it)).toString()) } ?: profile
-        try { return withContext(trace + capture) {
+        val collecting = if(frame.identity(WorkflowSystem.PAGE) == null) states.values.filter { it.prepared } else emptyList()
+        collecting.forEach { state -> state.mutex.withLock {
+            state.collectingConsumers++
+            state.lease?.setCanAdvance(true)
+        } }
+        waitingForApi(call, frame, true)
+        try { return coroutineScope {
+            val preparing = if (frame.identity(WorkflowSystem.PAGE) != null)
+                launch(Dispatchers.IO) { if(awaitPrefetchPermission(frame)) presegmentAhead(frame) } else null
+            try { withContext(trace + capture) {
             suspend fun collectResponse(requestProfile: ApiProfile) = container.apiClient.stream(requestProfile, messages).collect { event -> if(event is ApiStreamEvent.Text && !event.thinking) {
                 require(result.length + event.value.length <= 4_000_000) { "API 输出超过 4 MB" }; result.append(event.value)
                 if(parser != null) try { parser.append(event.value, requireNotNull(item)) }
@@ -195,6 +228,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 else WorkflowValueCodec.parseResponse(result.toString(), call.resultType, bubbleId, call.expectedItems)
             call.expectedCount?.let { WorkflowValueCodec.requireItemCount(parsed, it) }
             parsed
+            } } finally { preparing?.cancelAndJoin() }
         } } catch(cancelled: CancellationException) { throw cancelled }
         catch(failure: Exception) {
             if(transportComplete || outputFailed) {
@@ -203,7 +237,49 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 throw IllegalArgumentException(detail, failure)
             }
             throw failure
-        }
+        } finally { withContext(NonCancellable) {
+            waitingForApi(call, frame, false)
+            collecting.forEach { state -> state.mutex.withLock {
+                state.collectingConsumers--
+                state.lease?.setCanAdvance(!state.prepared || state.collectingConsumers > 0)
+            } }
+        } }
+    }
+    /** Any API step (including a later API in the same workflow) wakes the scheduler. */
+    protected open suspend fun waitingForApi(call: WorkflowApiCall, frame: WorkflowFrame, waiting: Boolean) {}
+    protected open suspend fun awaitPrefetchPermission(frame: WorkflowFrame) = false
+    protected open suspend fun canPrefetch(chapterId: String, pageId: String) = continueScheduling()
+    private suspend fun presegmentAhead(frame: WorkflowFrame) {
+        if (!prefetchLock.tryLock()) return
+        try {
+            val current = frame.identity(WorkflowSystem.PAGE) ?: return
+            val pages = chapterInputs.flatMap { chapter -> chapter.pages.map { chapter.id to it } }
+            val index = pages.indexOfFirst { it.second.pageId == current }
+            if (index < 0) return
+            for ((chapterId, page) in pages.drop(index + 1)) {
+                currentCoroutineContext().ensureActive()
+                if (!canPrefetch(chapterId, page.pageId)) break
+                if (states.containsKey(page.pageId) || cached.containsKey(page.pageId) || published.containsKey(page.pageId)) continue
+                if (reusePages && container.localPageTranslator.artifacts.has(page.pageId)) continue
+                // Admission waits for budget. The current page's SEG and OCR lease
+                // is never evicted to make space for speculative work.
+                var state: ImageState? = null
+                try {
+                    val owned = image(page.pageId).also { state = it }
+                    val seg = container.localVision.segment(page.pageId, owned.bitmap!!, settings.segThreshold,
+                        settings.textDetectionThreshold, sourceSha256 = owned.hash)
+                    owned.mutex.withLock {
+                        owned.seg = seg
+                        owned.resultBytes = seg.regions.sumOf { 256L + it.contour.size * 8L } + seg.textLines.size * 48L
+                        accountPage(owned)
+                    }
+                } finally {
+                    state?.let { releaseReader(it); parkBitmap(page.pageId) }
+                }
+            }
+        } catch(cancelled: CancellationException) { throw cancelled }
+        catch(_: Exception) { /* A speculative failure is retried through the real SEG row. */ }
+        finally { prefetchLock.unlock() }
     }
     private suspend fun encodeImage(image: WorkflowValue.Image): ApiImage {
         val reference = images[image.key] ?: error("图片引用不存在")
@@ -233,7 +309,14 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         val state = states.computeIfAbsent(id) { ImageState() }
         state.mutex.withLock {
             if (state.bitmap == null) {
-                val lease = acquireBitmapLease(); state.lease = lease
+                state.releaseWhenIdle = false
+                val lease = state.lease ?: acquireBitmapLease().also { state.lease = it }
+                if (!state.cachePinned) {
+                    container.localVision.preprocessingCache.markPendingPage(id)
+                    container.localVision.preprocessingCache.retainPage(id); state.cachePinned = true
+                }
+                // Reloading the original for this admitted page cannot wait on its own results.
+                lease.resizeForPage(16_000_000 + state.resultBytes + state.ocrBytes.values.sum())
                 var temporary: File? = null
                 try {
                     val file = File.createTempFile("workflow-source-", ".image", context.cacheDir).also { temporary = it }
@@ -249,9 +332,9 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                         }
                     } }
                     state.bitmap = decodePageAnalysisImage(context, file)
-                    state.width = state.bitmap!!.width; state.height = state.bitmap!!.height
+            state.width = state.bitmap!!.width; state.height = state.bitmap!!.height
                     state.hash = digest.digest().joinToString("") { "%02x".format(it) }
-                    state.lease = lease; lease.shrink(state.bitmap!!.allocationByteCount.toLong())
+                    state.lease = lease; accountPage(state)
                 } catch (failure: Throwable) { withContext(NonCancellable) { release(state) }; throw failure }
                 finally { temporary?.delete() }
             }
@@ -265,6 +348,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
             container.localPageTranslator.pageWriteMutex.withLock {
                 if (!canPublish(frame)) throw WorkflowPageStopped()
                 published[id] = saved; pagePublished(frame, saved)
+                container.localVision.preprocessingCache.commitPage(id)
             }
             return
         }
@@ -281,6 +365,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 settings.render, checkCancelled = { job.ensureActive() })
             published[id] = saved
             pagePublished(frame, saved)
+            container.localVision.preprocessingCache.commitPage(id)
         }
     }
     override suspend fun previewPage(frame: WorkflowFrame) = container.localPageTranslator.pageWriteMutex.withLock {
@@ -321,22 +406,24 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         val id = frame.identity(WorkflowSystem.PAGE) ?: return
         states[id]?.let { state -> state.mutex.withLock {
             state.prepared = true
-            // Retain completed bitmaps until another page needs space. In-use readers always win.
-            if(waitingForBitmap.get() > 0 && state.readers == 0) release(state)
+            // Only the reloadable image can be released. SEG/OCR and their lease
+            // remain protected until this page is published or the run stops.
+            if(state.readers == 0) releaseBitmap(state)
+            state.lease?.setCanAdvance(state.collectingConsumers > 0)
         } }
     }
     private suspend fun acquireBitmapLease(): TranslationCacheBudget.Lease {
-        budget.tryAcquire(16_000_000)?.let { return it }
+        budget.tryAcquire(16_000_000, mangaId)?.let { return it }
         waitingForBitmap.incrementAndGet()
         try {
             for(candidate in states.values) {
                 if(!candidate.mutex.tryLock()) continue
                 try {
-                    if(candidate.prepared && candidate.readers == 0 && candidate.bitmap != null) release(candidate)
+                    if(candidate.prepared && candidate.readers == 0 && candidate.bitmap != null) releaseBitmap(candidate)
                 } finally { candidate.mutex.unlock() }
-                budget.tryAcquire(16_000_000)?.let { return it }
+                budget.tryAcquire(16_000_000, mangaId)?.let { return it }
             }
-            return budget.acquire(16_000_000)
+            return budget.acquire(16_000_000, mangaId)
         } finally { waitingForBitmap.decrementAndGet() }
     }
     protected open suspend fun canPublish(frame: WorkflowFrame) = true
@@ -345,13 +432,32 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     protected fun pageLabel(frame: WorkflowFrame) = frame.identity(WorkflowSystem.PAGE)?.let { inputs[it]?.second?.displayName } ?: "章节工作流"
     protected open suspend fun pagePublished(frame: WorkflowFrame, saved: ReaderPageTranslation) {}
     override suspend fun closePage(frame: WorkflowFrame) {
-        frame.identity(WorkflowSystem.PAGE)?.let { states[it] }?.let { state -> state.mutex.withLock { state.closed = true; if(state.readers == 0) release(state) } }
+        frame.identity(WorkflowSystem.PAGE)?.let { id -> states[id]?.let { state -> state.mutex.withLock {
+            state.closed = true
+            if(state.readers == 0) release(state)
+            if (state.cachePinned) { container.localVision.preprocessingCache.releasePage(id); state.cachePinned = false }
+        } } }
     }
     private suspend fun releaseReader(state: ImageState) = withContext(NonCancellable) {
-        state.mutex.withLock { check(state.readers > 0); state.readers--; if(state.closed && state.readers == 0) release(state) }
+        state.mutex.withLock { check(state.readers > 0); state.readers--
+            if(state.readers == 0) { if(state.closed) release(state) else if(state.releaseWhenIdle) releaseBitmap(state) }
+        }
     }
+    private suspend fun parkBitmap(pageId: String) = withContext(NonCancellable) {
+        states[pageId]?.let { state -> state.mutex.withLock {
+            state.releaseWhenIdle = true
+            if (state.readers == 0) releaseBitmap(state)
+        } }
+    }
+    private suspend fun accountPage(state: ImageState) {
+        state.lease?.resizeForPage((state.bitmap?.allocationByteCount?.toLong() ?: 0L) + state.resultBytes + state.ocrBytes.values.sum())
+    }
+    private suspend fun releaseBitmap(state: ImageState) { state.bitmap?.recycle(); state.bitmap = null; accountPage(state) }
     private suspend fun release(state: ImageState) { state.bitmap?.recycle(); state.bitmap = null; state.lease?.release(); state.lease = null }
-    suspend fun close() = withContext(NonCancellable) { states.values.forEach { state -> state.mutex.withLock { release(state) } } }
+    suspend fun close() = withContext(NonCancellable) { states.forEach { (id, state) -> state.mutex.withLock {
+        release(state)
+        if (state.cachePinned) { container.localVision.preprocessingCache.releasePage(id); state.cachePinned = false }
+    } } }
     private suspend fun pageNumber(frame: WorkflowFrame) = (frame.read(WorkflowRef(WorkflowSystem.PAGE, kotlin.collections.listOf("number"))) as WorkflowValue.Number).value
     private fun regionRecord(region: PageTranslatedRegion, id: String, number: Double) = record("bubbleId" to text(region.region.id),
         "source" to text(region.region.sourceText), "translation" to text(region.translatedText), "pageId" to text(id), "pageNumber" to WorkflowValue.Number(number))

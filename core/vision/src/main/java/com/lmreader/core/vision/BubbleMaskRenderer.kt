@@ -41,7 +41,7 @@ class BubbleMaskRenderer {
         catch (failure: Throwable) { output.recycle(); throw failure }
     }
 
-    private fun regionPath(region: PageTextRegion) = Path().apply {
+    internal fun regionPath(region: PageTextRegion) = Path().apply {
         if (region.contour.size >= 3) {
             moveTo(region.contour[0].x, region.contour[0].y)
             region.contour.drop(1).forEach { lineTo(it.x, it.y) }; close()
@@ -150,11 +150,11 @@ class BubbleMaskRenderer {
         val colors=buckets.maxByOrNull {it.value.size}?.value ?: return Color.WHITE
         return Color.rgb(colors.map {Color.red(it)}.average().roundToInt(),colors.map {Color.green(it)}.average().roundToInt(),colors.map {Color.blue(it)}.average().roundToInt())
     }
-    companion object {const val VERSION=4}
+    companion object {const val VERSION=5}
 }
 
 internal data class OverlayBubble(val region: PageTextRegion, val path: Path, val fill: Paint,
-    val textRect: RectF, val layout: StaticLayout?, val protectedInk: Path?)
+    val textRect: RectF, val layout: StaticLayout?, val protectedInk: Path?, val rotation: Float = 0f)
 
 internal data class OverlaySeed(val region: PageTextRegion, val path: Path, val background: Int, val protectedInk: Path?) {
     // Caption contours follow the original ink, not the rectangular space available
@@ -179,8 +179,9 @@ class BubbleOverlaySource internal constructor(seeds: List<OverlaySeed>) {
         includeEmptyForEditing: Boolean = false): BubbleOverlay {
         val renderer = BubbleMaskRenderer()
         return BubbleOverlay(regions.filter { !hideEmpty || includeEmptyForEditing || it.translatedText.isNotBlank() }.map { item ->
-            val seed = byId.getValue(item.region.id)
-            require(seed.region.renderGeometry() == item.region.renderGeometry()) { "Bubble geometry changed; prepare the original again" }
+            val previous = byId[item.region.id]
+            val seed = previous?.takeIf { it.region.renderGeometry() == item.region.renderGeometry() }
+                ?: OverlaySeed(item.region, renderer.regionPath(item.region), previous?.background ?: Color.WHITE, null)
             val color = if (settings.fillMode == BubbleFillMode.AUTO) seed.background else Color.WHITE
             val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 this.color = color
@@ -202,13 +203,14 @@ class BubbleOverlaySource internal constructor(seeds: List<OverlaySeed>) {
             val text = item.translatedText.trim()
             var layout = if (text.isNotEmpty() && rect.width() >= 1 && rect.height() >= 1)
                 renderer.fitLayout(text, rect.width().toInt(), rect.height().toInt(), paint) else null
-            if (layout != null && settings.fontScalePercent != 100) {
-                paint.textSize *= settings.fontScalePercent / 100f
+            val fontScale = settings.fontScalePercent / 100f * item.fontScalePercent / 100f
+            if (layout != null && fontScale != 1f) {
+                paint.textSize *= fontScale
                 layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, rect.width().toInt())
                     .setAlignment(Layout.Alignment.ALIGN_CENTER).setIncludePad(false).setLineSpacing(0f,1.05f)
                     .setBreakStrategy(LineBreaker.BREAK_STRATEGY_HIGH_QUALITY).build()
             }
-            OverlayBubble(item.region, seed.maskPath(settings), fill, rect, layout, seed.protectedInk)
+            OverlayBubble(item.region, seed.maskPath(settings), fill, rect, layout, seed.protectedInk, item.rotationDegrees)
         })
     }
 }
@@ -218,6 +220,10 @@ class BubbleOverlay internal constructor(private val bubbles: List<OverlayBubble
     private val editingPen = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     fun draw(canvas: Canvas) {
         bubbles.forEach { bubble ->
+            val rotationSave = canvas.save()
+            canvas.rotate(bubble.rotation, (bubble.region.bounds.left + bubble.region.bounds.right) / 2,
+                (bubble.region.bounds.top + bubble.region.bounds.bottom) / 2)
+            try {
             val fillSave = canvas.save()
             try {
                 bubble.protectedInk?.let { canvas.clipOutPath(it) }
@@ -246,13 +252,18 @@ class BubbleOverlay internal constructor(private val bubbles: List<OverlayBubble
                 }
                 layout.draw(canvas)
             } finally { canvas.restoreToCount(save) }
+            } finally { canvas.restoreToCount(rotationSave) }
         }
     }
 
     fun hitTest(x: Float, y: Float): String? = bubbles.asReversed().firstOrNull { bubble ->
         val r = bubble.region
-        x >= r.bounds.left && x <= r.bounds.right && y >= r.bounds.top && y <= r.bounds.bottom &&
-            (r.contour.size < 3 || polygonContains(r.contour, x, y))
+        val angle = -bubble.rotation * PI.toFloat() / 180
+        val cx = (r.bounds.left + r.bounds.right) / 2; val cy = (r.bounds.top + r.bounds.bottom) / 2
+        val px = cx + (x - cx) * cos(angle) - (y - cy) * sin(angle)
+        val py = cy + (x - cx) * sin(angle) + (y - cy) * cos(angle)
+        px >= r.bounds.left && px <= r.bounds.right && py >= r.bounds.top && py <= r.bounds.bottom &&
+            (r.contour.size < 3 || polygonContains(r.contour, px, py))
     }?.region?.id
 
     fun drawEditing(canvas: Canvas, selected: String?, strokeWidth: Float) {
@@ -260,7 +271,12 @@ class BubbleOverlay internal constructor(private val bubbles: List<OverlayBubble
         bubbles.forEach { bubble ->
             pen.color = if (bubble.region.id == selected) Color.rgb(255, 166, 45) else Color.rgb(38, 140, 255)
             pen.strokeWidth = strokeWidth * if (bubble.region.id == selected) 2 else 1
-            canvas.drawPath(bubble.path, pen)
+            val save = canvas.save()
+            try {
+                canvas.rotate(bubble.rotation, (bubble.region.bounds.left + bubble.region.bounds.right) / 2,
+                    (bubble.region.bounds.top + bubble.region.bounds.bottom) / 2)
+                canvas.drawPath(bubble.path, pen)
+            } finally { canvas.restoreToCount(save) }
         }
     }
 }

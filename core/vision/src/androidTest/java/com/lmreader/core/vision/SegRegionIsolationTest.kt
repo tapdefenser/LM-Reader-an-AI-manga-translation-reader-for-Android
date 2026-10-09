@@ -30,7 +30,7 @@ class SegRegionIsolationTest {
                 (0 until bitmap.width).count { x -> bitmap.getPixel(x, y) == color }
             }
             try {
-                val separate = selectSegRegions(seg, SegTextScope.FREE_TEXT)
+                val separate = selectSegRegions(seg, SegTextScope.FREE_TEXT, 0f)
                 assertEquals(2, separate.size)
                 separate.forEachIndexed { index, region ->
                     cropSegRegion(image, region, seg.regions).use { crop ->
@@ -41,6 +41,7 @@ class SegRegionIsolationTest {
                 }
                 val joined = selectSegRegions(seg, SegTextScope.FREE_TEXT, .3f)
                 assertEquals(1, joined.size)
+                assertEquals(joined, selectSegRegions(seg, SegTextScope.FREE_TEXT))
                 cropSegRegion(image, joined.single(), seg.regions).use { crop ->
                     assertTrue(count(crop.bitmap, Color.RED) > 0)
                     assertTrue(count(crop.bitmap, Color.BLUE) > 0)

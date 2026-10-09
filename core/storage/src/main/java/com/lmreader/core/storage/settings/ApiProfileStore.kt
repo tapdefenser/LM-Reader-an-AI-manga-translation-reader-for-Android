@@ -8,7 +8,6 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
 import com.lmreader.core.api.ApiProfileCodec
 import com.lmreader.core.api.ApiProtocol
 import com.lmreader.core.model.ApiProfile
@@ -26,7 +25,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 // 单独文件便于排除凭据备份；委托全局唯一，所有仓储实例共享 DataStore。
-private val Context.apiProfileDataStore by preferencesDataStore(name = "api_profiles")
+private val Context.apiProfileDataStore: DataStore<Preferences>
+    get() = PreferenceStores.get(this, "api_profiles")
 
 /** 凭据加密边界，可在隔离测试中替换，但生产只使用 Android Keystore。 */
 interface ApiSecretCipher {

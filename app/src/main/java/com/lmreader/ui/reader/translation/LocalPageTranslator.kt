@@ -29,8 +29,12 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
     private val modelPacks: () -> List<TranslationModelPack>) {
     /** NMT and publication serialize; Seg/OCR and reader loads have independent locks. */
     val pageWriteMutex = Mutex()
+    fun retainPreprocessing(pageId: String) {
+        vision.preprocessingCache.markPendingPage(pageId); vision.preprocessingCache.retainPage(pageId)
+    }
+    fun releasePreprocessing(pageId: String) = vision.preprocessingCache.releasePage(pageId)
     suspend fun segment(pageSource: PageSource, page: ReaderPage, segThreshold: Float,
-        textDetectionThreshold: Float = .45f,
+        textDetectionThreshold: Float = .35f,
         progress: (PageTranslationProgress) -> Unit = {}): SegmentedPage {
         var returned: SegmentedPage? = null
         try { return withContext(Dispatchers.IO) {
@@ -41,7 +45,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
             progress(PageTranslationProgress(PageTranslationStage.READING))
             val hash = copySource(pageSource, page, input)
             val decoded = decodePageAnalysisImage(context, input).also { image = it }
-            val seg = vision.segment(page.pageId, decoded, segThreshold, textDetectionThreshold) {
+            val seg = vision.segment(page.pageId, decoded, segThreshold, textDetectionThreshold, sourceSha256 = hash) {
                 progress(PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total))
             }
             ensureActive()
@@ -59,7 +63,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
             val lines = ArrayList<OcrLine>()
             var elapsed = 0L
             for (region in regions) {
-                val result = vision.recognizeRegion(segmented.page.pageId, segmented.image, ocrLanguage(source),
+                val result = vision.cachedRecognizeRegion(segmented.page.pageId, segmented.hash, segmented.image, ocrLanguage(source),
                     region, segmented.seg.regions, segmented.seg.textLines) {
                     progress(PageTranslationProgress(PageTranslationStage.OCR, it.completed, it.total))
                 }
@@ -90,18 +94,35 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
         val job = currentCoroutineContext()
         artifacts.save(page.page.pageId, page.hash, source, target, page.width, page.height,
             bindPageTranslations(page.groups, translated), packSnapshot.filter { it.id in used }.map { it.identity },
-            (System.nanoTime() - page.started) / 1_000_000, render, checkCancelled = { job.ensureActive() })
+            (System.nanoTime() - page.started) / 1_000_000, render, checkCancelled = { job.ensureActive() }).also {
+                vision.preprocessingCache.commitPage(page.page.pageId)
+            }
     }
     suspend fun translate(pageSource: PageSource, page: ReaderPage, source: LocalTranslationLanguage,
         target: LocalTranslationLanguage, render: BubbleRenderSettings,
         mode: TranslationPageMode = TranslationPageMode.BUBBLE, segThreshold: Float = .35f,
         segTextScope: SegTextScope = SegTextScope.ALL,
-        textDetectionThreshold: Float = .45f,
+        textDetectionThreshold: Float = .35f,
         progress: (PageTranslationProgress) -> Unit = {}): ReaderPageTranslation {
-        val recognized = recognize(segment(pageSource, page, segThreshold, textDetectionThreshold, progress), source, segTextScope, progress = progress)
-        return pageWriteMutex.withLock { translateRecognized(recognized, source, target, render, progress) }
+        retainPreprocessing(page.pageId)
+        try {
+            val recognized = recognize(segment(pageSource, page, segThreshold, textDetectionThreshold, progress), source, segTextScope, progress = progress)
+            return pageWriteMutex.withLock { translateRecognized(recognized, source, target, render, progress) }
+        } finally { releasePreprocessing(page.pageId) }
     }
     suspend fun releaseModels() { vision.releaseModels(); translator.releaseModels() }
+    suspend fun editablePage(pageSource: PageSource, page: ReaderPage, source: LocalTranslationLanguage,
+        target: LocalTranslationLanguage, render: BubbleRenderSettings): ReaderPageTranslation = withContext(Dispatchers.IO) {
+        val file = File.createTempFile("bubble-editor-", ".image", context.cacheDir)
+        try {
+            val hash = copySource(pageSource, page, file)
+            artifacts.load(page.pageId, hash)?.let { return@withContext it }
+            val image = decodePageAnalysisImage(context, file)
+            try { ReaderPageTranslation(page.pageId, "", File(artifacts.root, "new-draft"), source, target,
+                hash, image.width, image.height, emptyList(), emptyList(), 0, render) }
+            finally { image.recycle() }
+        } finally { file.delete() }
+    }
     suspend fun cached(pageSource: PageSource, page: ReaderPage, render: BubbleRenderSettings): ReaderPageTranslation? = withContext(Dispatchers.IO) {
         artifacts.migrateLegacy()
         if (!artifacts.has(page.pageId)) return@withContext null

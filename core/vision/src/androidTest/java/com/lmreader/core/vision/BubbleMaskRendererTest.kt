@@ -10,15 +10,15 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class BubbleMaskRendererTest {
-    @Test fun defaultMaskOpacityIsSixtyPercent() {
+    @Test fun defaultMaskOpacityIsEightyFivePercent() {
         val source = Bitmap.createBitmap(100,100,Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
         val region = PageTextRegion("mask",RegionKind.FREE_TEXT,PixelRect(20f,20f,80f,80f),emptyList(),"",emptyList())
         val output = source.copy(Bitmap.Config.ARGB_8888,true)
         try {
             val settings = BubbleRenderSettings(fillMode=BubbleFillMode.WHITE)
-            assertEquals(60,settings.opacityPercent)
+            assertEquals(85,settings.opacityPercent)
             BubbleMaskRenderer().prepareSource(source,listOf(region)).layout(listOf(PageTranslatedRegion(region,"")),settings).draw(Canvas(output))
-            assertEquals(153,Color.red(output.getPixel(40,40)))
+            assertEquals(216,Color.red(output.getPixel(40,40)))
             assertEquals(Color.BLACK,output.getPixel(5,5))
         } finally { source.recycle(); output.recycle() }
     }

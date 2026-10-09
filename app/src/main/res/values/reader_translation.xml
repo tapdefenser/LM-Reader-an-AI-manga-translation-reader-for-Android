@@ -36,7 +36,12 @@
     <string name="reader_bubble_unsaved">Unsaved changes on this page</string>
     <string name="reader_bubble_select">Tap a bubble to edit or delete it</string>
     <string name="reader_bubble_selected">Bubble selected</string>
-    <string name="reader_bubble_no_translation">No translation on this page; translated pages are editable</string>
+    <string name="reader_bubble_no_translation">Tap Add bubble to create a translation on this page</string>
+    <string name="reader_bubble_add">Add bubble</string>
+    <string name="reader_bubble_creating">Creating…</string>
+    <string name="reader_bubble_font_increase">A+</string>
+    <string name="reader_bubble_font_decrease">A−</string>
+    <string name="reader_bubble_handle_hint">Drag to move. Use the handles to resize and rotate.</string>
     <string name="reader_bubble_no_regions">No text regions on this page</string>
     <string name="reader_bubble_text">Edit translation</string>
     <string name="reader_bubble_delete">Delete bubble</string>

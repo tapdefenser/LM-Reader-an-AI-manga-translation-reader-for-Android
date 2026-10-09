@@ -30,14 +30,17 @@ internal class TaskNotificationRenderer(private val context: Context,
             })
     }
     private fun name(queue: TaskQueue) = label(if(queue == TaskQueue.TRANSLATION) R.string.lmreader_task_translation else R.string.lmreader_task_export)
-    private fun title(notice: TaskNotice): String = label(when(notice.phase) {
+    private fun title(notice: TaskNotice): String = listOf(label(when(notice.phase) {
         TaskNoticePhase.WAITING -> R.string.lmreader_task_waiting
         TaskNoticePhase.RUNNING -> R.string.lmreader_task_running
         TaskNoticePhase.PAUSING -> R.string.lmreader_task_pausing
         TaskNoticePhase.PAUSED -> R.string.lmreader_task_paused
         TaskNoticePhase.FAILED -> R.string.lmreader_task_failed
         TaskNoticePhase.COMPLETED -> R.string.lmreader_task_completed
-    }, if(notice.singlePage) label(R.string.lmreader_task_single_page) else name(notice.queue))
+    }, if(notice.singlePage) label(R.string.lmreader_task_single_page) else name(notice.queue)),
+        notice.item.manga, notice.item.chapter,
+        if(notice.item.total > 0) "${notice.item.completed.coerceIn(0, notice.item.total)}/${notice.item.total}" else "")
+        .filter(String::isNotBlank).joinToString(" · ")
     private fun progress(notice: TaskNotice): String = when {
         notice.item.total > 0 -> label(R.string.lmreader_task_pages, notice.item.completed.coerceIn(0, notice.item.total), notice.item.total)
         notice.item.completed > 0 -> label(R.string.lmreader_task_saved_pages, notice.item.completed)
@@ -79,7 +82,7 @@ internal class TaskNotificationRenderer(private val context: Context,
         val lines = ordered.map { title(it) + " · " + progress(it) }
         val builder = base().setGroupSummary(true).setOngoing(ongoing).setAutoCancel(!ongoing)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .setContentTitle(if(ongoing) label(R.string.lmreader_task_title) else label(R.string.lmreader_task_channel))
+            .setContentTitle(primary?.let(::title) ?: if(ongoing) label(R.string.lmreader_task_title) else label(R.string.lmreader_task_channel))
             .setContentText(lines.joinToString(" · ").ifBlank { label(R.string.lmreader_task_starting) })
             .setStyle(NotificationCompat.InboxStyle().also { style -> lines.forEach { style.addLine(it) } })
             .setContentIntent(open(primary?.queue ?: TaskQueue.TRANSLATION))

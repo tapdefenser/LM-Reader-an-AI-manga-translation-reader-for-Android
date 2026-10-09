@@ -5,12 +5,13 @@ import org.junit.Test
 import kotlin.test.*
 
 class SegTextRegionsTest {
-    @Test fun `coarse caption with close rows splits by default and gap setting can rejoin them`() {
+    @Test fun `coarse caption merges close rows by default and zero gap separates them`() {
         val parent = text("caption",PixelRect(20f,20f,440f,130f))
         val first = DetectedTextLine(PixelRect(40f,35f,420f,65f),.9f)
         val second = DetectedTextLine(PixelRect(40f,73f,420f,103f),.9f)
         val seg = page(parent).copy(textLines = listOf(first,second))
-        val separate = selectSegRegions(seg,SegTextScope.FREE_TEXT)
+        assertEquals(1,selectSegRegions(seg,SegTextScope.FREE_TEXT).size)
+        val separate = selectSegRegions(seg,SegTextScope.FREE_TEXT,0f)
         assertEquals(2,separate.size)
         assertTrue(separate[0].bounds.bottom <= separate[1].bounds.top)
         assertEquals(listOf(first),selectRegionTextLines(separate[0],seg.regions,seg.textLines))
@@ -18,20 +19,23 @@ class SegTextRegionsTest {
         assertEquals(1,selectSegRegions(seg,SegTextScope.FREE_TEXT,.3f).size)
         val ocr = LocalOcrResult("p",500,500,LocalOcrLanguage.ENGLISH,listOf(
             OcrLine("first",first.bounds,"FIRST",.9f),OcrLine("second",second.bounds,"SECOND",.9f)),0)
-        assertEquals(listOf("FIRST","SECOND"),groupPageText(seg,ocr).map { it.sourceText })
+        assertEquals(listOf("FIRST","SECOND"),groupPageText(seg,ocr,SegTextScope.ALL,0f).map { it.sourceText })
+        val mergedText = groupPageText(seg,ocr).single().sourceText
+        assertTrue(mergedText.contains("FIRST") && mergedText.contains("SECOND"))
         assertEquals(1,groupPageText(seg,ocr,SegTextScope.ALL,.3f).size)
     }
 
     @Test fun `vertical captions split into columns and overlapping padded rows do not share crops`() {
         val column = page(text("columns",PixelRect(20f,20f,130f,450f))).copy(textLines=listOf(
             DetectedTextLine(PixelRect(35f,40f,65f,420f),.9f),DetectedTextLine(PixelRect(73f,40f,103f,420f),.9f)))
-        val parts = selectSegRegions(column,SegTextScope.FREE_TEXT)
+        assertEquals(1,selectSegRegions(column,SegTextScope.FREE_TEXT).size)
+        val parts = selectSegRegions(column,SegTextScope.FREE_TEXT,0f)
         assertEquals(2,parts.size)
         assertTrue(parts[0].bounds.right <= parts[1].bounds.left)
         assertEquals(1,selectSegRegions(column,SegTextScope.FREE_TEXT,.3f).size)
         val overlapping = page(text("rows",PixelRect(20f,20f,440f,130f))).copy(textLines=listOf(
             DetectedTextLine(PixelRect(40f,35f,420f,70f),.9f),DetectedTextLine(PixelRect(40f,65f,420f,100f),.9f)))
-        val rows = selectSegRegions(overlapping)
+        val rows = selectSegRegions(overlapping,freeTextMergeGapRatio=0f)
         assertEquals(2,rows.size)
         assertTrue(rows[0].bounds.bottom <= rows[1].bounds.top)
     }

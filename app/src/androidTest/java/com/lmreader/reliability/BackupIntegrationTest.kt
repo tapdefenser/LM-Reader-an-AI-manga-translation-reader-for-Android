@@ -16,6 +16,29 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class BackupIntegrationTest {
+    @Test fun previousAdditiveSchemaAndColumnOrderCanRestoreWithoutLosingSettings() = runBlocking(Dispatchers.IO) {
+        container.startupReady.await()
+        seedRow(container,"library_sources",mapOf("sourceId" to "s","kind" to "IMAGE_DIRECTORY","treeUri" to "content://fixture","permission" to "OK","mode" to "MULTI_CHAPTER"))
+        seedRow(container,"mangas",mapOf("mangaId" to "m","anchorDocumentId" to "root/m","sourceId" to "s","sourceKind" to "IMAGE_DIRECTORY","layoutMode" to "MULTI_CHAPTER","availability" to "AVAILABLE","displayName" to "fixture","translationBubbleOpacity" to 100))
+        val root=File(app.root,"old-schema").apply { mkdirs() }
+        val db=container.database.openHelper.writableDatabase
+        container.database.runInTransaction { BackupDatabase.snapshot(db,root,true) }
+        for(table in BackupArchive.tables) {
+            val file=File(root,"database/$table.json")
+            val json=JSONObject(file.readText()).put("version",14)
+            val cols=json.getJSONArray("columns")
+            val order=(0 until cols.length()).filter { cols.getString(it)!="translationApiProfileId" }.reversed()
+            json.put("columns",org.json.JSONArray(order.map { cols.getString(it) }))
+            val rows=json.getJSONArray("rows")
+            json.put("rows",org.json.JSONArray((0 until rows.length()).map { index ->
+                val row=rows.getJSONArray(index);org.json.JSONArray(order.map { row.get(it) })
+            }))
+            file.writeText(json.toString())
+        }
+        container.database.runInTransaction { BackupDatabase.restore(db,root,false) }
+        val saved=container.mangaRepository.translationSettings("m")
+        assertNull(saved.apiProfileId);assertEquals(100,saved.bubbleOpacityPercent)
+    }
     private lateinit var app: IsolatedApp
     private lateinit var container: AppContainer
     @Before fun setup() { app = IsolatedApp(ApplicationProvider.getApplicationContext()); container = AppContainer(app) }

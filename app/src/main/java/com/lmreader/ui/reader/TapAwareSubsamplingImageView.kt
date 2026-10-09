@@ -3,11 +3,17 @@ package com.lmreader.ui.reader
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Color
 import android.view.GestureDetector
 import android.view.MotionEvent
 import com.davemorrissey.labs.subscaleview.SubsamplingScaleImageView
 import com.lmreader.core.vision.BubbleOverlay
 import com.lmreader.ui.reader.translation.ReaderOverlayGeometry
+import com.lmreader.ui.reader.translation.BubbleEditGesture
+import com.lmreader.ui.reader.translation.rotateBubblePoint
+import com.lmreader.core.model.*
+import kotlin.math.*
 
 /**
  * 图片引擎视图 + 单击回调。
@@ -43,6 +49,13 @@ internal class TapAwareSubsamplingImageView(
     var editing = false
     var selectedBubble: String? = null
     var onBubbleSelected: (String?) -> Unit = {}
+    var editableRegions: List<PageTranslatedRegion> = emptyList()
+    var onBubbleGesture: (BubbleEditGesture) -> Unit = {}
+    private enum class EditDrag { MOVE, RESIZE, ROTATE }
+    private var editDrag: EditDrag? = null
+    private var dragBubble: PageTranslatedRegion? = null
+    private var dragPoint: PixelPoint? = null
+    private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val overlayMatrix = Matrix()
     private val inverseOverlayMatrix = Matrix()
     private val pagePoints = FloatArray(6)
@@ -75,6 +88,18 @@ internal class TapAwareSubsamplingImageView(
                 overlayMatrix.getValues(matrixValues)
                 val scale = kotlin.math.hypot(matrixValues[Matrix.MSCALE_X], matrixValues[Matrix.MSKEW_Y]).coerceAtLeast(.001f)
                 bubbles.drawEditing(canvas, selectedBubble, 2 * resources.displayMetrics.density / scale)
+                editableRegions.firstOrNull { it.region.id == selectedBubble }?.let { item ->
+                    val radius = 9 * resources.displayMetrics.density / scale
+                    for ((index, point) in handles(item).withIndex()) {
+                        handlePaint.color = Color.WHITE; handlePaint.style = Paint.Style.FILL
+                        canvas.drawCircle(point.x, point.y, radius, handlePaint)
+                        handlePaint.color = Color.rgb(255, 166, 45); handlePaint.style = Paint.Style.STROKE
+                        handlePaint.strokeWidth = 2 * resources.displayMetrics.density / scale
+                        canvas.drawCircle(point.x, point.y, radius, handlePaint)
+                        if (index == 0) canvas.drawLine(point.x-radius*.4f,point.y-radius*.4f,point.x+radius*.4f,point.y+radius*.4f,handlePaint)
+                        else canvas.drawArc(point.x-radius*.5f,point.y-radius*.5f,point.x+radius*.5f,point.y+radius*.5f,30f,280f,false,handlePaint)
+                    }
+                }
             }
         } finally { canvas.restoreToCount(save) }
     }
@@ -91,7 +116,7 @@ internal class TapAwareSubsamplingImageView(
                     inverseOverlayMatrix.mapPoints(point)
                     val selected = overlay?.hitTest(point[0], point[1])
                     onBubbleSelected(selected)
-                    if (selected != null) return true
+                    return true
                 }
                 onSingleTap(event.x / width, event.y / height)
                 return true
@@ -104,6 +129,59 @@ internal class TapAwareSubsamplingImageView(
     )
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (editing && showTranslation && updateOverlayMatrix() && overlayMatrix.invert(inverseOverlayMatrix)) {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                val selected = editableRegions.firstOrNull { it.region.id == selectedBubble }
+                val point = pagePoint(event)
+                if (selected != null) {
+                    val handle = handles(selected).indexOfFirst { p ->
+                        val screen = floatArrayOf(p.x, p.y); overlayMatrix.mapPoints(screen)
+                        hypot(event.x - screen[0], event.y - screen[1]) <= 24 * resources.displayMetrics.density
+                    }
+                    editDrag = when {
+                        handle == 0 -> EditDrag.RESIZE
+                        handle == 1 -> EditDrag.ROTATE
+                        overlay?.hitTest(point.x, point.y) == selected.region.id -> EditDrag.MOVE
+                        else -> null
+                    }
+                    if (editDrag != null) {
+                        dragBubble = selected; dragPoint = point
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                        onBubbleGesture(BubbleEditGesture.Begin(selected.region.id))
+                        return true
+                    }
+                }
+            }
+            val item = dragBubble
+            val start = dragPoint
+            if (editDrag != null && item != null && start != null) {
+                if (event.actionMasked == MotionEvent.ACTION_MOVE && event.pointerCount == 1) {
+                    val point = pagePoint(event); val bounds = item.region.bounds
+                    val cx = (bounds.left + bounds.right) / 2; val cy = (bounds.top + bounds.bottom) / 2
+                    var rotation = item.rotationDegrees
+                    val next = when (editDrag) {
+                        EditDrag.MOVE -> bounds.offset(point.x - start.x, point.y - start.y)
+                        EditDrag.RESIZE -> {
+                            val ratio = (hypot(point.x - cx, point.y - cy) / hypot(start.x - cx, start.y - cy).coerceAtLeast(1f)).coerceIn(.05f, 20f)
+                            PixelRect(cx - bounds.width * ratio / 2, cy - bounds.height * ratio / 2,
+                                cx + bounds.width * ratio / 2, cy + bounds.height * ratio / 2)
+                        }
+                        EditDrag.ROTATE -> {
+                            rotation += (atan2(point.y - cy, point.x - cx) - atan2(start.y - cy, start.x - cx)) * 180 / PI.toFloat()
+                            bounds
+                        }
+                        null -> bounds
+                    }
+                    onBubbleGesture(BubbleEditGesture.Transform(item.region.id, next, rotation))
+                }
+                if (event.actionMasked in setOf(MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL)) {
+                    onBubbleGesture(BubbleEditGesture.End)
+                    editDrag = null; dragBubble = null; dragPoint = null
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                return true
+            }
+        }
         // 先把事件交给库（缩放/拖动主要由它消费），再喂给手势检测器。
         // 顺序与 Mihon 的 Pager 一致：super 先行，检测器只做旁路观察。
         val handled = super.onTouchEvent(event)
@@ -111,6 +189,14 @@ internal class TapAwareSubsamplingImageView(
         // 始终返回 true：本视图是整屏的触摸目标，返回 false 会让父层（分页器）
         // 抢走后续事件，导致一次缩放被半途打断。
         return true
+    }
+    private fun pagePoint(event: MotionEvent): PixelPoint {
+        val point = floatArrayOf(event.x, event.y); inverseOverlayMatrix.mapPoints(point)
+        return PixelPoint(point[0], point[1])
+    }
+    private fun handles(item: PageTranslatedRegion): List<PixelPoint> {
+        val r = item.region.bounds
+        return listOf(PixelPoint(r.right, r.bottom), PixelPoint(r.right, r.top)).map { rotateBubblePoint(it, r, item.rotationDegrees) }
     }
 }
 

@@ -14,7 +14,7 @@
   <a href="https://github.com/tapdefenser/LM-Reader/issues">反馈</a>
 </p>
 
-> **v0.1.0 首版**：[下载已签名 APK](https://github.com/tapdefenser/LM-Reader/releases/tag/v0.1.0)。Android 8.0+，支持 arm64-v8a / x86_64。已知边界见[发行说明](docs/releases/v0.1.0.md)。
+> **v0.1.5**：[下载已签名 APK](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.5)。Android 8.0+，支持 arm64-v8a / x86_64。更新内容与已知边界见[发行说明](docs/releases/v0.1.5.md)。
 
 ## 从阅读，到翻译与创作
 
@@ -81,7 +81,7 @@ Windows 使用 `gradlew.bat`。未提供正式签名环境变量时，Release �
 - [文档目录](docs/README.md) · [English documentation](docs/README.en.md)
 - [使用指南](docs/USAGE.zh-CN.md) · [工作流](docs/WORKFLOWS.zh-CN.md) · [备份恢复](docs/BACKUP.zh-CN.md)
 - [架构](docs/ARCHITECTURE.md) · [模型与语言包](docs/MODEL_PACKS.md)
-- [发行说明](docs/releases/v0.1.0.md) · [更新记录](CHANGELOG.md) · [第三方声明](THIRD_PARTY_NOTICES.md)
+- [发行说明](docs/releases/v0.1.5.md) · [更新记录](CHANGELOG.md) · [第三方声明](THIRD_PARTY_NOTICES.md)
 
 ```text
 app/          应用界面、阅读器、队列、备份与导出

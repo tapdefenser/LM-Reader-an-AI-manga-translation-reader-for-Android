@@ -61,9 +61,19 @@ Actual attachments receive an additional image-reading hint at execution time. S
 
 Sync/async loop controls affect scheduling. Actual requests remain subject to engine/API concurrency limits; a queue waiting for a permit is not an active request. The queue displays actual Seg/OCR/API activity and omits the current step. Text detection counts as OCR activity.
 
-The parameter sheet's "Maximum parallelism" applies to async modules only: Auto follows the engine limit, and 1-8 caps how many items this module works on at once without exceeding the engine limit. Sync modules hide the parameter but keep any saved value.
+The parameter sheet's "Maximum parallelism" applies to async modules only. Auto considers the whole subtree's SEG, OCR (including detection), local translation and distinct API capacities, plus the shared cache allowance, so different stages can overlap. A setting of 1–8 caps concurrent items in that module. Individual requests still use their resource pools. Sync modules process items in order and retain saved parallel settings.
+
+The queue defaults to **Resource utilization first**, running independent API and local-translation manga together. Manga using the same API/server share capacity. Waiting at any API step checks later manga using the currently waiting profiles, rather than reserving every API mentioned in the workflow. If no eligible manga remains, later pages of that manga may be segmented ahead. **Queue order first** prioritizes completing the first manga. Models remain loaded for the union of pending workflows and unload when everything pauses or finishes.
+
+The shared cache accounts for bitmaps and complete SEG/OCR results. Unused original bitmaps may be released while waiting for API or local translation and decoded again on demand. Unsubmitted bubbles, contours, text boxes, free text and OCR text are never evicted to fit the budget. An admitted page can exceed the limit to finish all results; only the next SEG admission waits. Content-addressed disk caching includes SEG text detection and OCR, keyed by source fingerprints, models, thresholds, language and geometry. Pending-page protection survives API failures and restarts; publication makes the results eligible for cleanup.
+
+Capacity waits inspect consumers across all manga. API calls (including permit waits and retry backoff), local translation or publication that can advance keep the wait alive. If every retained owner depends on further SEG admission, the workflow fails with an actionable cache-blocked message while retaining all results. Whole-comic preprocessing before a single API call uses the same rule: increase the cache or process pages/batches, rather than waiting indefinitely.
+
+API transport retry counts belong to the API profile. Retry backoff releases request capacity; cancellation, authorization failures, invalid typed output and failures after partial response text do not replay the request. Workflow retries apply only to local SEG/OCR/translation steps and do not multiply API retries.
 
 Copied/imported templates must bind API references to configurations on this device. Use the unified binding action or choose a configuration in each request step. Exported workflows do not transfer API keys. Image API steps may send page/bubble images to the configured provider; inspect prompts and logs before sharing.
+
+Comic translation options can override all API steps for that manga with one profile or follow the original workflow bindings. New tasks capture this choice without changing the workflow or existing tasks. API language lists place installed complete routes, including pivots, first without adding availability badges or choosing languages automatically.
 
 The glossary is shared by the comic and read at execution time. Added names fill missing original terms without replacing existing entries. Match-replace uses the longest matching original term and does not recursively match replacements.
 

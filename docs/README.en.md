@@ -12,4 +12,4 @@
 | [Models and language packs](MODEL_PACKS.md) | Pinned models, offline packs, sources, integrity and import |
 | [Upstream sources](UPSTREAM.md) | References, actual reuse and retained notices |
 
-[Bilingual v0.1.0 notes](releases/v0.1.0.md) · [Changelog](../CHANGELOG.md) · [Third-party notices](../THIRD_PARTY_NOTICES.md)
+[Bilingual v0.1.5 notes](releases/v0.1.5.md) · [Changelog](../CHANGELOG.md) · [Third-party notices](../THIRD_PARTY_NOTICES.md)

@@ -13,6 +13,18 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ReaderPageArtifactStoreTest {
+    @Test fun newBubbleFontScaleRotationAndGeometrySurviveSaving() {
+        val base=ReaderPageTranslation("manual","",File(root,"new-draft"),LocalTranslationLanguage.ENGLISH,
+            LocalTranslationLanguage.CHINESE_SIMPLIFIED,"hash",200,300,emptyList(),emptyList(),0)
+        var draft=PageBubbleDraft(base).addBubble().editText("Created text").scaleFont(20)
+        val id=draft.selectedId!!
+        draft=draft.beginTransform(id).transform(id,PixelRect(15f,20f,180f,200f),35f).finishTransform()
+        store.saveEdits(base,draft.regions)
+        val loaded=store.load("manual","hash")!!.regions.single()
+        assertEquals("Created text",loaded.translatedText);assertEquals(120,loaded.fontScalePercent)
+        assertEquals(35f,loaded.rotationDegrees);assertEquals(PixelRect(15f,20f,180f,200f),loaded.region.bounds)
+        assertThrows(PageTranslationRevisionConflict::class.java) { store.saveEdits(base,draft.regions) }
+    }
     @Test fun maskExpansionSurvivesReloadAndOldTranslationsUseDefault() {
         val saved=store.save("page","source-hash",LocalTranslationLanguage.ENGLISH,
             LocalTranslationLanguage.CHINESE_SIMPLIFIED,200,300,regions("page"),emptyList(),0,

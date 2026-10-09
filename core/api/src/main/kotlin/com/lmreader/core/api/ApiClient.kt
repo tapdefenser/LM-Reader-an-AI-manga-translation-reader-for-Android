@@ -98,7 +98,7 @@ class ApiClient(
                     val id = beginTrace(profile, endpoint, "GET", "", ++attempt)
                     var code: Int? = null
                     try {
-                        session.response(session.request(endpoint)).use { response ->
+                        session.consume(session.request(endpoint)) { response ->
                             code = response.code; checkResponse(profile, response)
                             limitedBody(response).also { finishTrace(id, ApiRequestOutcome("SUCCESS", ApiLogPayload.sanitize(it), httpCode = code)) }
                         }
@@ -144,14 +144,14 @@ class ApiClient(
         var attempt = 0
         while (true) {
             currentCoroutineContext().ensureActive()
-            responseText = StringBuilder(); thinkingText = StringBuilder()
+            responseText = StringBuilder(); thinkingText = StringBuilder(); observedEnd = false; finishedReason = null
             val endpoint = ApiProtocol.endpoint(profile)
             val traceId = beginTrace(profile, endpoint, "POST", body, attempt + 1)
             var code: Int? = null
             try {
                 val request = session.request(endpoint).newBuilder()
                     .post(body.toRequestBody("application/json; charset=utf-8".toMediaType())).build()
-                session.response(request).use { response ->
+                session.consume(request) { response ->
                     code = response.code
                     checkResponse(profile, response)
                     val responseBody = response.body ?: throw ApiException("API 返回空响应")
@@ -207,11 +207,10 @@ class ApiClient(
         val session = Session(profile, http.newBuilder()
             .connectTimeout(profile.timeoutSeconds.toLong(), TimeUnit.SECONDS)
             .readTimeout(profile.timeoutSeconds.toLong(), TimeUnit.SECONDS)
-            .callTimeout(profile.timeoutSeconds.toLong(), TimeUnit.SECONDS).build())
+            .callTimeout(profile.timeoutSeconds.toLong(), TimeUnit.SECONDS).build(), limiter)
         val worker = launch(Dispatchers.IO) {
             try {
-                val endpoint = ApiProtocol.endpoint(profile)
-                limiter.withPermit(profile.id, profile.parallelLimit, "${endpoint.scheme}://${endpoint.host}:${endpoint.port}") { block(session) }
+                block(session)
                 close()
             } catch (e: CancellationException) { throw e } catch (e: Exception) {
                 close(ApiException(safeMessage(profile, e), (e as? ApiException)?.httpCode))
@@ -220,7 +219,7 @@ class ApiClient(
         awaitClose { session.cancel(); worker.cancel() }
     }
 
-    private class Session(private val profile: ApiProfile, private val client: OkHttpClient) {
+    private class Session(private val profile: ApiProfile, private val client: OkHttpClient, private val limiter: ApiConcurrencyLimiter) {
         private val call = AtomicReference<Call?>()
         private val response = AtomicReference<Response?>()
         fun request(url: HttpUrl): Request = Request.Builder().url(url).header("Accept", "text/event-stream, application/json").apply {
@@ -229,7 +228,13 @@ class ApiClient(
                 else header("Authorization", "Bearer ${profile.apiKey.trim()}")
             }
         }.build()
-        suspend fun response(request: Request): Response {
+        suspend fun <T> consume(request: Request, read: suspend (Response) -> T): T {
+            val endpoint = request.url
+            return limiter.withPermit(profile.id, profile.parallelLimit, "${endpoint.scheme}://${endpoint.host}:${endpoint.port}") {
+                response(request).use { read(it) }
+            }
+        }
+        private suspend fun response(request: Request): Response {
             currentCoroutineContext().ensureActive()
             val next = client.newCall(request); call.set(next)
             val result = suspendCancellableCoroutine { continuation ->

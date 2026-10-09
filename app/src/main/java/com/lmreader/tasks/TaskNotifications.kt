@@ -59,12 +59,15 @@ class TaskNotifications(private val container: AppContainer) {
                     val rows = t.rows + terminal
                     val primary = rows.firstOrNull { it.state == "RUNNING" } ?: rows.firstOrNull { it.state == "PENDING" }
                         ?: rows.firstOrNull { it.state == "PAUSED" } ?: rows.firstOrNull { it.state in setOf("FAILED", "INTERRUPTED") } ?: terminal.lastOrNull()
-                    if(primary != null && metadataRevision[primary.chapterId] != primary.updatedAt) withContext(Dispatchers.IO) {
-                        val chapter = container.database.chapterDao().getById(primary.chapterId)
-                        val manga = mangaNames[primary.mangaId] ?: container.mangaRepository.getCards(listOf(primary.mangaId)).firstOrNull()?.displayName.orEmpty()
-                        mangaNames[primary.mangaId] = manga
-                        chapterMetadata[primary.chapterId] = TaskNoticeItem(primary.chapterId, primary.state, manga, chapter?.title.orEmpty(), total = chapter?.pageCount ?: 0)
-                        metadataRevision[primary.chapterId] = primary.updatedAt
+                    val metadataRows = rows.filter { it.state == "RUNNING" } + listOfNotNull(primary).filter { it.state != "RUNNING" }
+                    for(row in metadataRows) {
+                        if(metadataRevision[row.chapterId] != row.updatedAt) withContext(Dispatchers.IO) {
+                            val chapter = container.database.chapterDao().getById(row.chapterId)
+                            val manga = mangaNames[row.mangaId] ?: container.mangaRepository.getCards(listOf(row.mangaId)).firstOrNull()?.displayName.orEmpty()
+                            mangaNames[row.mangaId] = manga
+                            chapterMetadata[row.chapterId] = TaskNoticeItem(row.chapterId, row.state, manga, chapter?.title.orEmpty(), total = chapter?.pageCount ?: 0)
+                            metadataRevision[row.chapterId] = row.updatedAt
+                        }
                     }
                     val translated = rows.map { row -> (chapterMetadata[row.chapterId] ?: TaskNoticeItem(row.chapterId, row.state)).copy(
                         id = row.chapterId + ":" + row.targetLanguage, state = row.state, completed = row.translatedCount, error = row.failure) }

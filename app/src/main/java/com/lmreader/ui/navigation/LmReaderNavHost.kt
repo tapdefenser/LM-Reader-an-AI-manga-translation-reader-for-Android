@@ -20,6 +20,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.navArgument
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.lmreader.core.storage.settings.AppPreferences
 import com.lmreader.core.model.ApiProfileKind
@@ -168,6 +169,7 @@ fun LmReaderNavHost(
         .observePendingCount()
         .collectAsStateWithLifecycle(initialValue = 0)
     val exportTasks by container.exportQueue.tasks.collectAsStateWithLifecycle()
+    val entry by navController.currentBackStackEntryAsState()
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -198,7 +200,9 @@ fun LmReaderNavHost(
         },
     ) {
         Surface(modifier = Modifier.fillMaxSize()) {
-            NavHost(navController = navController, startDestination = destination) {
+            HomeTaskChrome(container, entry?.destination?.route in setOf(Routes.LIBRARY, Routes.BOOKSHELF),
+                onOpenQueue = { navController.navigateSingleTop(Routes.TRANSLATION_QUEUE) }) { modifier ->
+            NavHost(navController = navController, startDestination = destination, modifier = modifier) {
                 composable(Routes.API_LOGS) { ApiLogScreen(container, onBack = { navController.popBackStack() }) }
                 composable(
                     route = Routes.READER,
@@ -374,6 +378,7 @@ fun LmReaderNavHost(
                         container = container,
                         mangaId = mangaId,
                         showSetupPrompt = entry.arguments?.getBoolean("prompt") == true,
+                        onDownloadOfflinePacks = { navController.navigateSingleTop(Routes.SETTINGS_API_LOCAL) },
                         onBack = { navController.popBackStack() },
                     )
                 }
@@ -400,6 +405,7 @@ fun LmReaderNavHost(
                         onBack = { navController.popBackStack() },
                         onSettings = { navController.navigateSingleTop(Routes.SETTINGS_EXPORT) })
                 }
+            }
             }
         }
     }

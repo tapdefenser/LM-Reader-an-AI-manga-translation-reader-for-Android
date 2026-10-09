@@ -11,6 +11,7 @@ class QueueOrderStore(private val file: File) {
     private var manga = mutableListOf<String>()
     private var chapters = mutableMapOf<String, MutableList<String>>()
     private var paused = false
+    private var scheduling = TranslationSchedulingPriority.RESOURCES
     private data class ExcludedPages(val queuedAt: Long, val pages: MutableSet<String>)
     private val excluded = mutableMapOf<String, ExcludedPages>()
 
@@ -18,10 +19,12 @@ class QueueOrderStore(private val file: File) {
         reload()
     }
     @Synchronized fun reload() {
-        manga.clear(); chapters.clear(); excluded.clear(); paused = false
+        manga.clear(); chapters.clear(); excluded.clear(); paused = false; scheduling = TranslationSchedulingPriority.RESOURCES
         runCatching {
             val root = JSONObject(atomic.openRead().bufferedReader().use { it.readText() })
             paused = root.optBoolean("paused", false)
+            scheduling = TranslationSchedulingPriority.entries.firstOrNull { it.name == root.optString("schedulingPriority") }
+                ?: TranslationSchedulingPriority.RESOURCES
             manga = root.getJSONArray("manga").strings().toMutableList()
             val groups = root.getJSONObject("chapters")
             groups.keys().forEach { id -> chapters[id] = groups.getJSONArray(id).strings().toMutableList() }
@@ -52,6 +55,8 @@ class QueueOrderStore(private val file: File) {
     }
     @Synchronized fun isPaused(): Boolean = paused
     @Synchronized fun setPaused(value: Boolean) { paused = value; save() }
+    @Synchronized fun schedulingPriority() = scheduling
+    @Synchronized fun setSchedulingPriority(value: TranslationSchedulingPriority) { scheduling = value; save() }
     @Synchronized fun excludePage(chapterId: String, queuedAt: Long, pageId: String) {
         val entry = excluded[chapterId]?.takeIf { it.queuedAt == queuedAt }
             ?: ExcludedPages(queuedAt, mutableSetOf()).also { excluded[chapterId] = it }
@@ -79,6 +84,7 @@ class QueueOrderStore(private val file: File) {
         val excludedJson = JSONObject()
         excluded.forEach { (id, entry) -> excludedJson.put(id, JSONObject().put("queuedAt", entry.queuedAt).put("pages", JSONArray(entry.pages.toList()))) }
         val bytes = JSONObject().put("manga", JSONArray(manga)).put("chapters", groupJson).put("paused", paused)
+            .put("schedulingPriority", scheduling.name)
             .put("excludedPages", excludedJson)
             .toString().toByteArray(Charsets.UTF_8)
         ExportFiles.commit(file) { it.write(bytes) }

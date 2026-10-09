@@ -12,6 +12,22 @@ import kotlin.test.*
 import org.junit.Test
 
 class ApiClientTest {
+    @Test fun `backoff releases the permit and cancellation does not start another attempt`() = runBlocking<Unit> {
+        val calls = AtomicInteger()
+        val backoff = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        Server { e -> if(calls.incrementAndGet() == 1) e.reply(503,"{}") else e.reply(200,success,"text/event-stream") }.use { server ->
+            val client = ApiClient(pause = { backoff.complete(Unit); resume.await() })
+            val profile = server.profile().copy(parallelLimit=1)
+            val first = launch { client.stream(profile,"first").toList() }
+            withTimeout(5000) { backoff.await() }
+            assertEquals(0,client.activeRequests.value)
+            withTimeout(5000) { client.stream(profile,"second").toList() }
+            assertEquals(2,calls.get())
+            first.cancelAndJoin();resume.complete(Unit);delay(50)
+            assertEquals(2,calls.get());assertEquals(0,client.activeRequests.value)
+        }
+    }
     @Test fun journalCapturesEveryAttemptWithMangaContextAndRedactedAttachments() = runBlocking<Unit> {
         val requests = mutableListOf<ApiRequestInfo>(); val outcomes = mutableListOf<ApiRequestOutcome>()
         val journal = object : ApiRequestJournal {

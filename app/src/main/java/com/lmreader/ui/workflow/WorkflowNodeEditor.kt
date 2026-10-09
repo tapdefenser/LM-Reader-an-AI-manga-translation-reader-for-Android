@@ -173,7 +173,7 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                         Text(limit?.toString() ?: "自动", style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("workflow-parallel-value"))
                         TextButton(enabled = enabled && limit != WorkflowNode.MAX_PARALLEL, onClick = { node = node.copy(parallelLimit = limit?.plus(1) ?: 2) }) { Text("＋") }
                     }
-                    Text(if(limit == null) "跟随引擎并行上限。" else "本模块同时最多处理 $limit 项，最多 ${WorkflowNode.MAX_PARALLEL} 项；实际并行度不会超过引擎上限。", style = MaterialTheme.typography.bodySmall)
+                    Text(if(limit == null) "自动结合本模块的 SEG、OCR、API 与机翻额度及缓存预算安排并行；各步骤共享对应引擎额度。" else "本模块同时最多处理 $limit 项，最多 ${WorkflowNode.MAX_PARALLEL} 项；各步骤仍共享对应引擎额度。", style = MaterialTheme.typography.bodySmall)
                 }
                 if(node.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM)) {
                     var choosing by remember { mutableStateOf(false) }

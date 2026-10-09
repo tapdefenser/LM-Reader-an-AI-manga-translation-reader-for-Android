@@ -51,7 +51,9 @@ class ReaderBubbleOverlayTest {
             seed.layout(finished, BubbleRenderSettings(), hideEmpty = true).draw(Canvas(complete))
             assertEquals(first.renderGeometry(), finished.first().region.renderGeometry())
             assertFalse(preview.sameAs(complete))
-            assertThrows(IllegalArgumentException::class.java) { seed.layout(listOf(PageTranslatedRegion(first.copy(bounds = PixelRect(20f, 20f, 180f, 180f)), "一")), BubbleRenderSettings()) }
+            val edited = seed.layout(listOf(PageTranslatedRegion(first.copy(bounds = PixelRect(20f, 20f, 180f, 180f)), "一")), BubbleRenderSettings())
+            assertNull(edited.hitTest(15f, 15f))
+            assertEquals(first.id, edited.hitTest(100f, 100f))
         } finally { preview.recycle(); complete.recycle() }
     }
     private val context=ApplicationProvider.getApplicationContext<android.content.Context>()

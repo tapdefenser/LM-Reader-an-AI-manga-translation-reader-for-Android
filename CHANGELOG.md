@@ -1,5 +1,15 @@
 # Changelog / 更新记录
 
+## v0.1.5 — Translation scheduling and reader editing / 翻译调度与阅读器编辑
+
+- 资源利用／队列顺序优先、分资源限流、完整 SEG／OCR 缓存与通用阻塞检查。
+- 漫画级 API 选择、离线语言置顶与下载入口、默认值及翻译状态改进。
+- 气泡移动／缩放／旋转／字号／新建、逆向翻页修复、介绍复制及主屏幕浮球。
+- Resource scheduling, per-comic APIs, complete preprocessing caches and consistent retry handling.
+- Bubble editing and creation, reverse-paging fixes, description copying and home progress controls.
+
+详见 [v0.1.5 中英发行说明 / Bilingual release notes](docs/releases/v0.1.5.md)。
+
 ## v0.1.0 — First release / 首版
 
 First signed APK release, using a dedicated RSA-4096 release key.

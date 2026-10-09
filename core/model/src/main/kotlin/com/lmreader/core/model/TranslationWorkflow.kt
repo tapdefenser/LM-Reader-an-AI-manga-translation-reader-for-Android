@@ -48,9 +48,9 @@ fun MangaTranslationSettings.effectiveSegThreshold(): Float =
     segThreshold?.takeIf { it.isFinite() && it in 0f..1f } ?: .35f
 
 fun MangaTranslationSettings.effectiveTextDetectionThreshold(): Float =
-    textDetectionThreshold?.takeIf { it.isFinite() && it in 0f..1f } ?: .45f
+    textDetectionThreshold?.takeIf { it.isFinite() && it in 0f..1f } ?: .35f
 
-const val DEFAULT_FREE_TEXT_MERGE_GAP_RATIO = 0f
+const val DEFAULT_FREE_TEXT_MERGE_GAP_RATIO = .45f
 
 fun MangaTranslationSettings.effectiveFreeTextMergeGapRatio(): Float =
     freeTextMergeGapRatio?.takeIf { it.isFinite() && it in 0f..2f } ?: DEFAULT_FREE_TEXT_MERGE_GAP_RATIO

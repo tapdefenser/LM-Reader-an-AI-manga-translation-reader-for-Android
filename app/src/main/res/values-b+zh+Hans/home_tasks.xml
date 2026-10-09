@@ -1,0 +1,4 @@
+<resources>
+    <string name="screen_translation_settings">屏幕翻译设置</string>
+    <string name="screen_translation_placeholder">屏幕翻译设置将在后续版本中提供。</string>
+</resources>

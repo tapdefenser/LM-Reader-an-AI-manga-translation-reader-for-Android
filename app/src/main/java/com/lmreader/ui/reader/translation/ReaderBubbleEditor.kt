@@ -18,11 +18,12 @@ import com.lmreader.core.model.PageTranslatedRegion
 /** This toolbar remains visible across pages, including pages without translation. */
 @Composable
 fun ReaderBubbleEditor(state: ReaderTranslationUiState, onText: (String)->Unit, onDelete: ()->Unit,
-    onSave: ()->Unit, onUndo: ()->Unit, onExit: ()->Unit, onClearFailure: ()->Unit, modifier: Modifier = Modifier) {
+    onSave: ()->Unit, onUndo: ()->Unit, onExit: ()->Unit, onClearFailure: ()->Unit,
+    onAdd: ()->Unit, onIncreaseFont: ()->Unit, onDecreaseFont: ()->Unit, modifier: Modifier = Modifier) {
     if(!state.editing) return
     var editingText by remember { mutableStateOf<PageTranslatedRegion?>(null) }
     val draft=state.draft
-    val enabled=!state.savingEdits && state.progress==null
+    val enabled=!state.savingEdits && !state.creatingBubble && state.progress==null
     Surface(color=Color.Black.copy(alpha=.58f),contentColor=Color.White,shape=RoundedCornerShape(12.dp),
         modifier=modifier.windowInsetsPadding(WindowInsets.statusBars).widthIn(max=240.dp)) {
         Column(Modifier.padding(horizontal=10.dp,vertical=6.dp)) {
@@ -35,9 +36,15 @@ fun ReaderBubbleEditor(state: ReaderTranslationUiState, onText: (String)->Unit, 
                 else -> R.string.reader_bubble_selected
             }),style=MaterialTheme.typography.labelSmall)
             Row {
+                ToolbarAction(if(state.creatingBubble) R.string.reader_bubble_creating else R.string.reader_bubble_add,enabled,onAdd)
                 ToolbarAction(R.string.reader_bubble_text,enabled && draft?.selected!=null) { editingText=draft?.selected }
                 ToolbarAction(R.string.reader_bubble_delete,enabled && draft?.selected!=null,onDelete)
             }
+            Row {
+                ToolbarAction(R.string.reader_bubble_font_increase,enabled && draft?.selected!=null,onIncreaseFont)
+                ToolbarAction(R.string.reader_bubble_font_decrease,enabled && draft?.selected!=null,onDecreaseFont)
+            }
+            if(draft?.selected!=null) Text(stringResource(R.string.reader_bubble_handle_hint),style=MaterialTheme.typography.labelSmall)
             Row {
                 ToolbarAction(R.string.reader_bubble_undo,enabled && draft?.undo?.isNotEmpty()==true,onUndo)
                 ToolbarAction(if(state.savingEdits) R.string.reader_bubble_saving else R.string.reader_bubble_save,

@@ -26,6 +26,21 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class MigrationsTest {
+    @Test fun apiOverrideMigrationKeepsExistingPreferencesAndQueueSnapshot() {
+        helper.createDatabase(TEST_DB,14).use { db ->
+            db.execSQL("INSERT INTO mangas (mangaId, anchorDocumentId, sourceId, sourceKind, layoutMode, displayName, sortKey, sourceOrderIndex, hasMetadata, chapterCountKnown, availability, discoveryGeneration, discoveredAt, updatedAt, translationAutoDetectSource, translationBubbleOpacity) VALUES ('m1', '/fixture', 's1', 'IMAGE_DIRECTORY', 'MULTI_CHAPTER', 'fixture', 'fixture', 0, 0, 1, 'AVAILABLE', 1, 0, 0, 0, 100)")
+            db.execSQL("INSERT INTO chapters (chapterId, mangaId, documentId, kind, title, sortKey, position, contentRevision, discoveredAt) VALUES ('c1', 'm1', '/fixture/chapter', 'IMAGE_DIRECTORY', 'chapter', 'chapter', 0, 1, 0)")
+            db.execSQL("INSERT INTO chapter_translation (chapterId, mangaId, targetLanguage, state, sourceLanguage, autoDetectSource, configSnapshot, translatedCount, updatedAt) VALUES ('c1', 'm1', 'zh-Hans', 'PENDING', 'en', 0, '{\"schema\":2,\"opacity\":100}', 3, 1)")
+        }
+        helper.runMigrationsAndValidate(TEST_DB,15,true,Migrations.MIGRATION_14_15).use { db ->
+            db.query("SELECT translationApiProfileId,translationBubbleOpacity FROM mangas WHERE mangaId='m1'").use {
+                assertTrue(it.moveToFirst());assertTrue(it.isNull(0));assertEquals(100,it.getInt(1))
+            }
+            db.query("SELECT translatedCount,configSnapshot FROM chapter_translation WHERE chapterId='c1'").use {
+                assertTrue(it.moveToFirst());assertEquals(3,it.getInt(0));assertEquals("{\"schema\":2,\"opacity\":100}",it.getString(1))
+            }
+        }
+    }
     @Test fun freeTextGapMigrationPreservesExistingOpacityAndQueuedSnapshot() {
         helper.createDatabase(TEST_DB,13).use { db ->
             db.execSQL("INSERT INTO mangas (mangaId, anchorDocumentId, sourceId, sourceKind, layoutMode, displayName, sortKey, sourceOrderIndex, hasMetadata, chapterCountKnown, availability, discoveryGeneration, discoveredAt, updatedAt, translationAutoDetectSource, translationBubbleOpacity) VALUES ('m1', '/fixture', 's1', 'IMAGE_DIRECTORY', 'MULTI_CHAPTER', 'fixture', 'fixture', 0, 0, 1, 'AVAILABLE', 1, 0, 0, 0, 100)")

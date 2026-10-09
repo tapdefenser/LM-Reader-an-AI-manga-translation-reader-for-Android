@@ -64,6 +64,7 @@ interface WorkflowRuntimeHost {
     suspend fun pageFailed(frame: WorkflowFrame, failure: Throwable) { throw failure }
     fun step(node: WorkflowNode, frame: WorkflowFrame) {}
     fun continueScheduling(frame: WorkflowFrame? = null): Boolean = true
+    fun parallelism(node: WorkflowNode): Int = WorkflowNode.MAX_PARALLEL
 }
 
 class WorkflowFrame internal constructor(val host: WorkflowRuntimeHost, private val parent: WorkflowFrame? = null,
@@ -231,7 +232,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
             }
             WorkflowKind.CHAPTERS -> {
                 val chapters = host.chapters(); val complete = BooleanArray(chapters.size)
-                bounded(chapters, n) { index, chapter ->
+                bounded(chapters, n, host) { index, chapter ->
                     if (!host.continueScheduling()) return@bounded
                     val child = frame.child(n.mode == WorkflowMode.ASYNC)
                     child.define(WorkflowSystem.CHAPTER, chapter, WorkflowSystem.chapterType)
@@ -244,7 +245,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                 val chapter = frame.read(WorkflowRef(WorkflowSystem.CHAPTER)) as WorkflowValue.Record
                 val pageList = host.pages(chapter); val complete = BooleanArray(pageList.size)
                 val records = arrayOfNulls<WorkflowValue.ListValue>(pageList.size)
-                bounded(pageList, n) { index, page ->
+                bounded(pageList, n, host) { index, page ->
                     if (!host.continueScheduling()) return@bounded
                     val child = frame.child(n.mode == WorkflowMode.ASYNC); child.define(WorkflowSystem.PAGE, page, WorkflowSystem.pageType)
                     host.beforePage(child)
@@ -276,11 +277,11 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
             WorkflowKind.PREPARE_MANGA -> {
                 val chapters = host.chapters(); val complete = BooleanArray(chapters.size)
                 val chapterRecords = arrayOfNulls<WorkflowValue.ListValue>(chapters.size)
-                bounded(chapters, n) { chapterIndex, chapter ->
+                bounded(chapters, n, host) { chapterIndex, chapter ->
                     val chapterFrame = frame.child(true); chapterFrame.define(WorkflowSystem.CHAPTER, chapter, WorkflowSystem.chapterType)
                     val pageList = host.pages(chapter); val finished = BooleanArray(pageList.size)
                     val records = arrayOfNulls<WorkflowValue.ListValue>(pageList.size)
-                    bounded(pageList, n) { index, page ->
+                    bounded(pageList, n, host) { index, page ->
                         if(!host.continueScheduling()) return@bounded
                         val child = chapterFrame.child(true); child.define(WorkflowSystem.PAGE, page, WorkflowSystem.pageType)
                         host.beforePreparationPage(child)
@@ -322,7 +323,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                 val iterator = n.variable ?: error("缺少循环变量")
                 val values = arrayOfNulls<WorkflowValue>(items.size); val results = arrayOfNulls<WorkflowValue>(items.size)
                 val complete = BooleanArray(items.size)
-                bounded(items, n) { index, item ->
+                bounded(items, n, host) { index, item ->
                     val child = frame.child(n.mode == WorkflowMode.ASYNC); child.defineIterator(iterator, item)
                     suspend fun executeItem(): Boolean {
                         if(!executeRows(n.children, child)) return false
@@ -506,11 +507,11 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
         }
         return action()
     }
-    /** Async branches share the engine pool; a smaller row limit is honoured, a larger one is capped by it. */
-    private fun parallel(node: WorkflowNode) = minOf(concurrency, node.parallelLimit ?: concurrency)
-    private suspend fun <T> bounded(items: List<T>, node: WorkflowNode, action: suspend (Int, T) -> Unit) = coroutineScope {
+    /** Bound pipeline workers independently; each actual engine request shares its resource pool. */
+    private fun parallel(node: WorkflowNode, host: WorkflowRuntimeHost) = minOf(concurrency, node.parallelLimit ?: host.parallelism(node).coerceIn(1, WorkflowNode.MAX_PARALLEL))
+    private suspend fun <T> bounded(items: List<T>, node: WorkflowNode, host: WorkflowRuntimeHost, action: suspend (Int, T) -> Unit) = coroutineScope {
         val next = AtomicInteger()
-        List(minOf(if (node.mode == WorkflowMode.SYNC) 1 else parallel(node), items.size)) {
+        List(minOf(if (node.mode == WorkflowMode.SYNC) 1 else parallel(node, host), items.size)) {
             launch { while (true) { ensureActive(); val i = next.getAndIncrement(); if (i >= items.size) break; action(i, items[i]) } }
         }.joinAll()
     }

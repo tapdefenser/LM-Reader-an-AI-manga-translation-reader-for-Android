@@ -16,6 +16,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lmreader.core.database.entity.ChapterTranslationEntity
@@ -39,6 +42,7 @@ fun TranslationQueueScreen(container: AppContainer, onBack: () -> Unit) {
     val activeSeg by queue.activeSeg.collectAsStateWithLifecycle()
     val activeOcr by queue.activeOcr.collectAsStateWithLifecycle()
     val activeApi by queue.activeApi.collectAsStateWithLifecycle()
+    val scheduling by queue.schedulingPriority.collectAsStateWithLifecycle()
     if (resourcesOpen) AlertDialog(onDismissRequest = { resourcesOpen = false }, title = { Text("已加载资源") },
         text = { androidx.compose.foundation.lazy.LazyColumn {
             if (resources.isEmpty()) item { Text("当前没有已加载引擎") }
@@ -68,6 +72,13 @@ fun TranslationQueueScreen(container: AppContainer, onBack: () -> Unit) {
             DropdownMenu(menuOpen, { menuOpen = false }) {
                 DropdownMenuItem(text = { Text("全部开始") }, onClick = { menuOpen = false; queue.startAll() })
                 DropdownMenuItem(text = { Text("全部暂停") }, onClick = { menuOpen = false; queue.pause() })
+                HorizontalDivider()
+                TranslationSchedulingPriority.entries.forEach { priority ->
+                    DropdownMenuItem(text = { Text(if (priority == TranslationSchedulingPriority.RESOURCES) "资源利用优先" else "队列顺序优先") },
+                        modifier = Modifier.testTag("translation-priority:${priority.name}").semantics { selected = scheduling == priority },
+                        trailingIcon = { if (scheduling == priority) Text("✓") },
+                        onClick = { menuOpen = false; queue.setSchedulingPriority(priority) })
+                }
                 HorizontalDivider()
                 DropdownMenuItem(text = { Text("已加载资源（${resources.size}）") }, onClick = { menuOpen = false; resourcesOpen = true })
                 listOf("自然数", "修改时间", "首字母").forEach { mode ->

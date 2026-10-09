@@ -24,6 +24,8 @@ fun LocalVisionConfigurationScreen(container: AppContainer, seg: Boolean, onTest
     val resources by container.localVision.loadedResources.collectAsStateWithLifecycle()
     val cacheLimit by container.translationCachePreferences.megabytes.collectAsStateWithLifecycle()
     val cacheUsed by container.translationQueue.cacheBytes.collectAsStateWithLifecycle()
+    val cachedResults by container.localVision.preprocessingCache.bytes.collectAsStateWithLifecycle()
+    val cacheHits by container.localVision.preprocessingCache.hits.collectAsStateWithLifecycle()
     var cacheDraft by remember(cacheLimit) { mutableFloatStateOf(cacheLimit.toFloat()) }
     val count = if (seg) prefs.segConcurrency else prefs.ocrConcurrency
     val actual = if (seg) container.localVision.segConcurrency else container.localVision.ocrConcurrency
@@ -52,9 +54,10 @@ fun LocalVisionConfigurationScreen(container: AppContainer, seg: Boolean, onTest
             Text("当前并发上限 $actual；自动模式根据 CPU 与可用内存决定。", style = MaterialTheme.typography.bodySmall)
             if (seg) {
                 Text("预处理缓存上限 ${cacheDraft.toInt()} MB · 当前 ${cacheUsed / 1_048_576} MB")
+                Text("结果缓存 ${cachedResults / 1_048_576} MB · 本次命中 $cacheHits 次", style = MaterialTheme.typography.bodySmall)
                 Slider(cacheDraft, { cacheDraft = it }, valueRange = 32f..1024f, steps = 30,
                     onValueChangeFinished = { scope.launch { container.translationCachePreferences.setMegabytes(cacheDraft.toInt()) } })
-                Text("缓存同一漫画的预处理位图；缓存满时停止预处理新页，释放后继续。调整立即生效，已占用部分随处理完成释放。模型自身内存不计入此上限。",
+                Text("缓存预算在所有漫画间共享。未提交的 SEG、文字检测与 OCR 结果完整保留，单页可超限，下一页 SEG 等待空位。等待 API 或机翻时释放空闲位图；已提交的结果缓存按原图、阈值和模型版本复用，满时清理最久未用的结果。模型自身内存不计入此上限。",
                     style = MaterialTheme.typography.bodySmall)
             }
             if (seg) {

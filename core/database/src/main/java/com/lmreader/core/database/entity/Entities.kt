@@ -160,6 +160,7 @@ data class MangaEntity(
     val translationStyleMode: String? = null,
     val translationCustomStyle: String? = null,
     val translationWorkflowId: String? = null,
+    val translationApiProfileId: String? = null,
     val translationPageMode: String? = null,
     val translationSegThreshold: Float? = null,
     val translationBubbleFillMode: String? = null,

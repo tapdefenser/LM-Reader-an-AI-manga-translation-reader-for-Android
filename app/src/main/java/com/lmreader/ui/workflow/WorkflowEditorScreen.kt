@@ -272,7 +272,8 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(name, { if(it.length <= 80) name = it }, label = { Text("名称") })
             OutlinedTextField(description, { if(it.length <= 500) description = it }, label = { Text("说明") })
-            Row { Text("失败额外重试 $retries 次"); TextButton(enabled = retries > 0, onClick = { retries-- }) { Text("－") }; TextButton(enabled = retries < 5, onClick = { retries++ }) { Text("＋") } }
+            Row { Text("本地引擎失败额外重试 $retries 次"); TextButton(enabled = retries > 0, onClick = { retries-- }) { Text("－") }; TextButton(enabled = retries < 5, onClick = { retries++ }) { Text("＋") } }
+            Text("SEG、OCR 与本地机翻按此重试；API 使用自身的重试设置，已交付的流式输出不自动重发。", style = MaterialTheme.typography.bodySmall)
         }
     }, confirmButton = { TextButton(onClick = { metadata = false }) { Text("完成") } })
     if(template) ChoiceDialog("填入模板（可以撤销）", listOf("blank" to "空白结构", "local" to "SEG → OCR → 本地机翻", "standard" to "标准翻译（每页文本 API）", "vl" to "VL 直接翻译（双语＋章末译名）", "vl-page" to "VL 整页直接翻译（多图一次 API）"), { template = false }) {
@@ -294,7 +295,7 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
     if(help) AlertDialog(onDismissRequest = { help = false }, title = { Text("猫爪工作流") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("漫画、每章节、每页为固定结构。步骤菜单可上下移动或移入其他作用域；需要的变量必须在目的位置可用。各作用域末尾新增行。")
-            Text("同步依次处理；异步受引擎并行数与缓存限制。异步模块可单独设置最大并行数，设为自动时跟随引擎上限。循环后的行等待所有分支完成。每项循环在参数中选择收集值，按原顺序写入外层列表。")
+            Text("同步依次处理；异步允许不同步骤重叠，各步骤共享对应引擎额度。异步模块可单独设置最大并行数，自动时结合整个模块的资源与缓存预算计算。循环后的行等待所有分支完成。每项循环在参数中选择收集值，按原顺序写入外层列表。")
             Text("变量以“<类型> · 名称”显示，颜色代表类型。{} 查看当前作用域的变量及字段。提示词变量条可左右滑动，点击插入光标处。")
             Text("漫画译名字典实时读取，后来同名译名不能覆盖已有内容。固定工作流可以统一绑定 API；固定标识只能由外部工具修改导出文件。")
         }

@@ -79,6 +79,7 @@ internal fun StripReader(
     translations: ReaderTranslationUiState = ReaderTranslationUiState(),
     renderSettings: BubbleRenderSettings = BubbleRenderSettings(),
     onBubbleSelected: (String, String?) -> Unit = { _, _ -> },
+    onBubbleGesture: (String, com.lmreader.ui.reader.translation.BubbleEditGesture) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     if (items.isEmpty()) return
@@ -218,6 +219,7 @@ internal fun StripReader(
                             editing = translations.editing && translations.progress==null,
                             selectedBubble = translations.draft?.takeIf { it.saved.pageId==item.page.pageId }?.selectedId,
                             onBubbleSelected = { onBubbleSelected(item.page.pageId,it) },
+                            onBubbleGesture = { onBubbleGesture(item.page.pageId, it) },
                         )
                     }
                 }

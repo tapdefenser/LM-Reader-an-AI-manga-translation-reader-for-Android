@@ -97,6 +97,35 @@ class WorkflowScopeTest {
         val host = Host(); WorkflowRuntime(4).execute(program, host)
         assertTrue(host.peak.get() > 1, "an unset limit must not serialize the engine pool")
     }
+    @Test fun `automatic module parallelism uses the host resource calculation`() = runTest {
+        var program=WorkflowEditing.update(WorkflowTemplates.localMachine(),"pages") { it.copy(mode=WorkflowMode.SYNC) }
+        program=WorkflowEditing.update(program,"bubbles") { it.copy(mode=WorkflowMode.ASYNC,parallelLimit=null) }
+        val serial=object:Host() { override fun parallelism(node:WorkflowNode)=1 }
+        WorkflowRuntime(8).execute(program,serial);assertEquals(1,serial.peak.get())
+        val parallel=object:Host() { override fun parallelism(node:WorkflowNode)=3 }
+        WorkflowRuntime(8).execute(program,parallel);assertEquals(3,parallel.peak.get())
+    }
+    @Test fun `workflow retries recover a local engine but never replay an api`() = runTest {
+        var program=WorkflowTemplates.localMachine()
+        for(id in listOf("pages","bubbles")) program=WorkflowEditing.update(program,id) { it.copy(mode=WorkflowMode.SYNC) }
+        val attempts=AtomicInteger()
+        val engine=object:Host() {
+            override suspend fun request(kind:WorkflowKind,inputs:Map<String,WorkflowValue>,frame:WorkflowFrame):WorkflowValue {
+                if(kind==WorkflowKind.OCR && attempts.incrementAndGet()<=2) throw java.io.IOException("temporary engine failure")
+                return super.request(kind,inputs,frame)
+            }
+        }
+        WorkflowRuntime(8,2).execute(program,engine);assertEquals(11,attempts.get());assertEquals(3,engine.saved.size)
+        val calls=AtomicInteger()
+        val apiProgram=WorkflowEditing.update(program,"translate") { it.copy(kind=WorkflowKind.API,resultType=WorkflowType.TEXT,
+            inputs=mapOf("profile" to WorkflowExpression.Text("a"),"prompt" to WorkflowExpression.Text("test"))) }
+        val api=object:Host() {
+            override suspend fun api(call:WorkflowApiCall,frame:WorkflowFrame):WorkflowValue {
+                calls.incrementAndGet();throw java.io.IOException("API has its own retry policy")
+            }
+        }
+        assertFails { WorkflowRuntime(8,5).execute(apiProgram,api) };assertEquals(1,calls.get())
+    }
 
     @Test fun `append rows reach an outer list inside an async loop while other rows keep it read-only`() {
         val list = WorkflowVariable("pictures", "图片列表", WorkflowType.list(WorkflowType.IMAGE))
@@ -113,7 +142,7 @@ class WorkflowScopeTest {
         assertTrue(targets.none { it.ref.variableId == WorkflowSystem.BUBBLE }, "the loop iterator is never an assignment target")
     }
 
-    private class Host : WorkflowRuntimeHost {
+    private open class Host : WorkflowRuntimeHost {
         val saved = mutableListOf<List<String>>(); val active = AtomicInteger(); val peak = AtomicInteger()
         override val manga = WorkflowValue.Record(mapOf("id" to WorkflowValue.Text("m"), "name" to WorkflowValue.Text("n")))
         override val sourceLanguage = "en"; override val targetLanguage = "zh-Hans"; override val style = ""

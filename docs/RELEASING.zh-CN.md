@@ -1,27 +1,27 @@
-# v0.1.2 发布与签名
+# v0.1.5 发布与签名
 
-[English](RELEASING.en.md) · [中英发行说明](releases/v0.1.2.md)
+[English](RELEASING.en.md) · [中英发行说明](releases/v0.1.5.md)
 
-发布日期：2026-10-02。本版提供已签名 APK：[GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.2)。仓库为公开仓库。
+发布日期：2026-10-09。本版提供已签名 APK：[GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.5)。仓库为公开仓库。
 
 ## 本版附件
 
 | 项目 | 配置 |
 |---|---|
-| 版本 / versionCode | `0.1.2` / `4`，来自 `gradle/release.properties` |
-| 标签 | `v0.1.2` |
+| 版本 / versionCode | `0.1.5` / `7`，来自 `gradle/release.properties` |
+| 标签 | `v0.1.5` |
 | applicationId | `com.lmreader`；Debug 为 `com.lmreader.debug` |
 | Android | min API 26、target API 36、compile SDK 37 |
 | ABI | `arm64-v8a`、`x86_64` |
 | Release 优化 | R8 与资源收缩 |
 | 签名 | 专用 RSA-4096 密钥，APK v2/v3 校验通过 |
-| APK | `LM-Reader-v0.1.2-64bit.apk`；实际大小见附件 metadata |
+| APK | `LM-Reader-v0.1.5-64bit.apk`；实际大小见附件 metadata |
 
 APK SHA-256 见本版附件 `SHA256SUMS` 与 `release-metadata.json`。
 
 签名证书 SHA-256：`8b1051b89d4e4bf8c423e4f7a2ad19e9ef1cfce3cd19041997a75b838b65ecc7`。后续版本继续使用同一密钥，以便覆盖升级。
 
-附件包括 APK、`SHA256SUMS`、`release-metadata.json`、`THIRD_PARTY_NOTICES.md` 和 `LICENSES.zip`。解压声明包后可核对校验清单中的文档与许可证。Metadata 记录真实 APK 签名、证书指纹、源码提交、ABI、Android 原生库对齐及独立的 Hexagon DSP 文件。
+附件包括 APK、`RELEASE_NOTES.md`、`SHA256SUMS`、`release-metadata.json`、`THIRD_PARTY_NOTICES.md` 和 `LICENSES.zip`。解压声明包后可核对校验清单中的文档与许可证。Metadata 记录真实 APK 签名、证书指纹、源码提交、ABI、Android 原生库对齐及独立的 Hexagon DSP 文件。
 
 ## 从源码准备
 
@@ -55,10 +55,10 @@ Debug 与 Release 使用独立包名，通过应用备份迁移。本版沿用 v
 
 ## 验证与已知边界
 
-Debug/Release 构建与 lint 通过；JVM **420 项通过、1 项跳过、0 项失败**。签名 APK 校验包括 v2/v3、16 KB ZIP 与 Android native 库 LOAD 对齐、DSP 文件分类与六个模型。
+本轮 Debug 构建及 Lint、发布前 Release 构建及 Lint 通过；全量 JVM **499 项通过、1 项跳过、0 项失败**。签名 APK 校验包括 v2/v3、16 KB ZIP 与 Android native 库 LOAD 对齐、DSP 文件分类、JNI 及六个模型。
 
-本轮 MuMu Android 15 的导航回归测试通过。签名、R8 压缩的正式 APK 已验证导出设置的页面/系统返回、英文与韩文 SEG + OCR、GPU 失败回退 CPU、本地机翻队列、译文保存及阅读器显示。APK JNI 检查拒绝旧版并通过新版，已接入 CI 与打包。
+本轮 MuMu Android 15 上 110 项功能回归通过、2 项环境相关跳过。实际签名、R8 压缩的正式 APK 已验证设置返回、主屏幕浮球、详情菜单、英语 SEG → OCR → 简体中文机翻、GPU 失败回退 CPU、气泡编辑入口及重启后译文显示。APK JNI 检查已接入 CI 与打包。
 
-发布验收必须安装实际签名 APK，打开设置子页后返回，再完成 SEG → OCR → 机翻并打开译文页面；Debug 测试不能代替压缩正式版验收。手机崩溃日志采集后已断开，修复后的真机复测仍待进行。
+发布验收必须安装实际签名 APK，打开设置子页后返回，再完成 SEG → OCR → 机翻并打开译文页面；Debug 测试不能代替压缩正式版验收。本版已完成上述正式版验收，并覆盖升级到 Android 16 手机，安装身份与首次安装时间保留，设备 APK 校验值与发布包一致。
 
-仍待设备安装/升级、ARM 长时后台与省电、真实 SD/云提供方验收。项目许可证选择、Seg 权重独立分发依据及完整依赖审查仍未完成，现有第三方声明不表示已完成这些审查。仓库权限未改变。
+仍待 ARM 长时后台与省电、真实 SD/云提供方验收。项目许可证选择、Seg 权重独立分发依据及完整依赖审查仍未完成，现有第三方声明不表示已完成这些审查。仓库权限未改变。

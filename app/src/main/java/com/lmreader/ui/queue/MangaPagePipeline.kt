@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicReference
 data class QueuePageWork(val task: ChapterTranslationEntity, val source: PageSource, val page: ReaderPage,
     val sourceLanguage: LocalTranslationLanguage, val targetLanguage: LocalTranslationLanguage,
     val render: BubbleRenderSettings, val threshold: Float, val retries: Int, val segTextScope: SegTextScope = SegTextScope.ALL,
-    val textDetectionThreshold: Float = .45f, val freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO)
+    val textDetectionThreshold: Float = .35f, val freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO)
 
 /** A manga owns both async branches. The MB budget provides backpressure without serializing stages. */
 internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWork>,
@@ -45,7 +45,8 @@ internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWo
                         if (translator.cached(work.source, work.page, work.render) != null) {
                             state.segmentation.complete(Result.success(null)); continue
                         }
-                        state.lease = budget.acquire(32L * 1_048_576)
+                        state.lease = budget.acquire(32L * 1_048_576, state.work.task.mangaId)
+                        translator.retainPreprocessing(work.page.pageId)
                         segQueue.send(state)
                     } catch (cancelled: CancellationException) { throw cancelled }
                     catch (failure: Exception) { state.segmentation.complete(Result.failure(failure)) }
@@ -58,7 +59,8 @@ internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWo
                     val work = state.work
                     val page = retry(work.retries) { translator.segment(work.source, work.page, work.threshold, work.textDetectionThreshold) { state.progress.value = it } }
                     state.image.set(page)
-                    state.lease!!.shrink(page.image.allocationByteCount.toLong())
+                    state.lease!!.resizeForPage(page.image.allocationByteCount.toLong() +
+                        page.seg.regions.sumOf { 256L + it.contour.size * 8L } + page.seg.textLines.size * 48L)
                     state.segmentation.complete(Result.success(page))
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) { state.segmentation.complete(Result.failure(failure)) }
@@ -72,12 +74,11 @@ internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWo
                     if (segmented == null) { state.recognized.complete(Result.success(null)); continue }
                     owned = segmented
                     state.image.set(null)
-                    val bitmapBytes = segmented.image.allocationByteCount.toLong()
                     val recognized = translator.recognize(segmented, state.work.sourceLanguage, state.work.segTextScope, state.work.freeTextMergeGapRatio) { state.progress.value = it }
                     val metadataBytes = recognized.groups.sumOf { region ->
                         256L + region.sourceText.length * 2L + region.contour.size * 8L + region.textBounds.size * 16L
                     }
-                    state.lease!!.shrink(minOf(metadataBytes, bitmapBytes))
+                    state.lease!!.resizeForPage(metadataBytes + segmented.seg.regions.sumOf { 256L + it.contour.size * 8L } + segmented.seg.textLines.size * 48L)
                     state.recognized.complete(Result.success(recognized))
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) { state.recognized.complete(Result.failure(failure)) }
@@ -91,7 +92,11 @@ internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWo
     suspend fun consume(pageId: String) { states.getValue(pageId).lease?.release() }
     suspend fun close() = withContext(NonCancellable) {
         job.cancelAndJoin()
-        for (state in states.values) { state.image.getAndSet(null)?.close(); state.lease?.release() }
+        for (state in states.values) {
+            state.image.getAndSet(null)?.close(); state.lease?.let {
+                it.release(); translator.releasePreprocessing(state.work.page.pageId)
+            }
+        }
     }
 }
 

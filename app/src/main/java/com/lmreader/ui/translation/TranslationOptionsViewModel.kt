@@ -139,6 +139,7 @@ class TranslationOptionsViewModel(
     }
 
     fun setWorkflow(id: String?) = update { it.copy(workflowId = id) }
+    fun setApiProfile(id: String?) = update { it.copy(apiProfileId = id) }
     fun setPageMode(mode: TranslationPageMode?) = update { it.copy(pageMode = mode) }
     fun setSegThreshold(value: Float) = update { it.copy(segThreshold = value.coerceIn(0f, 1f)) }
     fun setTextDetectionThreshold(value: Float) = update { it.copy(textDetectionThreshold = value.coerceIn(0f, 1f)) }

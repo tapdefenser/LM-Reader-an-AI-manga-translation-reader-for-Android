@@ -92,6 +92,8 @@ data class MangaTranslationSettings(
     val customStyle: String? = null,
     /** null selects the immutable built-in machine workflow. */
     val workflowId: String? = null,
+    /** null preserves each API step's choice; otherwise override all API steps for this manga. */
+    val apiProfileId: String? = null,
     /** null uses the selected workflow's default page mode. */
     val pageMode: TranslationPageMode? = null,
     /** A confidence threshold for new Seg runs; rendering changes do not rerun Seg. */

@@ -10,7 +10,10 @@ data class PageTextRegion(
     val textBounds: List<PixelRect>,
 )
 
-data class PageTranslatedRegion(val region: PageTextRegion, val translatedText: String)
+data class PageTranslatedRegion(val region: PageTextRegion, val translatedText: String,
+    val fontScalePercent: Int = 100, val rotationDegrees: Float = 0f) {
+    init { require(fontScalePercent in 25..400 && rotationDegrees.isFinite()) }
+}
 
 /** OCR text is metadata; only geometry changes require preparing masks from original pixels again. */
 fun PageTextRegion.renderGeometry() = copy(sourceText = "")
@@ -20,8 +23,8 @@ enum class BubbleFont { SYSTEM, SANS_SERIF, SERIF, MONOSPACE }
 
 data class BubbleRenderSettings(
     val fillMode: BubbleFillMode = BubbleFillMode.AUTO,
-    val opacityPercent: Int = 60,
-    val textPaddingPercent: Int = 8,
+    val opacityPercent: Int = 85,
+    val textPaddingPercent: Int = 7,
     val font: BubbleFont = BubbleFont.SYSTEM,
     val fontScalePercent: Int = 100,
     val bold: Boolean = false,

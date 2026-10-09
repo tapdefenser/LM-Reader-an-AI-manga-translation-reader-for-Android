@@ -10,6 +10,33 @@ class PageBubbleDraftTest {
         emptyList(),"hello",listOf(PixelRect(30f,30f,80f,60f))),"你好")
     private val saved=ReaderPageTranslation("page","revision",File("page.json"),LocalTranslationLanguage.ENGLISH,
         LocalTranslationLanguage.CHINESE_SIMPLIFIED,"hash",200,300,listOf(region),emptyList(),1)
+    @Test fun newBubbleOnUntranslatedPageHasEditableGeometryAndUndo() {
+        val base = saved.copy(regions = emptyList(), revision = "")
+        val added = PageBubbleDraft(base).addBubble()
+        assertNotNull(added.selected); assertTrue(added.dirty)
+        assertTrue(added.selected!!.region.id.startsWith("page:manual:"))
+        assertFalse(added.editText("New text").undoChange().undoChange().dirty)
+    }
+    @Test fun aDragHasOneUndoEntryAndFontSizeIsPerBubble() {
+        val draft = PageBubbleDraft(saved).beginTransform("page:a")
+            .transform("page:a", PixelRect(20f,20f,130f,140f), 30f)
+            .transform("page:a", PixelRect(30f,30f,160f,180f), 45f).finishTransform()
+        assertEquals(1,draft.undo.size);assertEquals(45f,draft.selected!!.rotationDegrees)
+        assertEquals(listOf(region),draft.undoChange().regions)
+        val enlarged = draft.scaleFont(10)
+        assertEquals(110,enlarged.selected!!.fontScalePercent)
+        assertEquals(100,saved.regions.single().fontScalePercent)
+    }
+    @Test fun backwardPrefetchCannotEvictTheCurrentTranslation() {
+        var pages = (1..8).associate { "$it" to it }
+        for (id in (7 downTo 1).map(Int::toString)) {
+            pages = retainReaderPage(pages,id,id.toInt(),id)
+            for(neighbor in (id.toInt()-3..id.toInt()+3))
+                pages = retainReaderPage(pages,"$neighbor",neighbor,id)
+            assertEquals(id.toInt(),pages[id])
+            assertTrue(pages.size <= 8)
+        }
+    }
     @Test fun selectionAndUnchangedTextDoNotMakeDraftDirty() {
         val draft=PageBubbleDraft(saved).select("page:a").editText("你好")
         assertFalse(draft.dirty);assertTrue(draft.undo.isEmpty());assertEquals(region,draft.selected)

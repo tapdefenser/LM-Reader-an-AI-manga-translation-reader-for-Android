@@ -144,7 +144,7 @@ fun ReaderScreen(
     }
     DisposableEffect(viewModel,translationViewModel) {
         viewModel.navigationGuard=translationViewModel::requestNavigation
-        viewModel.navigationBlocked={translationViewModel.state.value.confirmNavigation || translationViewModel.state.value.savingEdits}
+        viewModel.navigationBlocked={translationViewModel.state.value.let { it.confirmNavigation || it.savingEdits || it.creatingBubble }}
         onDispose {viewModel.navigationGuard=null;viewModel.navigationBlocked={false};translationViewModel.cancel()}
     }
     val context=LocalContext.current
@@ -313,6 +313,7 @@ private fun ReaderChrome(
                 translations = translations,
                 renderSettings = renderSettings,
                 onBubbleSelected = onBubbleSelected,
+                onBubbleGesture = translationViewModel::editBubbleGesture,
             )
 
             if (state.tapZoneOverlayVisible) {
@@ -353,7 +354,8 @@ private fun ReaderChrome(
                 .padding(start=16.dp,end=16.dp,bottom=if(state.chromeVisible) 164.dp else 40.dp).fillMaxWidth())
             ReaderBubbleEditor(translations,translationViewModel::editText,translationViewModel::deleteBubble,
                 {translationViewModel.saveEdits()},translationViewModel::undoEdit,translationViewModel::toggleEditing,
-                translationViewModel::clearEditFailure,Modifier.align(Alignment.TopEnd)
+                translationViewModel::clearEditFailure,translationViewModel::addBubble,
+                { translationViewModel.scaleBubbleFont(10) }, { translationViewModel.scaleBubbleFont(-10) },Modifier.align(Alignment.TopEnd)
                     .padding(top=if(state.chromeVisible) 80.dp else 12.dp,end=12.dp))
         }
     }
@@ -370,6 +372,7 @@ private fun ReaderContent(
     translations: ReaderTranslationUiState,
     renderSettings: BubbleRenderSettings,
     onBubbleSelected: (String,String?) -> Unit,
+    onBubbleGesture: (String, BubbleEditGesture) -> Unit,
 ) {
     when {
         state.loading -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -412,6 +415,7 @@ private fun ReaderContent(
                         translations = translations,
                         renderSettings = renderSettings,
                         onBubbleSelected = onBubbleSelected,
+                        onBubbleGesture = onBubbleGesture,
                         onScrollDelta = { delta ->
                             // 只在控制栏可见时判断，避免已在隐藏状态下反复调用。
                             if (state.chromeVisible &&
@@ -437,6 +441,7 @@ private fun ReaderContent(
                         translations = translations,
                         renderSettings = renderSettings,
                         onBubbleSelected = onBubbleSelected,
+                        onBubbleGesture = onBubbleGesture,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }

@@ -79,7 +79,7 @@ internal class LocalVisionSession(context: Context, private val settings: Vision
 
     /** Small text loses strokes at page scale. Refine its lines inside SEG, in the OCR pool. */
     suspend fun detectSegTextLines(seg: SegResult, image: Bitmap,
-        scoreThreshold: Float = .45f,
+        scoreThreshold: Float = .35f,
         progress: (VisionProgress) -> Unit = {}): List<DetectedTextLine> = execute("文字检测") {
         validate(seg.imageId, image)
         require(scoreThreshold.isFinite() && scoreThreshold in 0f..1f)

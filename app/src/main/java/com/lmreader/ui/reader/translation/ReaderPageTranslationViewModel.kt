@@ -24,6 +24,7 @@ data class ReaderTranslationUiState(
     val failure: String? = null, val cancelled: Boolean = false, val completedRegions: Int? = null,
     val editing: Boolean = false, val draft: PageBubbleDraft? = null, val savingEdits: Boolean = false,
     val confirmNavigation: Boolean = false, val editFailure: BubbleEditFailure? = null, val clearingPage: Boolean = false,
+    val creatingBubble: Boolean = false,
 )
 
 class ReaderPageTranslationViewModel(private val container: AppContainer,private val mangaId: String): ViewModel() {
@@ -32,6 +33,8 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
     private var translating: Job?=null
     private var loadingCache: Job?=null
     private var currentPageId: String? = null
+    private var currentItem: ReaderItem.PageItem? = null
+    private var currentRender = BubbleRenderSettings()
     private val navigation = DraftNavigationGate()
     init { viewModelScope.launch {
         container.translationQueue.pagePreviews.collect { saved ->
@@ -56,6 +59,7 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
     fun showPage(item: ReaderItem.PageItem?,render: BubbleRenderSettings,neighbors: List<ReaderItem.PageItem> = emptyList()) {
         loadingCache?.cancel()
         currentPageId = item?.page?.pageId
+        currentItem = item; currentRender = render
         mutable.update { state -> state.copy(draft = if (!state.editing) null
             else state.draft?.takeIf { it.saved.pageId==currentPageId } ?: state.pages[currentPageId]?.let(::PageBubbleDraft)) }
         if(item==null) return
@@ -95,6 +99,7 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
                 }
                 val workflow=container.translationWorkflows.find(options.workflowId)
                     ?: error("所选翻译工作流已删除")
+                val program = workflow.program.withApiOverride(options.apiProfileId)
                 require(workflow.program.uses(WorkflowKind.SEG)) { "工作流需要 SEG 生成气泡" }
                 val installed = container.translationModels.installedCatalog().languages
                 val configuredSource = com.lmreader.ui.translation.matchEngineLanguage(options.sourceLanguage, installed) ?: LocalTranslationLanguage.fromTag(requireNotNull(options.sourceLanguage))
@@ -123,7 +128,7 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
                         mutable.update { it.copy(pages = rememberPage(it.pages, saved)) }
                     }
                 }
-                val result = try { WorkflowRuntime(8, workflow.retries).execute(workflow.program, host); host.published[item.page.pageId] ?: error("工作流没有生成本页译文") }
+                val result = try { WorkflowRuntime(8, workflow.retries).execute(program, host); host.published[item.page.pageId] ?: error("工作流没有生成本页译文") }
                     finally {
                         host.close()
                         if(host.published[item.page.pageId] == null) showPage(item, render)
@@ -143,7 +148,7 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
         }
     }
     private fun rememberPage(pages: Map<String,ReaderPageTranslation>,page: ReaderPageTranslation)=
-        ((pages-page.pageId)+(page.pageId to page)).entries.toList().takeLast(8).associate {it.toPair()}
+        retainReaderPage(pages, page.pageId, page, currentPageId)
     fun toggleOriginal(pageId: String) {mutable.update {it.copy(originals=if(pageId in it.originals) it.originals-pageId else it.originals+pageId)}}
     fun clearPage(item: ReaderItem.PageItem) {
         requestNavigation {
@@ -176,16 +181,42 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
         }
     } }
     fun editText(text: String) { changeDraft { it.editText(text) } }
+    fun scaleBubbleFont(delta: Int) { changeDraft { it.scaleFont(delta) } }
+    fun editBubbleGesture(pageId: String, gesture: BubbleEditGesture) {
+        if (pageId != currentPageId) return
+        changeDraft { draft -> when (gesture) {
+            is BubbleEditGesture.Begin -> draft.beginTransform(gesture.id)
+            is BubbleEditGesture.Transform -> draft.transform(gesture.id, gesture.bounds, gesture.rotation)
+            BubbleEditGesture.End -> draft.finishTransform()
+        } }
+    }
+    fun addBubble() {
+        val item = currentItem ?: return
+        val state = mutable.value
+        if (!state.editing || state.savingEdits || state.creatingBubble || state.progress != null) return
+        loadingCache?.cancel()
+        mutable.update { it.copy(creatingBubble = true, editFailure = null) }
+        viewModelScope.launch {
+            try {
+                val draft = state.draft ?: PageBubbleDraft(container.localPageTranslator.editablePage(item.chapter.source,
+                    item.page, state.source ?: LocalTranslationLanguage.ENGLISH, state.target, currentRender))
+                if (currentPageId == item.page.pageId) mutable.update { it.copy(draft = draft.addBubble(),
+                    pages = rememberPage(it.pages, draft.saved)) }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { mutable.update { it.copy(editFailure = BubbleEditFailure.OTHER) } }
+            finally { mutable.update { it.copy(creatingBubble = false) } }
+        }
+    }
     fun deleteBubble() { changeDraft(PageBubbleDraft::deleteSelected) }
     fun undoEdit() { changeDraft(PageBubbleDraft::undoChange) }
     private fun changeDraft(change: (PageBubbleDraft)->PageBubbleDraft) { mutable.update {
-        if(it.savingEdits || it.confirmNavigation || it.progress!=null) it else it.copy(draft=it.draft?.let(change),editFailure=null)
+        if(it.savingEdits || it.creatingBubble || it.confirmNavigation || it.progress!=null) it else it.copy(draft=it.draft?.let(change),editFailure=null)
     } }
 
     /** All exits and page navigation ask here, before the reader changes its position/progress. */
     fun requestNavigation(action: () -> Unit): Boolean {
         val state = mutable.value
-        val accepted = navigation.request(state.draft?.dirty==true,state.savingEdits || state.clearingPage,action)
+        val accepted = navigation.request(state.draft?.dirty==true,state.savingEdits || state.clearingPage || state.creatingBubble,action)
         if(!accepted && navigation.waiting && !state.confirmNavigation) {
             mutable.update { it.copy(confirmNavigation=true,editFailure=null) }
         }

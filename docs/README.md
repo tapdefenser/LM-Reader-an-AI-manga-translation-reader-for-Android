@@ -12,4 +12,4 @@
 | [模型与语言包](MODEL_PACKS.md) | 固定模型、离线包、来源、完整性和导入规则 |
 | [上游来源](UPSTREAM.md) | 参考项目、实际复用与声明 |
 
-[v0.1.0 中英发行说明](releases/v0.1.0.md) · [更新记录](../CHANGELOG.md) · [第三方声明](../THIRD_PARTY_NOTICES.md)
+[v0.1.5 中英发行说明](releases/v0.1.5.md) · [更新记录](../CHANGELOG.md) · [第三方声明](../THIRD_PARTY_NOTICES.md)

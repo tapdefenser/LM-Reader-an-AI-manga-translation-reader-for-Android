@@ -26,6 +26,7 @@ import com.lmreader.core.model.PageTranslatedRegion
 import com.lmreader.core.model.renderGeometry
 import com.lmreader.core.vision.BubbleOverlaySource
 import com.lmreader.ui.reader.translation.ReaderPageTranslation
+import com.lmreader.ui.reader.translation.BubbleEditGesture
 import com.lmreader.core.storage.reader.PageSource
 import com.lmreader.core.storage.reader.ReaderPage
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +79,7 @@ internal fun EnginePageView(
     editing: Boolean = false,
     selectedBubble: String? = null,
     onBubbleSelected: (String?) -> Unit = {},
+    onBubbleGesture: (BubbleEditGesture) -> Unit = {},
 ) {
     // 视图实例随页面身份重建：库内部持有解码状态与瓦片缓存，复用实例会让上一页的
     // 缩放位置与瓦片残留到下一页（Mihon 在 `ReaderPageImageView.recycle()` 里显式清理
@@ -132,6 +134,8 @@ internal fun EnginePageView(
             view = created
             created.onSingleTap = onSingleTap
             created.onBubbleSelected = onBubbleSelected
+            created.editableRegions = regions
+            created.onBubbleGesture = onBubbleGesture
             created.editing = editing && translation != null
             created.selectedBubble = selectedBubble
             created.showTranslation = !showingOriginal

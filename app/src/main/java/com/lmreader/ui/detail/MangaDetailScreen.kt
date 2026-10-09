@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
@@ -379,7 +380,7 @@ private fun DetailContent(
         item {
             // 简介折叠：详情页的信息区很长（封面/作者/来源/简介/按钮/章节表头），
             // 一段长简介会把"阅读 / 继续阅读"顶到屏幕外。默认只显示 3 行。
-            ExpandableSummary(manga.summary ?: "无简介")
+            ExpandableSummary(manga.summary ?: "无简介", localize = manga.summary == null)
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -542,23 +543,26 @@ private fun DetailContent(
 }
 
 /**
- * 简介：默认 3 行 + 「显示更多 / 收起」。
+ * 简介：默认 3 行 + 「显示更多 / 收起」，正文可长按选择复制。
  *
  * 只在真的被截断时给按钮：`onTextLayout` 报 `hasVisualOverflow` 之前不显示，
  * 否则短简介下面会挂一个点了没反应的"显示更多"。
  */
 @Composable
-private fun ExpandableSummary(text: String) {
+private fun ExpandableSummary(text: String, localize: Boolean) {
     var expanded by remember(text) { mutableStateOf(false) }
     var overflows by remember(text) { mutableStateOf(false) }
     Column {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = if (expanded) Int.MAX_VALUE else SUMMARY_COLLAPSED_LINES,
-            overflow = TextOverflow.Ellipsis,
-            onTextLayout = { result -> if (!expanded) overflows = result.hasVisualOverflow },
-        )
+        SelectionContainer {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = if (expanded) Int.MAX_VALUE else SUMMARY_COLLAPSED_LINES,
+                overflow = TextOverflow.Ellipsis,
+                onTextLayout = { result -> if (!expanded) overflows = result.hasVisualOverflow },
+                localize = localize,
+            )
+        }
         if (overflows || expanded) {
             Text(
                 text = if (expanded) "收起" else "显示更多",
@@ -704,24 +708,23 @@ private fun ChapterRow(
                 // 想知道的是"这一章有多长、我读到哪了、翻译到哪了"。
                 Text(
                     buildString {
-                        append(
-                            when (chapter.kind) {
-                                ChapterKind.IMAGE_DIRECTORY -> "图片目录"
-                                ChapterKind.ARCHIVE -> "归档 / PDF"
-                            },
-                        )
-                        chapter.pageCount?.let { append(" · 共 $it 页") }
+                        chapter.pageCount?.let { append("共 $it 页") }
                         if (isCurrentChapter && readPage > 0) {
-                            append(" · 读到第 ${readPage + 1} 页")
+                            if(isNotEmpty()) append(" · ")
+                            append("读到第 ${readPage + 1} 页")
                         }
                         // 翻译状态写在副标题里而不是行尾：行尾已经被"已读"与页码占着，
                         // 而这一行本来就短。
-                        append(" · ")
+                        if(isNotEmpty()) append(" · ")
                         append(when {
                             translation == null -> "未翻译"
                             translation.state == TranslationState.DONE -> "已翻译"
                             translation.state == TranslationState.CANCELLED -> if (chapter.pageCount?.let { translation.translatedCount >= it && it > 0 } == true) "已翻译" else "未翻译"
-                            else -> "翻译中"
+                            translation.state == TranslationState.FAILED -> "翻译失败"
+                            translation.state == TranslationState.INTERRUPTED -> "翻译中断"
+                            translation.state == TranslationState.PAUSED -> "翻译暂停 ${translation.translatedCount}/${chapter.pageCount ?: "?"}"
+                            translation.state == TranslationState.PENDING -> "等待翻译 ${translation.translatedCount}/${chapter.pageCount ?: "?"}"
+                            else -> "翻译中 ${translation.translatedCount}/${chapter.pageCount ?: "?"}"
                         })
                     },
                 )
@@ -993,6 +996,10 @@ private fun DetailOverflowMenu(
             },
         )
         DropdownMenuItem(
+            text = { Text("译名管理") },
+            onClick = { open = false; onOpenGlossary() },
+        )
+        DropdownMenuItem(
             text = { Text("全部导出") },
             onClick = { open = false; onExportAll() },
         )
@@ -1002,10 +1009,6 @@ private fun DetailOverflowMenu(
                 open = false
                 onOpenSettings()
             },
-        )
-        DropdownMenuItem(
-            text = { Text("译名管理") },
-            onClick = { open = false; onOpenGlossary() },
         )
     }
 }
