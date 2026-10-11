@@ -18,18 +18,15 @@ class ScreenObjectTemplate private constructor(private val samples: List<Sample>
             objectBounds.top + support.top * objectBounds.height,
             objectBounds.left + support.right * objectBounds.width,
             objectBounds.top + support.bottom * objectBounds.height)
-        var count = 0; var error = 0f; var a = 0.0; var b = 0.0; var aa = 0.0; var bb = 0.0; var ab = 0.0
+        val appearance = ScreenAppearanceSamples()
         for (sample in samples) {
             val x = (patch.left + sample.u * patch.width - frameBounds.left) * frame.width / frameBounds.width
             val y = (patch.top + sample.v * patch.height - frameBounds.top) * frame.height / frameBounds.height
             val value = pixel(frame, x, y) ?: continue
-            count++; error += abs(value - sample.value)
-            a += sample.value; b += value; aa += sample.value * sample.value; bb += value * value; ab += sample.value * value
+            appearance.add(sample.value, value)
         }
-        if (count < 12) return null
-        val variance = sqrt(maxOf(0.0, aa - a * a / count) * maxOf(0.0, bb - b * b / count))
-        if (variance < 100) return null
-        return Similarity(error / (count * 255), ((ab - a * b / count) / variance).toFloat().coerceIn(-1f, 1f), count.toFloat() / samples.size)
+        val correlation = appearance.correlation() ?: return null
+        return Similarity(ScreenAppearanceSamples.error(correlation), correlation, appearance.count.toFloat() / samples.size)
     }
     companion object {
         private fun pixel(frame: ScreenGrayFrame, x: Float, y: Float): Float? {
@@ -41,8 +38,9 @@ class ScreenObjectTemplate private constructor(private val samples: List<Sample>
             return (frame.at(l, t) * (1 - u) + frame.at(l + 1, t) * u) * (1 - v) +
                 (frame.at(l, t + 1) * (1 - u) + frame.at(l + 1, t + 1) * u) * v
         }
-        fun capture(frame: ScreenGrayFrame, frameBounds: PixelRect, objectBounds: PixelRect): ScreenObjectTemplate? {
+        fun capture(source: ScreenGrayFrame, frameBounds: PixelRect, objectBounds: PixelRect): ScreenObjectTemplate? {
             if (objectBounds.width <= 0 || objectBounds.height <= 0) return null
+            val frame = source.trackingContrast() ?: return null
             val mx = minOf(objectBounds.width * .15f, frameBounds.width * 3 / frame.width)
             val my = minOf(objectBounds.height * .15f, frameBounds.height * 3 / frame.height)
             val patch = PixelRect(objectBounds.left - mx, objectBounds.top - my, objectBounds.right + mx, objectBounds.bottom + my)

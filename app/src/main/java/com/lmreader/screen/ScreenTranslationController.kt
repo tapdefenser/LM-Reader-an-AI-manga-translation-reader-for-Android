@@ -68,6 +68,11 @@ class ScreenTranslationController(private val container: AppContainer) {
     val apiResources = MutableStateFlow<List<String>>(emptyList())
     internal fun bubblePositions() = overlay?.positions().orEmpty()
     internal fun motionDiagnostics() = "sequence=${projection?.sequence} active=${motionLoop?.isActive} source=${frameBroker?.backend} preprocessing=${projection?.motionBackend} raw=${browseTracker.rawPose} shown=${browseTracker.displayPose}"
+    internal fun objectSimilarityDiagnostics(id: String, expected: PixelRect): String {
+        val obj = overlay?.motionObjects(browseTracker.rawPose)?.firstOrNull { it.id == id }
+        val frame = browseTracker.latestFrame ?: return "no tracking frame"
+        return "object=$obj expected=${obj?.template?.compare(frame.gray, frame.bounds, expected)} frame=${frame.bounds}"
+    }
     internal var traceMotion = false
     internal val motionTrace = ArrayDeque<String>()
     internal var rejectedMotion: Pair<ScreenGrayFrame, ScreenGrayFrame>? = null
@@ -362,9 +367,11 @@ class ScreenTranslationController(private val container: AppContainer) {
     private suspend fun observeBrowse(frame: CapturedMotion): BrowseObservation = observationLock.withLock {
         val epoch = generation
         val previousPose = browseTracker.rawPose
+        val previousFrame = if (traceMotion) browseTracker.latestFrame else null
         val renderer = overlay
         val objects = renderer?.motionObjects(previousPose).orEmpty()
         val observation = browseTracker.register(frame, epoch)
+        if (traceMotion && !observation.reliable && previousFrame != null) rejectedMotion = previousFrame.gray to frame.gray
         if (epoch != generation) return@withLock observation.copy(reliable = false, newest = false)
         if (observation.sceneChanged) {
             resetScene()

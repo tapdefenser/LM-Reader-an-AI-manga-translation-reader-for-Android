@@ -16,15 +16,19 @@ public class ScreenFixtureActivity extends Activity {
     }
     @Override public void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); configure(intent); }
     private void configure(Intent intent) {
+        if (intent.hasExtra("orientation")) setRequestedOrientation(intent.getIntExtra("orientation", android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED));
         view.video = intent.getBooleanExtra("video", false);
         view.scale = intent.getFloatExtra("scale", 1f);
         view.shift = intent.getFloatExtra("shift", 0f);
         view.fixedControls = intent.getBooleanExtra("fixedControls", view.fixedControls);
+        view.tintOpacity = intent.getFloatExtra("tintOpacity", 0f);
+        view.tintColor = intent.getIntExtra("tintColor", Color.BLACK);
         view.invalidate();
     }
     private class Fixture extends View {
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         boolean video, dragged, held, fixedControls; int variant; float scale = 1, shift, lastY; long start = android.os.SystemClock.uptimeMillis();
+        float tintOpacity; int tintColor = Color.BLACK;
         final android.os.Handler gestures = new android.os.Handler(android.os.Looper.getMainLooper());
         final Runnable longClick = () -> { if (!dragged) { held = true; performLongClick(); } };
         final ScaleGestureDetector scaling;
@@ -77,6 +81,8 @@ public class ScreenFixtureActivity extends Activity {
                 paint.setColor(Color.BLACK); paint.setTextAlign(Paint.Align.CENTER); paint.setTextSize(42);
                 canvas.drawText("Search for a book", getWidth() / 2f, getHeight() - 50, paint);
             }
+            if (tintOpacity > 0) canvas.drawColor(Color.argb(Math.round(255 * tintOpacity),
+                Color.red(tintColor), Color.green(tintColor), Color.blue(tintColor)));
         }
         @Override public boolean onTouchEvent(MotionEvent event) {
             scaling.onTouchEvent(event);

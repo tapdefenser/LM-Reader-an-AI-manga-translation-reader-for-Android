@@ -2,13 +2,11 @@ package com.lmreader.screen
 
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
-import android.app.AlertDialog
 import android.content.Intent
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.*
 import android.os.Bundle
-import android.text.InputFilter
 import android.view.*
 import android.widget.*
 import com.lmreader.core.model.*
@@ -16,7 +14,6 @@ import com.lmreader.core.storage.settings.ScreenTranslationPreferences
 import com.lmreader.core.storage.settings.GeneralPreferences
 import com.lmreader.di.AppContainer
 import com.lmreader.ui.i18n.UiTextTranslations
-import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
 import kotlin.math.abs
@@ -28,12 +25,10 @@ internal object ScreenRegionEditorResults { val latest = MutableStateFlow<Screen
 /** A separate translucent task exposes the target app but consumes all touches.
  * Orientation is requested on this activity only; system rotation settings are untouched. */
 class ScreenRegionEditorActivity : ComponentActivity() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val container by lazy { AppContainer.from(this) }
     private lateinit var editor: RegionView
     private lateinit var status: TextView
     private lateinit var add: Button
-    private lateinit var save: Button
     private lateinit var done: Button
     private var landscape = false
     private var draft = ScreenRegionSelection()
@@ -79,7 +74,6 @@ class ScreenRegionEditorActivity : ComponentActivity() {
                 editor.invalidate(); refreshTools()
             }
         }
-        save = button("保存当前方案", ::savePreset)
         done = button("完成区域编辑") { complete(apply = true) }
         button("取消本次编辑") { complete(apply = false) }
         root.addView(toolbox, FrameLayout.LayoutParams(dp(210), -2, Gravity.TOP or Gravity.END).apply { topMargin = dp(64); rightMargin = dp(24) })
@@ -91,7 +85,6 @@ class ScreenRegionEditorActivity : ComponentActivity() {
     }
     override fun onStart() { super.onStart(); container.screenTranslation.setVisible(this, true) }
     override fun onStop() { container.screenTranslation.setVisible(this, false); super.onStop() }
-    override fun onDestroy() { scope.cancel(); super.onDestroy() }
     override fun onSaveInstanceState(outState: Bundle) {
         syncDraft(); outState.putString("regions", ScreenTranslationPreferences.encodeRegions(draft).toString())
         outState.putInt("originalOrientation", originalOrientation); super.onSaveInstanceState(outState)
@@ -107,32 +100,10 @@ class ScreenRegionEditorActivity : ComponentActivity() {
         val ready = correctOrientation()
         status.text = if (ready) label(if (landscape) "横屏区域" else "竖屏区域") + "  ${editor.regions.size}/8\n" + label("没有矩形框时翻译全屏")
             else label("系统未应用所选方向，请先旋转设备，再编辑。")
-        add.isEnabled = ready && editor.regions.size < 8; save.isEnabled = ready; done.isEnabled = ready
+        add.isEnabled = ready && editor.regions.size < 8; done.isEnabled = ready
     }
     private fun syncDraft() {
         draft = if (landscape) draft.copy(landscape = editor.regions.toList()) else draft.copy(portrait = editor.regions.toList())
-    }
-    private fun savePreset() {
-        syncDraft()
-        val input = EditText(this).apply { setSingleLine(); filters = arrayOf(InputFilter.LengthFilter(80)); setText(draft.name); hint = label("方案名称") }
-        val dialog = AlertDialog.Builder(this).setTitle(label("保存当前方案")).setView(input)
-            .setNegativeButton(label("取消"), null).setPositiveButton(label("保存"), null).create()
-        dialog.setOnShowListener { dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-            val name = input.text.toString().trim()
-            if (name.isEmpty()) { input.error = label("请输入方案名称"); return@setOnClickListener }
-            fun persist() { scope.launch {
-                draft = draft.copy(name = name)
-                container.screenTranslation.preferences.update { settings -> settings.copy(regionPresets =
-                    settings.regionPresets.filterNot { it.name == name } + draft) }
-                Toast.makeText(this@ScreenRegionEditorActivity, label("方案已保存，包含横屏和竖屏区域"), Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
-            } }
-            if (container.screenTranslation.preferences.settings.value.regionPresets.any { it.name == name }) {
-                AlertDialog.Builder(this).setMessage(label("同名方案已存在，是否替换？"))
-                    .setNegativeButton(label("取消"), null).setPositiveButton(label("替换")) { _, _ -> persist() }.show()
-            } else persist()
-        } }
-        dialog.show()
     }
     private fun complete(apply: Boolean) {
         if (apply) syncDraft()

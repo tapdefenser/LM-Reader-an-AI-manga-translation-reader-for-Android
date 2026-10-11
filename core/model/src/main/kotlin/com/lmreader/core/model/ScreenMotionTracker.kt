@@ -109,28 +109,46 @@ object ScreenMotionTracker {
     private fun track(before: List<ScreenGrayFrame>, after: List<ScreenGrayFrame>, point: PixelPoint, initial: PixelPoint): PixelPoint? {
         var dx = initial.x - point.x; var dy = initial.y - point.y
         var tracked = false
-        val values = FloatArray(49); val gx = FloatArray(49); val gy = FloatArray(49)
+        val values = FloatArray(49); val target = FloatArray(49); val gx = FloatArray(49); val gy = FloatArray(49)
         for (level in before.lastIndex downTo 0) {
             val a = before[level]; val b = after[level]; val factor = (1 shl level).toFloat()
             val x = point.x / factor; val y = point.y / factor
             if (!patchValid(a, x, y)) continue
             var qx = x + dx / factor; var qy = y + dy / factor
             var xx = 0f; var xy = 0f; var yy = 0f; var index = 0
+            var mean = 0f; var square = 0f
             for (v in -3..3) for (u in -3..3) {
                 val px = x + u; val py = y + v
                 values[index] = sample(a, px, py)
+                mean += values[index]; square += values[index] * values[index]
                 gx[index] = (sample(a, px + 1, py) - sample(a, px - 1, py)) * .5f
                 gy[index] = (sample(a, px, py + 1) - sample(a, px, py - 1)) * .5f
                 xx += gx[index] * gx[index]; xy += gx[index] * gy[index]; yy += gy[index] * gy[index]; index++
             }
             val determinant = xx * yy - xy * xy
             if (determinant < 1000f) continue
+            mean /= 49
+            val variance = maxOf(0f, square / 49 - mean * mean)
+            fun readTarget(): Pair<Float, Float>? {
+                var sum = 0f; var squared = 0f; var i = 0
+                for (v in -3..3) for (u in -3..3) {
+                    val value = sample(b, qx + u, qy + v)
+                    target[i++] = value; sum += value; squared += value * value
+                }
+                val targetMean = sum / 49
+                val targetVariance = maxOf(0f, squared / 49 - targetMean * targetMean)
+                if (minOf(variance, targetVariance) < 4f) return null
+                val gain = sqrt(variance / targetVariance)
+                return if (gain in .25f..4f) gain to (mean - gain * targetMean) else null
+            }
             var valid = true
             for (iteration in 0 until 10) {
                 if (!patchValid(b, qx, qy)) { valid = false; break }
+                val lighting = readTarget()
+                if (lighting == null) { valid = false; break }
                 var ex = 0f; var ey = 0f; index = 0
                 for (v in -3..3) for (u in -3..3) {
-                    val error = values[index] - sample(b, qx + u, qy + v)
+                    val error = values[index] - (target[index] * lighting.first + lighting.second)
                     ex += gx[index] * error; ey += gy[index] * error; index++
                 }
                 val stepX = (yy * ex - xy * ey) / determinant
@@ -141,8 +159,11 @@ object ScreenMotionTracker {
             }
             if (!valid || !patchValid(b, qx, qy)) continue
             if (level == 0) {
+                val lighting = readTarget() ?: return null
                 var error = 0f; index = 0
-                for (v in -3..3) for (u in -3..3) error += abs(values[index++] - sample(b, qx + u, qy + v))
+                while (index < 49) {
+                    error += abs(values[index] - (target[index] * lighting.first + lighting.second)); index++
+                }
                 if (error / 49 > 18) return null
                 tracked = true
             }
@@ -198,14 +219,14 @@ object ScreenMotionTracker {
         fun grid(points: List<Flow>) = points.map { (it.from.y.toInt() * 8 / before.height).coerceIn(0, 7) * 8 +
             (it.from.x.toInt() * 8 / before.width).coerceIn(0, 7) }.toSet()
         fun confirm(transform: ScreenTransform, points: List<Flow>): Boolean {
-            var error = 0f; var count = 0
+            val samples = ScreenAppearanceSamples()
             for (point in points) for (dy in -2..2 step 2) for (dx in -2..2 step 2) {
                 val x = point.from.x + dx; val y = point.from.y + dy
                 val target = transform.point(PixelPoint(x, y))
                 if (!patchValid(before, x, y, 1) || !patchValid(after, target.x, target.y, 1)) continue
-                error += abs(sample(before, x, y) - sample(after, target.x, target.y)); count++
+                samples.add(sample(before, x, y), sample(after, target.x, target.y))
             }
-            return count >= 36 && error / count < 24
+            return samples.count >= 36 && samples.correlation()?.let { ScreenAppearanceSamples.error(it) < .14f } == true
         }
         fun solve(pool: List<Flow>, moving: Boolean): ScreenTransform? {
             val pointCount = pool.map { it.from }.distinct().size
@@ -240,14 +261,17 @@ object ScreenMotionTracker {
         // independently moving population; otherwise try another estimator.
         if (residual(Flow(PixelPoint(before.width / 2f, before.height / 2f),
                 pose.point(PixelPoint(before.width / 2f, before.height / 2f))), ScreenTransform()) < .65f &&
-            (mobile.size >= 8 || (predictionError(before, after, pose) ?: 100f) > 2.5f)) return null
+            (mobile.size >= 8 || (normalizedPredictionError(before, after, pose) ?: 100f) > 2.5f)) return null
         return ScreenMotionEstimate(pose, fixedAreas(matches, before.width, before.height, pose))
     }
 
     /** Cheap confirmation of an event prediction; null means there is too little visible art. */
     fun predictionError(before: ScreenGrayFrame, after: ScreenGrayFrame, prediction: ScreenTransform): Float? {
         if (before.width != after.width || before.height != after.height) return null
-        var error = 0f; var count = 0
+        return normalizedPredictionError(before.trackingContrast() ?: return null, after.trackingContrast() ?: return null, prediction)
+    }
+    private fun normalizedPredictionError(before: ScreenGrayFrame, after: ScreenGrayFrame, prediction: ScreenTransform): Float? {
+        val samples = ScreenAppearanceSamples()
         for (y in 2 until before.height - 2 step 6) for (x in 2 until before.width - 2 step 6) {
             val i = y * before.width + x
             if (before.valid != null && before.valid[i] == 0.toByte()) continue
@@ -258,9 +282,9 @@ object ScreenMotionTracker {
             val j = p.y.toInt() * after.width + p.x.toInt()
             if (after.valid != null && (after.valid[i] == 0.toByte() || after.valid[j] == 0.toByte() || after.valid[j + 1] == 0.toByte() ||
                 after.valid[j + after.width] == 0.toByte() || after.valid[j + after.width + 1] == 0.toByte())) continue
-            error += abs(before.at(x, y) - sample(after, p.x, p.y)); count++
+            samples.add(before.at(x, y).toFloat(), sample(after, p.x, p.y))
         }
-        return if (count >= 12) error * 100 / (count * 255) else null
+        return samples.correlation()?.let { ScreenAppearanceSamples.error(it) * 100 }
     }
     /** Returns null on scene cuts or ambiguous/repeated texture, instead of guessing a bubble position. */
     fun estimate(before: ScreenGrayFrame, after: ScreenGrayFrame): ScreenTransform? = estimateModels(before, after)?.content
@@ -273,8 +297,8 @@ object ScreenMotionTracker {
         val valid = if (before.valid == null && after.valid == null) null else ByteArray(before.pixels.size) { i ->
             if ((before.valid == null || before.valid[i] != 0.toByte()) && (after.valid == null || after.valid[i] != 0.toByte())) 1 else 0
         }
-        val first = if (valid == null) before else before.copy(valid = valid)
-        val secondFrame = if (valid == null) after else after.copy(valid = valid)
+        val first = before.copy(valid = valid).trackingContrast() ?: return null
+        val secondFrame = after.copy(valid = valid).trackingContrast() ?: return null
         // A moving content prediction and identity are both needed: a toolbar
         // corner must not be initialized at the artwork's predicted position.
         val predicted = flowMatches(first, secondFrame, prediction)
@@ -293,7 +317,7 @@ object ScreenMotionTracker {
                 for (x in r.left.toInt() until r.right.toInt()) mask[y * frame.width + x] = 0
             return frame.copy(valid = mask)
         }
-        return estimateAlignment(withoutFixed(before), withoutFixed(after))?.let { ScreenMotionEstimate(it, stationary) }
+        return estimateAlignment(withoutFixed(first), withoutFixed(secondFrame))?.let { ScreenMotionEstimate(it, stationary) }
     }
 
     private data class AlignmentSamples(val frame: ScreenGrayFrame, val indices: IntArray, val centerX: Float, val centerY: Float)
@@ -309,7 +333,7 @@ object ScreenMotionTracker {
         return AlignmentSamples(frame, points.toIntArray(), sx / maxOf(1, points.size), sy / maxOf(1, points.size))
     }
     private fun alignmentCost(source: AlignmentSamples, after: ScreenGrayFrame, transform: ScreenTransform): Float {
-        var error = 0f; var count = 0
+        val samples = ScreenAppearanceSamples()
         for (i in source.indices) {
             val x = i % source.frame.width; val y = i / source.frame.width
             val qx = x * transform.scale + transform.x; val qy = y * transform.scale + transform.y
@@ -317,10 +341,14 @@ object ScreenMotionTracker {
             val j = qy.toInt() * after.width + qx.toInt()
             if (after.valid != null && (after.valid[j] == 0.toByte() || after.valid[j + 1] == 0.toByte() ||
                 after.valid[j + after.width] == 0.toByte() || after.valid[j + after.width + 1] == 0.toByte())) continue
-            error += abs(source.frame.at(x, y) - sample(after, qx, qy)); count++
+            samples.add(source.frame.at(x, y).toFloat(), sample(after, qx, qy))
         }
-        if (count < maxOf(12, source.indices.size / 3)) return Float.POSITIVE_INFINITY
-        return error / count + (1 - count.toFloat() / source.indices.size) * 6
+        if (samples.count < maxOf(12, source.indices.size / 3)) return Float.POSITIVE_INFINITY
+        val correlation = samples.correlation() ?: return Float.POSITIVE_INFINITY
+        // This is a correlation loss, not an 8-bit pixel error. Thin strokes
+        // change their antialiasing footprint during downsampling/zoom; the old
+        // MAE cutoff would reject even the correctly registered clean texture.
+        return (1 - correlation) + (1 - samples.count.toFloat() / source.indices.size) * .04f
     }
     /** Rare large zooms need registration, not more OCR. Search a tiny pyramid
      * first, then refine only three parameters with cached visible-art samples. */
@@ -328,7 +356,7 @@ object ScreenMotionTracker {
         val (transform, cost) = alignmentFit(before, after) ?: return null
         // Registration already validates hundreds of visible-art samples.
         // A second sparse test can be dominated by a handful of mask edges.
-        return transform.takeIf { cost < 20 }
+        return transform.takeIf { cost < .28f }
     }
     private fun alignmentFit(before: ScreenGrayFrame, after: ScreenGrayFrame): Pair<ScreenTransform, Float>? {
         val a = pyramid(before); val b = pyramid(after)

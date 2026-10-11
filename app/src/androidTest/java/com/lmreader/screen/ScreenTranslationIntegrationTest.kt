@@ -2,6 +2,7 @@ package com.lmreader.screen
 
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.app.UiAutomation
 import android.view.MotionEvent
 import androidx.test.core.app.ActivityScenario
@@ -61,10 +62,12 @@ class ScreenTranslationIntegrationTest {
             delay(100)
         }
     }
-    private suspend fun fixture(video: Boolean = false, fixedControls: Boolean = false) {
-        context.startActivity(Intent().setComponent(ComponentName(instrumentation.context.packageName, ScreenFixtureActivity::class.java.name))
+    private suspend fun fixture(video: Boolean = false, fixedControls: Boolean = false, orientation: Int? = null) {
+        val intent = Intent().setComponent(ComponentName(instrumentation.context.packageName, ScreenFixtureActivity::class.java.name))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra("video", video).putExtra("fixedControls", fixedControls))
+            .putExtra("video", video).putExtra("fixedControls", fixedControls)
+        orientation?.let { intent.putExtra("orientation", it) }
+        context.startActivity(intent)
         waitState { !it.inside }; delay(700)
     }
     private suspend fun consentToRecording(singleApp: Boolean) = withTimeout(25_000) {
@@ -102,37 +105,40 @@ class ScreenTranslationIntegrationTest {
     }
 
     @Test fun singleAppStreamExcludesOurOverlayAndFollowsPanAndZoom() = runBlocking<Unit> {
-        ActivityScenario.launch(MainActivity::class.java).use {
-            fixture() // Leave this target task in Recents before opening the share picker.
-            context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
-            waitState { it.inside }
-            val original = start(ScreenTranslationMode.BROWSE, appStream = true)
-            try {
-                fixture(fixedControls = true)
-                withContext(Dispatchers.Main) { controller.traceMotion = true; controller.motionTrace.clear(); controller.tap() }
-                waitState { it.bubbles > 0 && !it.busy }
-                val diagnostic = withContext(Dispatchers.Main) { controller.motionDiagnostics() }
-                assertTrue(diagnostic, diagnostic.contains("source=单应用录屏流"))
-                val before = withContext(Dispatchers.Main) { controller.bubblePositions() }
-                dragWhileHeld(120f) {
-                    awaitMovement("single-app stream pan while finger is down", before) { old, now -> kotlin.math.abs(now.top - old.top + 120f) < 16f }
-                }
-                val search = before.maxBy { it.value.top }
-                val afterPan = withContext(Dispatchers.Main) { controller.bubblePositions()[search.key] }
-                assertNotNull("Fixed search object must survive the drag", afterPan)
-                assertEquals("Fixed search must not follow content pan", search.value.top, afterPan!!.top, 10f)
-                val beforeZoom = withContext(Dispatchers.Main) { controller.bubblePositions() }
-                context.startActivity(Intent().setComponent(ComponentName(instrumentation.context.packageName, ScreenFixtureActivity::class.java.name))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    .putExtra("scale", 1.25f).putExtra("shift", -180f).putExtra("fixedControls", true))
-                awaitMovement("single-app stream simultaneous pan/zoom", beforeZoom) { old, now ->
-                    kotlin.math.abs(now.width / old.width - 1.25f) < .08f &&
-                        kotlin.math.abs(now.top - ((old.top + 120f) * 1.25f - 180f)) < 25f }
-                val afterZoom = withContext(Dispatchers.Main) { controller.bubblePositions()[search.key] }
-                assertNotNull(afterZoom)
-                assertEquals("Fixed search must retain position during mixed pan/zoom", search.value.top, afterZoom!!.top, 10f)
-                assertEquals("Fixed search must retain size during zoom", search.value.width, afterZoom.width, 10f)
-            } finally { withContext(Dispatchers.Main) { controller.traceMotion = false; controller.stop() }; controller.preferences.update { original } }
+        for (orientation in listOf(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)) {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                fixture(orientation = orientation) // Leave this target task in Recents before opening the share picker.
+                context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                waitState { it.inside }
+                val original = start(ScreenTranslationMode.BROWSE, appStream = true)
+                try {
+                    fixture(fixedControls = true, orientation = orientation)
+                    withContext(Dispatchers.Main) { controller.traceMotion = true; controller.motionTrace.clear(); controller.tap() }
+                    waitState { it.bubbles > 0 && !it.busy }
+                    val diagnostic = withContext(Dispatchers.Main) { controller.motionDiagnostics() }
+                    assertTrue(diagnostic, diagnostic.contains("source=单应用录屏流"))
+                    val before = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                    dragWhileHeld(120f) {
+                        awaitMovement("single-app stream pan while finger is down", before) { old, now -> kotlin.math.abs(now.top - old.top + 120f) < 16f }
+                    }
+                    val search = before.maxBy { it.value.top }
+                    val afterPan = withContext(Dispatchers.Main) { controller.bubblePositions()[search.key] }
+                    assertNotNull("Fixed search object must survive the drag", afterPan)
+                    val searchDiagnostic = withContext(Dispatchers.Main) { controller.objectSimilarityDiagnostics(search.key, search.value) }
+                    assertEquals("Fixed search must not follow content pan: $searchDiagnostic", search.value.top, afterPan!!.top, 10f)
+                    val beforeZoom = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                    context.startActivity(Intent().setComponent(ComponentName(instrumentation.context.packageName, ScreenFixtureActivity::class.java.name))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        .putExtra("scale", 1.25f).putExtra("shift", -180f).putExtra("fixedControls", true))
+                    awaitMovement("single-app stream simultaneous pan/zoom", beforeZoom) { old, now ->
+                        kotlin.math.abs(now.width / old.width - 1.25f) < .08f &&
+                            kotlin.math.abs(now.top - ((old.top + 120f) * 1.25f - 180f)) < 25f }
+                    val afterZoom = withContext(Dispatchers.Main) { controller.bubblePositions()[search.key] }
+                    assertNotNull(afterZoom)
+                    assertEquals("Fixed search must retain position during mixed pan/zoom", search.value.top, afterZoom!!.top, 10f)
+                    assertEquals("Fixed search must retain size during zoom", search.value.width, afterZoom.width, 10f)
+                } finally { withContext(Dispatchers.Main) { controller.traceMotion = false; controller.stop() }; controller.preferences.update { original } }
+            }
         }
     }
     @Test fun nextScreenChapterSegmentsWhileTheFirstApiIsBlocked() = runBlocking<Unit> {
@@ -192,6 +198,49 @@ class ScreenTranslationIntegrationTest {
             workflowId?.let { container.translationWorkflows.delete(it) }
             container.apiProfiles.delete(profileId)
             container.translationQueue.setSchedulingPriority(originalPriority)
+        }
+    }
+    @Test fun singleAppStreamTracksThroughWholeScreenDarkAndColorMasks() = runBlocking<Unit> {
+        for (orientation in listOf(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)) {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                fixture(orientation = orientation)
+                context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                waitState { it.inside }
+                val original = start(ScreenTranslationMode.BROWSE, appStream = true)
+                fun change(scale: Float, shift: Float, opacity: Float, color: Int = android.graphics.Color.BLACK) {
+                    context.startActivity(Intent().setComponent(ComponentName(instrumentation.context.packageName, ScreenFixtureActivity::class.java.name))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        .putExtra("scale", scale).putExtra("shift", shift).putExtra("fixedControls", true)
+                        .putExtra("tintOpacity", opacity).putExtra("tintColor", color))
+                }
+                try {
+                    fixture(fixedControls = true, orientation = orientation)
+                    withContext(Dispatchers.Main) { controller.traceMotion = true; controller.motionTrace.clear(); controller.tap() }
+                    waitState { it.bubbles > 0 && !it.busy }
+                    val before = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                    val search = before.maxBy { it.value.top }
+                    change(1f, 0f, .65f)
+                    delay(1000)
+                    assertEquals("Dimming alone must keep the published identities: ${controller.motionTrace}", before.keys,
+                        withContext(Dispatchers.Main) { controller.bubblePositions().keys })
+                    val blue = android.graphics.Color.rgb(35, 65, 210)
+                    change(1.12f, -140f, .7f, blue)
+                    awaitMovement("pan/zoom while black mask changes to blue", before) { old, now ->
+                        kotlin.math.abs(now.width / old.width - 1.12f) < .06f && kotlin.math.abs(now.top - (old.top * 1.12f - 140f)) < 25f }
+                    val zoomed = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                    assertNotNull("Fixed search survives a tinted zoom", zoomed[search.key])
+                    assertEquals(search.value.top, zoomed.getValue(search.key).top, 10f)
+                    assertEquals(search.value.width, zoomed.getValue(search.key).width, 10f)
+                    change(.92f, 60f, 0f)
+                    awaitMovement("shrink/pan as the blue mask disappears", zoomed) { old, now ->
+                        kotlin.math.abs(now.width / old.width - .92f / 1.12f) < .06f &&
+                            kotlin.math.abs(now.top - ((old.top + 140f) * .92f / 1.12f + 60f)) < 25f }
+                    val restored = withContext(Dispatchers.Main) { controller.bubblePositions()[search.key] }
+                    assertNotNull(restored)
+                    assertEquals(search.value.top, restored!!.top, 10f)
+                    assertEquals(search.value.width, restored.width, 10f)
+                } finally { withContext(Dispatchers.Main) { controller.traceMotion = false; controller.stop() }; controller.preferences.update { original } }
+            }
         }
     }
     @Test fun manualScreenCapturePublishesRealTextAndClearsAfterScroll() = runBlocking<Unit> {

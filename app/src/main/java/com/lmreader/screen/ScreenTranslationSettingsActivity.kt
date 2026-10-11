@@ -12,6 +12,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -21,6 +23,12 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -37,6 +45,7 @@ import com.lmreader.ui.theme.LmReaderTheme
 import com.lmreader.ui.translation.*
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import kotlin.math.roundToInt
 
 class ScreenTranslationSettingsActivity : ComponentActivity() {
     private val container by lazy { AppContainer.from(this) }
@@ -114,8 +123,14 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
     val t = config.translation
     if (showRegions) {
         val selectedMode = ScreenTranslationMode.valueOf(regionMode)
-        ScreenRegionsDialog(config, selectedMode, regionDraft, regionToken, changeDraft = { regionDraft = it },
-            apply = { selection -> update { it.withRegionSelection(selectedMode, selection) }; showRegions = false }, dismiss = { showRegions = false })
+        ScreenRegionsDialog(config, controller.preferences, selectedMode, regionDraft, regionToken, changeDraft = { regionDraft = it },
+            apply = { selection -> controller.preferences.update { settings ->
+                val applied = settings.withRegionSelection(selectedMode, selection)
+                // Mode selections are copies. Only an existing library preset
+                // is edited; applying a deleted copy must not resurrect it.
+                if (settings.regionPresets.any { it.name == selection.name }) applied.copy(regionPresets =
+                    settings.regionPresets.map { if (it.name == selection.name) selection else it }) else applied
+            }; showRegions = false }, dismiss = { showRegions = false })
     }
     val workflow = workflows.firstOrNull { it.id == (t.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
     val local = workflow?.program?.uses(WorkflowKind.TRANSLATE) != false
@@ -161,6 +176,13 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { ScreenTranslationMode.entries.forEach { mode ->
                 FilterChip(config.mode == mode, { update { it.copy(mode = mode) } }, label = { Text(when (mode) { ScreenTranslationMode.MANUAL -> "手动截图"; ScreenTranslationMode.BROWSE -> "浏览"; ScreenTranslationMode.VIDEO -> "视频" }) })
             } }
+            if (config.mode != ScreenTranslationMode.MANUAL) {
+                OutlinedButton(onClick = {
+                    regionMode = config.mode.name; regionToken = java.util.UUID.randomUUID().toString()
+                    regionDraft = ScreenTranslationPreferences.encodeRegions(config.regionSelection()).toString(); showRegions = true
+                }, modifier = Modifier.testTag("screen-region-select")) { Text("屏幕区域选定") }
+                Text("浏览与视频独立保存翻译区；每个方案同时保存竖屏和横屏区域。", style = MaterialTheme.typography.bodySmall)
+            }
             Text(when (config.mode) {
                 ScreenTranslationMode.MANUAL -> "点一下应用外悬浮球，截图并翻译；翻译时按钮变暗，屏幕移动后清除遮罩。"
                 ScreenTranslationMode.BROWSE -> "点一下应用外悬浮球开启连续翻译，再点一下停止。根据画面跟随平移和缩放，只识别新露出的区域。"
@@ -218,13 +240,6 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             ScreenSlider("机翻资源预算", machine.memoryMegabytes.toFloat(), 128f..4096f, "MB") { value -> coroutine.launch { container.machineTranslationPreferences.update { it.copy(memoryMegabytes = value.toInt()) } } }
             Text("自动并行数结合 CPU、可用内存和中转路线模型大小计算。资源预算是估算值；单条路线过大时仍允许一个任务运行。", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider(); Text("响应与区域", style = MaterialTheme.typography.titleMedium)
-            if (config.mode != ScreenTranslationMode.MANUAL) {
-                OutlinedButton(onClick = {
-                    regionMode = config.mode.name; regionToken = java.util.UUID.randomUUID().toString()
-                    regionDraft = ScreenTranslationPreferences.encodeRegions(config.regionSelection()).toString(); showRegions = true
-                }, modifier = Modifier.testTag("screen-region-select")) { Text("屏幕区域选定") }
-                Text("浏览与视频独立保存翻译区；每个方案同时保存竖屏和横屏区域。", style = MaterialTheme.typography.bodySmall)
-            }
             ScreenSlider("屏幕检测间隔", config.sampleIntervalMillis.toFloat(), 100f..2000f, "ms") { value -> update { it.copy(sampleIntervalMillis = value.toInt()) } }
             if (config.mode == ScreenTranslationMode.BROWSE) {
                 ScreenChoice("跟踪算法", if (config.trackingAlgorithm == ScreenTrackingAlgorithm.GLOBAL) "整屏" else "整屏＋逐气泡", listOf(
@@ -253,11 +268,21 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
     }
 }
 
-@Composable private fun ScreenRegionsDialog(config: ScreenTranslationSettings, mode: ScreenTranslationMode,
+@Composable private fun ScreenRegionsDialog(config: ScreenTranslationSettings, preferences: ScreenTranslationPreferences, mode: ScreenTranslationMode,
     encoded: String, token: String, changeDraft: (String) -> Unit,
-    apply: (ScreenRegionSelection) -> Unit, dismiss: () -> Unit) {
+    apply: suspend (ScreenRegionSelection) -> Unit, dismiss: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val draft = remember(encoded) { ScreenTranslationPreferences.decodeRegions(JSONObject(encoded)) }
+    var showNew by rememberSaveable { mutableStateOf(false) }
+    var newName by rememberSaveable { mutableStateOf("") }
+    var nameError by rememberSaveable { mutableStateOf("") }
+    var changing by remember { mutableStateOf(false) }
+    var actionError by rememberSaveable { mutableStateOf("") }
+    val scroll = rememberScrollState()
+    val windowHeight = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() }
+    val contentHeight = (windowHeight - 252.dp).coerceAtLeast(80.dp)
+    val scrollColor = MaterialTheme.colorScheme.onSurfaceVariant
     fun edit(landscape: Boolean) {
         val activity = generateSequence(context) { (it as? android.content.ContextWrapper)?.baseContext }
             .filterIsInstance<android.app.Activity>().firstOrNull()
@@ -266,20 +291,109 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             .putExtra("regions", encoded).putExtra("landscape", landscape).putExtra("token", token).putExtra("mode", mode.name)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
-    AlertDialog(onDismissRequest = dismiss, title = { Text("屏幕区域选定") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("浏览与视频独立保存翻译区；每个方案同时保存竖屏和横屏区域。")
-            ScreenChoice("加载方案", draft.name, listOf("" to "全屏（无区域）") + config.regionPresets.map { it.name to it.name }) { name ->
-                val selected = config.regionPresets.firstOrNull { it.name == name } ?: ScreenRegionSelection()
-                changeDraft(ScreenTranslationPreferences.encodeRegions(selected).toString())
+    AlertDialog(onDismissRequest = { if (!changing) dismiss() }, title = { Text("屏幕区域选定") }, text = {
+        Box(Modifier.fillMaxWidth().heightIn(max = contentHeight)) {
+            Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = 14.dp).testTag("screen-region-scroll"),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("浏览与视频独立保存翻译区；每个方案同时保存竖屏和横屏区域。")
+                ScreenChoice("加载方案", draft.name.ifBlank { "全屏（无区域）" }, listOf("" to "全屏（无区域）") + config.regionPresets.map { it.name to it.name }) { name ->
+                    val selected = config.regionPresets.firstOrNull { it.name == name } ?: ScreenRegionSelection()
+                    changeDraft(ScreenTranslationPreferences.encodeRegions(selected).toString())
+                }
+                OutlinedButton(onClick = { edit(false) }, enabled = !changing, modifier = Modifier.testTag("screen-region-portrait")) { Text("编辑竖屏区域") }
+                OutlinedButton(onClick = { edit(true) }, enabled = !changing, modifier = Modifier.testTag("screen-region-landscape")) { Text("编辑横屏区域") }
+                Text("竖屏 ${draft.portrait.size}/8 · 横屏 ${draft.landscape.size}/8")
+                Text("没有矩形框时翻译全屏")
+                Text("点击“应用区域”会保存当前方案，并仅应用到本模式。", style = MaterialTheme.typography.bodySmall)
+                Text("删除方案不会更改已经应用的翻译区。", style = MaterialTheme.typography.bodySmall)
+                if (actionError.isNotEmpty()) Text(actionError, color = MaterialTheme.colorScheme.error)
             }
-            OutlinedButton(onClick = { edit(false) }, modifier = Modifier.testTag("screen-region-portrait")) { Text("编辑竖屏区域") }
-            OutlinedButton(onClick = { edit(true) }, modifier = Modifier.testTag("screen-region-landscape")) { Text("编辑横屏区域") }
-            Text("竖屏 ${draft.portrait.size}/8 · 横屏 ${draft.landscape.size}/8")
-            Text("没有矩形框时翻译全屏")
+            // Keep a visible, draggable scrollbar on small landscape viewports.
+            Box(Modifier.matchParentSize()) {
+                Canvas(Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(12.dp).testTag("screen-region-scrollbar")
+                    .pointerInput(scroll) {
+                        detectVerticalDragGestures { change, amount ->
+                            if (scroll.maxValue > 0) {
+                                change.consume()
+                                val height = size.height.toFloat()
+                                val thumb = maxOf(24.dp.toPx(), height * height / (height + scroll.maxValue)).coerceAtMost(height)
+                                scope.launch { scroll.scrollTo((scroll.value + amount * scroll.maxValue / maxOf(1f, height - thumb)).roundToInt()) }
+                            }
+                        }
+                    }) {
+                    if (scroll.maxValue > 0) {
+                        val width = 4.dp.toPx(); val x = (size.width - width) / 2
+                        val thumb = maxOf(24.dp.toPx(), size.height * size.height / (size.height + scroll.maxValue)).coerceAtMost(size.height)
+                        val top = (size.height - thumb) * scroll.value / scroll.maxValue
+                        drawRoundRect(scrollColor.copy(alpha = .15f), Offset(x, 0f), Size(width, size.height))
+                        drawRoundRect(scrollColor.copy(alpha = .7f), Offset(x, top), Size(width, thumb))
+                    }
+                }
+            }
         }
-    }, confirmButton = { TextButton(onClick = { apply(draft) }) { Text("应用区域") } },
-        dismissButton = { TextButton(onClick = dismiss) { Text("取消") } })
+    }, confirmButton = {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Column(horizontalAlignment = Alignment.Start) {
+                TextButton(onClick = { newName = ""; nameError = ""; showNew = true }, enabled = !changing,
+                    modifier = Modifier.testTag("screen-region-new")) { Text("新建") }
+                TextButton(onClick = {
+                    changing = true; actionError = ""
+                    scope.launch {
+                        try {
+                            preferences.update { it.copy(regionPresets = it.regionPresets.filterNot { preset -> preset.name == draft.name }) }
+                            changeDraft(ScreenTranslationPreferences.encodeRegions(ScreenRegionSelection()).toString())
+                        } catch (failure: Exception) {
+                            if (failure is kotlinx.coroutines.CancellationException) throw failure
+                            actionError = "方案更新失败，请重试"
+                        } finally { changing = false }
+                    }
+                }, enabled = !changing && config.regionPresets.any { it.name == draft.name },
+                    modifier = Modifier.testTag("screen-region-delete")) { Text("删除当前方案") }
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                TextButton(onClick = {
+                    changing = true; actionError = ""
+                    scope.launch {
+                        try { apply(draft) }
+                        catch (failure: Exception) {
+                            if (failure is kotlinx.coroutines.CancellationException) throw failure
+                            actionError = "方案更新失败，请重试"
+                        } finally { changing = false }
+                    }
+                }, enabled = !changing) { Text("应用区域") }
+                TextButton(onClick = dismiss, enabled = !changing) { Text("取消") }
+            }
+        }
+    })
+    if (showNew) AlertDialog(onDismissRequest = { if (!changing) showNew = false }, title = { Text("新建方案") }, text = {
+        OutlinedTextField(newName, { newName = it.take(80); nameError = "" }, singleLine = true,
+            label = { Text("方案名称") }, isError = nameError.isNotEmpty(),
+            supportingText = { if (nameError.isNotEmpty()) Text(nameError) }, modifier = Modifier.testTag("screen-region-new-name"))
+    }, confirmButton = {
+        TextButton(onClick = {
+            val name = newName.trim()
+            if (name.isEmpty()) { nameError = "请输入方案名称"; return@TextButton }
+            changing = true
+            scope.launch {
+                try {
+                    var created = false
+                    val preset = ScreenRegionSelection(name)
+                    preferences.update { settings ->
+                        if (settings.regionPresets.any { it.name == name }) settings else {
+                            created = true; settings.copy(regionPresets = settings.regionPresets + preset)
+                        }
+                    }
+                    if (created) {
+                        changeDraft(ScreenTranslationPreferences.encodeRegions(preset).toString()); showNew = false
+                    } else nameError = "同名方案已存在"
+                } catch (failure: Exception) {
+                    if (failure is kotlinx.coroutines.CancellationException) throw failure
+                    nameError = "方案更新失败，请重试"
+                } finally { changing = false }
+            }
+        }, enabled = !changing, modifier = Modifier.testTag("screen-region-create")) { Text("新建") }
+    }, dismissButton = { TextButton(onClick = { showNew = false }, enabled = !changing,
+        modifier = Modifier.testTag("screen-region-create-cancel")) { Text("取消") } })
 }
 
 @Composable private fun ScreenChoice(title: String, selected: String, items: List<Pair<String, String>>, choose: (String) -> Unit) {

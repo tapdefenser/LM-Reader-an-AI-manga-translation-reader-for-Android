@@ -1,13 +1,12 @@
 package com.lmreader.screen
 
-import android.app.UiAutomation
-import android.os.Bundle
+import android.content.pm.ActivityInfo
+import android.content.Intent
 import android.view.View
 import android.view.ViewGroup
-import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
 import androidx.test.runner.lifecycle.Stage
@@ -23,10 +22,12 @@ import org.junit.Assert.*
 /** Exercises the actual modal -> separate editor task -> modal round trip. */
 @androidx.test.filters.SdkSuppress(minSdkVersion = 34)
 class ScreenRegionSettingsTest {
-    @get:Rule val compose = createAndroidComposeRule<ScreenTranslationSettingsActivity>()
+    // The product returns from a separate editor task and may recreate this
+    // activity. Own its lifecycle directly rather than pinning ActivityScenario
+    // to the original dialog instance.
+    @get:Rule val compose = createEmptyComposeRule()
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val container get() = AppContainer.from(instrumentation.targetContext)
-    private val automation get() = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
     private lateinit var original: ScreenTranslationSettings
     private fun label(text: String): String {
         val context = instrumentation.targetContext
@@ -40,12 +41,28 @@ class ScreenRegionSettingsTest {
         container.startupReady.await()
         original = container.screenTranslation.preferences.current()
         container.screenTranslation.stopAndAwait()
-        container.screenTranslation.preferences.update { original.copy(mode = ScreenTranslationMode.BROWSE,
+        val prepared = original.copy(mode = ScreenTranslationMode.BROWSE,
             browseRegions = ScreenRegionSelection(landscape = listOf(ScreenNormalizedRegion(.2f, .3f, .8f, .9f))),
             videoRegions = ScreenRegionSelection("video-fixture", portrait = listOf(ScreenNormalizedRegion(.1f, .6f, .9f, .95f))),
-            regionPresets = emptyList()) }
+            regionPresets = emptyList())
+        container.screenTranslation.preferences.update { prepared }
+        container.screenTranslation.preferences.settings.first { it == prepared }
+        instrumentation.targetContext.startActivity(Intent(instrumentation.targetContext, ScreenTranslationSettingsActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("screen-region-select").fetchSemanticsNodes().isNotEmpty() }
     }
-    @After fun restore() = runBlocking<Unit> { container.screenTranslation.preferences.update { original } }
+    @After fun restore() = runBlocking<Unit> {
+        container.screenTranslation.preferences.update { original }
+        container.screenTranslation.preferences.settings.first { it == original }
+        // Editor returns may create a replacement settings instance in another
+        // task. Finish all of this fixture's instances, including the paused
+        // original, before the next test launches its own settings task.
+        instrumentation.runOnMainSync {
+            Stage.entries.filter { it != Stage.DESTROYED }.flatMap {
+                ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(it).toList()
+            }.filter { it is ScreenTranslationSettingsActivity || it is ScreenRegionEditorActivity }.distinct().forEach { it.finish() }
+        }
+    }
 
     private fun button(root: View, text: String): Button? {
         if (root is Button && root.text.toString() == text) return root
@@ -67,27 +84,13 @@ class ScreenRegionSettingsTest {
             }
         }
     }
-    private fun find(node: AccessibilityNodeInfo?, test: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-        if (node == null) return null
-        if (test(node)) return node
-        for (i in 0 until node.childCount) find(node.getChild(i), test)?.let { return it }
-        return null
-    }
-    private fun nativeNode(description: String, test: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo = runBlocking {
-        try { withTimeout(5000) {
-            while (true) {
-                find(automation.rootInActiveWindow, test)?.let { return@withTimeout it }
-                delay(50)
-            }
-            @Suppress("UNREACHABLE_CODE") error("node not found")
-        } } catch (failure: TimeoutCancellationException) {
-            fun tree(node: AccessibilityNodeInfo?): String {
-                if (node == null) return "no active window"
-                return "${node.className}: ${node.text} editable=${node.isEditable} clickable=${node.isClickable}\n" +
-                    (0 until node.childCount).joinToString("") { tree(node.getChild(it)) }
-            }
-            throw AssertionError("Missing $description:\n${tree(automation.rootInActiveWindow)}", failure)
+    private fun recreateSettings(orientation: Int? = null) {
+        instrumentation.runOnMainSync {
+            val activity = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                .filterIsInstance<ScreenTranslationSettingsActivity>().single()
+            if (orientation == null) activity.recreate() else activity.requestedOrientation = orientation
         }
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("screen-region-portrait").fetchSemanticsNodes().isNotEmpty() }
     }
 
     @Test fun savedPresetReturnsToTheDialogAndCanBeLoadedIntoEachModeIndependently() {
@@ -95,34 +98,39 @@ class ScreenRegionSettingsTest {
         val originalVideo = preferences.settings.value.videoRegions
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("screen-region-select").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithTag("screen-region-select").performScrollTo().performClick()
+        val name = "screen-region-ui-fixture"
+        compose.onNodeWithTag("screen-region-new").performClick()
+        compose.onNodeWithTag("screen-region-new-name").performTextInput(name)
+        compose.onNodeWithTag("screen-region-create").performClick()
+        compose.waitUntil(5000) { preferences.settings.value.regionPresets.any { it.name == name } }
+        assertEquals(ScreenRegionSelection(name), preferences.settings.value.regionPresets.single())
         compose.onNodeWithTag("screen-region-portrait").performClick()
         editorAction("＋ 添加区域")
-        editorAction("保存当前方案")
-        val name = "screen-region-ui-fixture"
-        assertTrue(nativeNode("preset name field") { it.isEditable }.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,
-            Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, name) }))
-        val saveText = label("保存")
-        assertTrue(nativeNode("save button ($saveText)") { it.text?.toString()?.equals(saveText, ignoreCase = true) == true && it.isClickable }
-            .performAction(AccessibilityNodeInfo.ACTION_CLICK))
-        val preset = runBlocking { withTimeout(5000) { preferences.settings.first { settings -> settings.regionPresets.any { it.name == name } }.regionPresets.single() } }
-        assertEquals(1, preset.portrait.size); assertEquals(1, preset.landscape.size)
+        instrumentation.runOnMainSync {
+            val editor = ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
+                .filterIsInstance<ScreenRegionEditorActivity>().single()
+            assertNull("Saving is managed by the regions dialog", button(editor.window.decorView, UiTextTranslations.translate(editor, "保存当前方案")))
+        }
+        editorAction("完成区域编辑")
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("screen-region-portrait").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("screen-region-landscape").performScrollTo().performClick()
+        editorAction("＋ 添加区域")
         editorAction("完成区域编辑")
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("screen-region-portrait").fetchSemanticsNodes().isNotEmpty() }
         // A background dialog can be destroyed during the editor's orientation
         // change. Exercise the returned instance rather than the original rule instance.
-        instrumentation.runOnMainSync {
-            ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
-                .filterIsInstance<ScreenTranslationSettingsActivity>().single().recreate()
-        }
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("screen-region-portrait").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithTag("screen-region-portrait").assertIsDisplayed()
+        recreateSettings()
+        compose.onNodeWithTag("screen-region-portrait").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(label("应用区域")).performClick()
-        compose.waitUntil(5000) { preferences.settings.value.browseRegions == preset }
+        compose.waitUntil(5000) { preferences.settings.value.browseRegions.name == name && preferences.settings.value.browseRegions.portrait.size == 1 }
+        val preset = preferences.settings.value.regionPresets.single()
+        assertEquals(1, preset.portrait.size); assertEquals(1, preset.landscape.size)
+        assertEquals(preset, preferences.settings.value.browseRegions)
         assertEquals(originalVideo, preferences.settings.value.videoRegions)
 
         runBlocking { preferences.update { it.copy(mode = ScreenTranslationMode.VIDEO) } }
         compose.onNodeWithTag("screen-region-select").performScrollTo().performClick()
-        compose.onNodeWithTag("screen-choice:加载方案").performClick()
+        compose.onNodeWithTag("screen-choice:加载方案").performScrollTo().performClick()
         compose.onNodeWithText(name).performClick()
         assertEquals("Loading a preset only changes the dialog draft", originalVideo, preferences.settings.value.videoRegions)
         compose.onNodeWithText(label("应用区域")).performClick()
@@ -130,17 +138,63 @@ class ScreenRegionSettingsTest {
         assertEquals(preset, preferences.settings.value.browseRegions)
 
         compose.onNodeWithTag("screen-region-select").performScrollTo().performClick()
-        compose.onNodeWithTag("screen-choice:加载方案").performClick()
+        compose.onNodeWithTag("screen-choice:加载方案").performScrollTo().performClick()
         compose.onNodeWithText(label("全屏（无区域）")).performClick()
-        instrumentation.runOnMainSync {
-            ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(Stage.RESUMED)
-                .filterIsInstance<ScreenTranslationSettingsActivity>().single().recreate()
-        }
-        compose.onNodeWithText(label("竖屏 0/8 · 横屏 0/8")).assertIsDisplayed()
+        recreateSettings()
+        compose.onNodeWithText(label("竖屏 0/8 · 横屏 0/8")).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(label("取消")).performClick()
         assertEquals(preset, preferences.settings.value.videoRegions)
         runBlocking { preferences.update { it.withRegionSelection(ScreenTranslationMode.VIDEO, ScreenRegionSelection()) } }
         assertEquals(preset, preferences.settings.value.browseRegions)
         assertEquals(listOf(preset), preferences.settings.value.regionPresets)
+    }
+
+    @Test fun newValidatesNamesAndDeletingAPresetDoesNotChangeAppliedModeCopies() {
+        val preferences = container.screenTranslation.preferences
+        val preset = preferences.settings.value.videoRegions
+        runBlocking {
+            preferences.update { it.copy(browseRegions = preset, regionPresets = listOf(preset)) }
+            preferences.settings.first { it.browseRegions == preset && it.regionPresets == listOf(preset) }
+        }
+        compose.onNodeWithTag("screen-region-select").performScrollTo().performClick()
+        compose.onNodeWithTag("screen-region-new").performClick()
+        compose.onNodeWithTag("screen-region-create").performClick()
+        compose.onNodeWithText(label("请输入方案名称")).assertIsDisplayed()
+        compose.onNodeWithTag("screen-region-new-name").performTextInput("  ${preset.name}  ")
+        compose.onNodeWithTag("screen-region-create").performClick()
+        compose.waitUntil(5000) { compose.onAllNodesWithText(label("同名方案已存在")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText(label("同名方案已存在")).assertIsDisplayed()
+        assertEquals(listOf(preset), preferences.settings.value.regionPresets)
+        compose.onNodeWithTag("screen-region-create-cancel").performClick()
+        compose.onNodeWithTag("screen-region-delete").performClick()
+        compose.waitUntil(5000) { preferences.settings.value.regionPresets.isEmpty() }
+        assertEquals(preset, preferences.settings.value.browseRegions)
+        assertEquals(preset, preferences.settings.value.videoRegions)
+        compose.onNodeWithText(label("取消")).performClick()
+        // The still-applied geometry is a copy of a now deleted preset.
+        compose.onNodeWithTag("screen-region-select").performScrollTo().performClick()
+        compose.onNodeWithTag("screen-region-delete").assertIsNotEnabled()
+        compose.onNodeWithText(label("应用区域")).performClick()
+        compose.waitForIdle()
+        assertTrue(preferences.settings.value.regionPresets.isEmpty())
+        assertEquals(preset, preferences.settings.value.videoRegions)
+    }
+
+    @Test fun landscapeDialogScrollsToBothEditorsAndKeepsActionsVisible() {
+        compose.onNodeWithTag("screen-region-select").performScrollTo()
+        val selectBounds = compose.onNodeWithTag("screen-region-select").fetchSemanticsNode().boundsInRoot
+        val modeBounds = compose.onNodeWithText(label("浏览"), substring = false).fetchSemanticsNode().boundsInRoot
+        assertTrue("Region selection directly follows the mode choices", selectBounds.top >= modeBounds.bottom && selectBounds.top - modeBounds.bottom < 80)
+        compose.onNodeWithTag("screen-region-select").performClick()
+        recreateSettings(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE)
+        compose.waitUntil(10_000) { instrumentation.targetContext.resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE }
+        compose.onNodeWithTag("screen-region-scrollbar").assertIsDisplayed()
+        compose.onNodeWithTag("screen-region-portrait").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("screen-region-landscape").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(label("竖屏 0/8 · 横屏 1/8")).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("screen-region-new").assertIsDisplayed()
+        compose.onNodeWithTag("screen-region-delete").assertIsDisplayed()
+        compose.onNodeWithText(label("应用区域")).assertIsDisplayed()
+        compose.onNodeWithText(label("取消")).assertIsDisplayed().performClick()
     }
 }
