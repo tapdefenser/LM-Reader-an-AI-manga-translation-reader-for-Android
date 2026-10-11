@@ -6,6 +6,11 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TranslationChoicesTest {
+    @Test fun platformLanguageChoicesIgnoreUndefinedTagsAndKeepValidLanguages() {
+        val choices = translationLanguageChoices(listOf("und", "", "en", "zh-Hans", "bad/tag", "ja", "en", "fil"))
+        assertEquals(listOf("en", "zh-Hans", "ja", "fil", "zh-Hant"), choices.map { it.tag })
+    }
+
     @Test fun downloadedLanguagesAreStablyPinnedWithoutChangingSelection() {
         val all=listOf(LocalTranslationLanguage.KOREAN,LocalTranslationLanguage.JAPANESE,LocalTranslationLanguage.ENGLISH,
             LocalTranslationLanguage.CHINESE_SIMPLIFIED)

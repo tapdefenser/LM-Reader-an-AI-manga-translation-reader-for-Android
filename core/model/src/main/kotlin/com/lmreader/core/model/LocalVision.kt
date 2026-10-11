@@ -13,7 +13,7 @@ data class PixelRect(val left: Float, val top: Float, val right: Float, val bott
 enum class RegionKind { BUBBLE, FREE_TEXT }
 /** Manga translation options choose which text to extract; old settings retain both kinds. */
 enum class SegTextScope(val label: String) {
-    BUBBLES("气泡"), FREE_TEXT("游离文字"), ALL("气泡+游离文字");
+    BUBBLES("气泡"), FREE_TEXT("仅游离文字"), ALL("气泡+游离文字");
     fun includes(kind: RegionKind) = this == ALL || (this == BUBBLES) == (kind == RegionKind.BUBBLE)
     companion object {
         fun fromValue(value: String?) = if (value == null) ALL else entries.firstOrNull { it.name == value }

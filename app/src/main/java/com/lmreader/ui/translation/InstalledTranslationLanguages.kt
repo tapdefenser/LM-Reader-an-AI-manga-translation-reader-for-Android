@@ -4,6 +4,11 @@ import com.lmreader.core.model.LocalTranslationLanguage
 import com.lmreader.core.translation.TranslationModelCatalog
 import java.util.Locale
 
+/** Platform lists can include undefined or malformed tags on some Android versions. */
+fun translationLanguageChoices(tags: Iterable<String>): List<LocalTranslationLanguage> =
+    (tags.mapNotNull { runCatching { LocalTranslationLanguage.fromTag(it) }.getOrNull() } +
+        listOf(LocalTranslationLanguage.CHINESE_SIMPLIFIED, LocalTranslationLanguage.CHINESE_TRADITIONAL)).distinct()
+
 fun TranslationModelCatalog.availableTargets(source: LocalTranslationLanguage): List<LocalTranslationLanguage> =
     languages.filter { it != source && runCatching { route(source, it) }.isSuccess }
 

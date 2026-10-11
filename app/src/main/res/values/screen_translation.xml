@@ -1,0 +1,21 @@
+<resources>
+    <plurals name="screen_translation_pipeline_count">
+        <item quantity="one">Screen pipeline: %1$d chapter (1 page)</item>
+        <item quantity="other">Screen pipeline: %1$d chapters (1 page each)</item>
+    </plurals>
+    <string name="screen_translation_start">▷ Start screen translation</string>
+    <string name="screen_translation_stop">□ Stop screen translation</string>
+    <string name="screen_translation_prepare_engine">Start translation engine</string>
+    <string name="screen_translation_stop_engine">Stop translation engine</string>
+    <string name="screen_translation_engine_loading">Loading translation engine, please wait</string>
+    <string name="screen_translation_engine_loaded">Translation engine resources loaded</string>
+    <string name="screen_translation_engine_unloading">Unloading translation engine</string>
+    <string name="screen_translation_engine_unloaded">Translation engine resources unloaded</string>
+    <string name="screen_translation_engine_unload_failed">Could not unload translation engine</string>
+    <string name="screen_translation_accessibility_required">Enable LM-Reader screen translation assistance for browse and video modes</string>
+    <string name="screen_translation_accessibility_settings_unavailable">Could not open accessibility settings on this device</string>
+    <string name="screen_translation_button">Translate screen</string>
+    <string name="screen_translation_notification_title">Screen translation resources</string>
+    <string name="screen_translation_accessibility_label">LM-Reader screen translation assistant</string>
+    <string name="screen_translation_accessibility_description">Captures clean app images and detects window changes. Required for browse and video modes. Touch gestures keep working normally.</string>
+</resources>

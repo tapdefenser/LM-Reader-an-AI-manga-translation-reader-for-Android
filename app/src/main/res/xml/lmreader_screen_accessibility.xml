@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/screen_translation_accessibility_description"
+    android:accessibilityEventTypes="typeViewScrolled|typeWindowsChanged|typeWindowStateChanged|typeViewClicked|typeViewLongClicked|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:isAccessibilityTool="false"
+    android:notificationTimeout="0"
+    android:settingsActivity="com.lmreader.screen.ScreenTranslationSettingsActivity" />

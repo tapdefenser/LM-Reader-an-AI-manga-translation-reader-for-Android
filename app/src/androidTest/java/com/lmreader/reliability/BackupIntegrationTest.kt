@@ -56,6 +56,10 @@ class BackupIntegrationTest {
             40, 60, emptyList(), emptyList(), 10, BubbleRenderSettings(opacityPercent = 77))
         container.apiProfiles.save(ApiProfile("profile", ApiProfileKind.LLM, url = "https://example.com/v1", apiKey = "secret-do-not-export", model = "test"))
         container.generalPreferences.setTheme(com.lmreader.core.storage.settings.AppThemeMode.DARK)
+        val screenOptions = ScreenTranslationSettings(mode = ScreenTranslationMode.VIDEO, cacheMegabytes = 256,
+            vision = VisionExecutionSettings(2, 3, false, OcrBackend.CPU), videoTopPercent = 70)
+        container.screenTranslation.preferences.update { screenOptions }
+        container.machineTranslationPreferences.update { MachineTranslationResources(2, 768) }
         val backup = File(app.root, "backup.zip")
         container.backups.create(Uri.fromFile(backup))
         val extracted = File(app.root, "extracted"); backup.inputStream().use { BackupArchive.read(it, extracted) }
@@ -63,6 +67,8 @@ class BackupIntegrationTest {
         container.database.openHelper.writableDatabase.execSQL("DELETE FROM shelf_entries")
         container.database.openHelper.writableDatabase.execSQL("UPDATE reading_progress SET pageOrdinal = 1")
         store.delete(saved.pageId)
+        container.screenTranslation.preferences.update { ScreenTranslationSettings() }
+        container.machineTranslationPreferences.update { MachineTranslationResources() }
         container.backups.restore(Uri.fromFile(backup))
         assertEquals(0L, container.shelfRepository.categoryIdOf("m"))
         container.database.openHelper.writableDatabase.query("SELECT pageOrdinal FROM reading_progress WHERE mangaId='m'").use { assertTrue(it.moveToFirst()); assertEquals(9, it.getInt(0)) }
@@ -70,6 +76,9 @@ class BackupIntegrationTest {
         assertEquals(saved.revision, store.load(saved.pageId, saved.sourceSha256)?.revision)
         assertEquals("", container.apiProfiles.profiles.first().single().apiKey)
         assertEquals(com.lmreader.core.storage.settings.AppThemeMode.DARK, container.generalPreferences.theme.value)
+        assertEquals(com.lmreader.core.storage.settings.ScreenTranslationPreferences.encode(screenOptions),
+            com.lmreader.core.storage.settings.ScreenTranslationPreferences.encode(container.screenTranslation.preferences.current()))
+        assertEquals(MachineTranslationResources(2, 768), withTimeout(3000) { container.machineTranslationPreferences.settings.first { it.concurrency == 2 } })
         assertTrue(container.translationQueue.paused.value); assertTrue(container.exportQueue.paused.value)
         assertFalse(File(app.noBackupFilesDir, "restore-pending").exists())
     }

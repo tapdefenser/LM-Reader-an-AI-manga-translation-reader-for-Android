@@ -15,7 +15,7 @@ import org.junit.Assert.*
 
 class HomeTaskChromeTest {
     @get:Rule val compose=createAndroidComposeRule<ComponentActivity>()
-    @Test fun ballDragsAndShowsOnlyScreenSettingsPlaceholderOnHome() {
+    @Test fun ballDragsAndOpensAnUpwardMenuOnlyOnHome() {
         val container=AppContainer.from(ApplicationProvider.getApplicationContext())
         val enabled=mutableStateOf(true)
         compose.setContent { MaterialTheme { HomeTaskChrome(container,enabled.value,{}) { Box(it) } } }
@@ -26,9 +26,9 @@ class HomeTaskChromeTest {
         assertTrue(after.left<before.left);assertTrue(after.top<before.top)
         ball.performClick()
         val settings=compose.activity.getString(R.string.screen_translation_settings)
-        compose.onNodeWithText(settings).assertIsDisplayed().performClick()
-        compose.onNodeWithText(compose.activity.getString(R.string.screen_translation_placeholder)).assertIsDisplayed()
-        compose.onNodeWithText(compose.activity.getString(R.string.local_mt_close)).performClick()
+        val item = compose.onNodeWithText(settings).assertIsDisplayed()
+        compose.onNodeWithText(compose.activity.getString(R.string.screen_translation_start)).assertIsDisplayed()
+        assertTrue(item.fetchSemanticsNode().positionInWindow.y < ball.fetchSemanticsNode().positionInWindow.y)
         compose.runOnIdle { enabled.value=false }
         ball.assertDoesNotExist()
     }

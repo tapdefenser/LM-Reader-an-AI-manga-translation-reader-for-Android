@@ -47,6 +47,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         val container = AppContainer.from(this)
+        container.screenTranslation.setVisible(this, true)
         container.taskService.setVisible(true)
         container.translationQueue.start()
         container.exportQueue.start()
@@ -54,6 +55,7 @@ class MainActivity : ComponentActivity() {
         container.appUpdates.onAppLaunch()
     }
     override fun onStop() {
+        AppContainer.from(this).screenTranslation.setVisible(this, false)
         AppContainer.from(this).taskService.setVisible(false)
         AppContainer.from(this).appUpdates.onAppBackground(isChangingConfigurations)
         super.onStop()

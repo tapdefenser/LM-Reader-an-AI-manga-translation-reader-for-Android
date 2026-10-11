@@ -35,6 +35,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
     fun releasePreprocessing(pageId: String) = vision.preprocessingCache.releasePage(pageId)
     suspend fun segment(pageSource: PageSource, page: ReaderPage, segThreshold: Float,
         textDetectionThreshold: Float = .35f,
+        scope: SegTextScope = SegTextScope.ALL,
         progress: (PageTranslationProgress) -> Unit = {}): SegmentedPage {
         var returned: SegmentedPage? = null
         try { return withContext(Dispatchers.IO) {
@@ -45,7 +46,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
             progress(PageTranslationProgress(PageTranslationStage.READING))
             val hash = copySource(pageSource, page, input)
             val decoded = decodePageAnalysisImage(context, input).also { image = it }
-            val seg = vision.segment(page.pageId, decoded, segThreshold, textDetectionThreshold, sourceSha256 = hash) {
+            val seg = vision.segment(page.pageId, decoded, segThreshold, textDetectionThreshold, sourceSha256 = hash, scope = scope) {
                 progress(PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total))
             }
             ensureActive()
@@ -106,7 +107,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
         progress: (PageTranslationProgress) -> Unit = {}): ReaderPageTranslation {
         retainPreprocessing(page.pageId)
         try {
-            val recognized = recognize(segment(pageSource, page, segThreshold, textDetectionThreshold, progress), source, segTextScope, progress = progress)
+            val recognized = recognize(segment(pageSource, page, segThreshold, textDetectionThreshold, segTextScope, progress), source, segTextScope, progress = progress)
             return pageWriteMutex.withLock { translateRecognized(recognized, source, target, render, progress) }
         } finally { releasePreprocessing(page.pageId) }
     }

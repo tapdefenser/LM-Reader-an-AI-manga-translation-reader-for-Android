@@ -76,4 +76,20 @@ class LocalTranslationIntegrationTest {
         val result=run(LocalTranslationLanguage.ENGLISH,input).items.single().translatedText
         assertTrue(result,result.contains("兔"));assertTrue(result,result.contains("蓝"))
     }
+    @Test fun twoIndependentNativeDecodersOverlapAndKeepTheirOwnResults() = runBlocking<Unit> {
+        val concurrent = BergamotTextTranslator({ catalog }, installer, { MachineTranslationResources(2, 1024) }, { 4L * 1024 * 1_048_576 })
+        assertEquals(2, concurrent.parallelism(LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED))
+        concurrent.prepare("concurrency-fixture", setOf(LocalTranslationLanguage.ENGLISH to LocalTranslationLanguage.CHINESE_SIMPLIFIED))
+        try {
+            BergamotNative.maximumConcurrency(true)
+            val result = coroutineScope { (1..2).map { number -> async(Dispatchers.Default) {
+                concurrent.translate(LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED,
+                    listOf(LocalTranslationText("request-$number", (if (number == 1) "The rabbit is blue. " else "The weather is nice. ").repeat(60))))
+            } }.awaitAll() }
+            assertTrue("Native inference must overlap, not merely coroutine startup", BergamotNative.maximumConcurrency() >= 2)
+            assertEquals(listOf("request-1", "request-2"), result.map { it.items.single().id })
+            assertTrue(result[0].items.single().translatedText.contains("兔"))
+            assertTrue(result[1].items.single().translatedText.contains("天气"))
+        } finally { concurrent.unpin("concurrency-fixture"); concurrent.releaseModels() }
+    }
 }

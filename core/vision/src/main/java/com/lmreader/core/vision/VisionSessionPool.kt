@@ -10,7 +10,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /** Seg and OCR own separate pools; no stage holds another stage's lock. */
-class LocalVisionEngine(context: Context, private val settings: () -> VisionExecutionSettings = { VisionExecutionSettings() }) {
+class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-preprocessing",
+    private val settings: () -> VisionExecutionSettings = { VisionExecutionSettings() }) {
     private val context = context.applicationContext
     private val messages = MutableStateFlow<List<String>>(emptyList())
     val accelerationMessages = messages.asStateFlow()
@@ -22,7 +23,7 @@ class LocalVisionEngine(context: Context, private val settings: () -> VisionExec
     val activeSeg = segPool.activeTasks
     val activeOcr = ocrPool.activeTasks
     @Volatile private var preprocessingCacheLimit = 128L * 1_048_576
-    val preprocessingCache = VisionPreprocessingCache(java.io.File(this.context.filesDir, "vision-preprocessing")) { preprocessingCacheLimit }
+    val preprocessingCache = VisionPreprocessingCache(java.io.File(this.context.filesDir, cacheNamespace)) { preprocessingCacheLimit }
     suspend fun setPreprocessingCacheLimit(bytes: Long) { preprocessingCacheLimit = bytes; preprocessingCache.trim() }
     val segConcurrency get() = concurrency(settings().segConcurrency, true)
     val ocrConcurrency get() = concurrency(settings().ocrConcurrency, false)
@@ -37,15 +38,16 @@ class LocalVisionEngine(context: Context, private val settings: () -> VisionExec
         return minOf((cores / 2).coerceAtLeast(1), memorySlots.coerceAtLeast(1), heapSlots.coerceAtLeast(1), if (seg) 2 else 4)
     }
     suspend fun segment(imageId: String, image: Bitmap, threshold: Float = .35f,
-        textDetectionThreshold: Float = .35f, sourceSha256: String? = null,
+        textDetectionThreshold: Float = .35f, sourceSha256: String? = null, scope: SegTextScope = SegTextScope.ALL,
         progress: (VisionProgress) -> Unit = {}): SegResult {
         if (sourceSha256 != null) return withContext(Dispatchers.IO) {
-            preprocessingCache.segment(imageId, sourceSha256, image.width, image.height, threshold, textDetectionThreshold) {
-                segment(imageId, image, threshold, textDetectionThreshold, progress = progress)
+            preprocessingCache.segment(imageId, sourceSha256, image.width, image.height, threshold, textDetectionThreshold, scope) {
+                segment(imageId, image, threshold, textDetectionThreshold, scope = scope, progress = progress)
             }
         }
         val started = System.nanoTime()
-        val seg = segPool.use(segConcurrency, settings()) { it.segment(imageId, image, threshold, progress) }
+        val seg = if (scope == SegTextScope.FREE_TEXT) SegResult(imageId, image.width, image.height, emptyList(), 0, "DET")
+            else segPool.use(segConcurrency, settings()) { it.segment(imageId, image, threshold, progress) }
         // Detection is a SEG function but consumes the shared OCR concurrency and backend.
         // Release the segmentation slot before taking an OCR slot so stages never hold both.
         val lines = ocrPool.use(ocrConcurrency, settings()) { it.detectSegTextLines(seg, image, textDetectionThreshold, progress) }
@@ -62,9 +64,31 @@ class LocalVisionEngine(context: Context, private val settings: () -> VisionExec
         }
     }
     suspend fun releaseModels() { segPool.release(); ocrPool.release() }
-    suspend fun retainModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>) {
+    suspend fun prepare(needSeg: Boolean, languages: Set<LocalOcrLanguage>, needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
+        val sample = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.WHITE) }
+        suspend fun warm(pool: VisionSessionPool, limit: Int, action: suspend (LocalVisionSession) -> Unit) {
+            val completed = java.util.concurrent.atomic.AtomicInteger(0)
+            val ready = CompletableDeferred<Unit>()
+            coroutineScope {
+                List(limit) { async { pool.use(limit, settings()) { session ->
+                    action(session)
+                    if (completed.incrementAndGet() == limit) ready.complete(Unit)
+                    ready.await()
+                } } }.awaitAll()
+            }
+        }
+        try {
+            if (needSeg) warm(segPool, segConcurrency) { it.segment("warmup", sample) }
+            if (needTextDetection || languages.isNotEmpty()) warm(ocrPool, ocrConcurrency) { session ->
+                session.detectTextLines("warmup", sample)
+                for (language in languages) session.recognize("warmup", sample, language, null,
+                    listOf(DetectedTextLine(PixelRect(0f, 0f, 64f, 64f), 1f)))
+            }
+        } finally { sample.recycle() }
+    }
+    suspend fun retainModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>, needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
         segPool.retain(if (needSeg) segConcurrency else 0, needSeg, false, emptySet())
-        val needDetection = needSeg || languages.isNotEmpty()
+        val needDetection = needTextDetection || languages.isNotEmpty()
         ocrPool.retain(if (needDetection) ocrConcurrency else 0, false, needDetection, languages)
     }
 }

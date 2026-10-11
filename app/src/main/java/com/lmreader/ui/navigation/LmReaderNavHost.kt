@@ -1,5 +1,7 @@
 package com.lmreader.ui.navigation
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalNavigationDrawer
@@ -158,7 +160,7 @@ fun LmReaderNavHost(
     }
     LaunchedEffect(requestedQueue, destination) {
         if (requestedQueue != null) {
-            navController.navigate(if (requestedQueue == "export") Routes.EXPORT_QUEUE else Routes.TRANSLATION_QUEUE) { launchSingleTop = true }
+            navController.navigate(when (requestedQueue) { "export" -> Routes.EXPORT_QUEUE; "offline" -> Routes.SETTINGS_API_LOCAL; else -> Routes.TRANSLATION_QUEUE }) { launchSingleTop = true }
             onQueueOpened()
         }
     }
@@ -202,7 +204,18 @@ fun LmReaderNavHost(
         Surface(modifier = Modifier.fillMaxSize()) {
             HomeTaskChrome(container, entry?.destination?.route in setOf(Routes.LIBRARY, Routes.BOOKSHELF),
                 onOpenQueue = { navController.navigateSingleTop(Routes.TRANSLATION_QUEUE) }) { modifier ->
-            NavHost(navController = navController, startDestination = destination, modifier = modifier) {
+            NavHost(
+                navController = navController,
+                startDestination = destination,
+                modifier = modifier,
+                enterTransition = { EnterTransition.None },
+                exitTransition = { ExitTransition.None },
+                popEnterTransition = { EnterTransition.None },
+                popExitTransition = { ExitTransition.None },
+                predictivePopEnterTransition = { _ -> EnterTransition.None },
+                predictivePopExitTransition = { _ -> ExitTransition.None },
+                sizeTransform = null,
+            ) {
                 composable(Routes.API_LOGS) { ApiLogScreen(container, onBack = { navController.popBackStack() }) }
                 composable(
                     route = Routes.READER,

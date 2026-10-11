@@ -24,12 +24,14 @@ class VisionPreprocessingCacheTest {
         cache.recognize("p","hash",LocalOcrLanguage.ENGLISH,region,seg.regions,seg.textLines) { ocr }
         cache.releasePage("p")
         assertTrue(cache.bytes.value>1)
+        assertEquals(cache.bytes.value, cache.protectedBytes.value)
         cache=VisionPreprocessingCache(root) { 1 }
         val hit=cache.segment("p","hash",100,200,.35f,.35f) { error("SEG should be reused") }
         assertEquals(seg.regions,hit.regions);assertEquals(seg.textLines,hit.textLines)
         val text=cache.recognize("p","hash",LocalOcrLanguage.ENGLISH,region,seg.regions,seg.textLines) { error("OCR should be reused") }
         assertEquals(ocr.lines,text.lines);assertEquals(2,cache.hits.value)
         cache.commitPage("p");assertTrue(cache.bytes.value<=1)
+        assertEquals(0L, cache.protectedBytes.value)
     }
     @Test fun concurrentIdenticalInferenceIsDeduplicatedAndChangedInputsInvalidateIt() = runBlocking {
         val cache=VisionPreprocessingCache(root) { 1_000_000 }
@@ -41,6 +43,14 @@ class VisionPreprocessingCacheTest {
         cache.segment("p","hash",100,200,.4f,.35f) { calls.incrementAndGet();seg }
         cache.segment("p","new-hash",100,200,.4f,.35f) { calls.incrementAndGet();seg }
         assertEquals(3,calls.get())
+    }
+    @Test fun detectionOnlyAndBubbleSegNeverShareASegmentationCacheEntry() = runBlocking {
+        val cache = VisionPreprocessingCache(root) { 1_000_000 }
+        cache.segment("p", "hash", 100, 200, .35f, .35f, SegTextScope.ALL) { seg }
+        val detection = seg.copy(backend = "DET", regions = listOf(region))
+        assertEquals("DET", cache.segment("p", "hash", 100, 200, .35f, .35f, SegTextScope.FREE_TEXT) { detection }.backend)
+        assertEquals("fixture", cache.segment("p", "hash", 100, 200, .35f, .35f, SegTextScope.ALL) { error("lost full SEG") }.backend)
+        assertEquals("DET", cache.segment("p", "hash", 100, 200, .35f, .35f, SegTextScope.FREE_TEXT) { error("lost DET") }.backend)
     }
     @Test fun trimmingAnotherParallelPageNeverDropsAnUnwrittenPendingOwnersPin() = runBlocking {
         val cache=VisionPreprocessingCache(root) { 1 }

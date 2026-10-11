@@ -59,6 +59,7 @@ class AppBackupManager(private val container: AppContainer) {
             container.translationQueue.pauseAndAwait()
             container.exportQueue.pauseAndAwait()
             container.scanCoordinator.cancelAll().join()
+            container.screenTranslation.stopAndAwait()
             container.localPageTranslator.pageWriteMutex.withLock {
                 check(!journal.exists()) { "上次恢复尚未完成，请先重新打开应用恢复本机数据" }
                 val rollback = scratch()

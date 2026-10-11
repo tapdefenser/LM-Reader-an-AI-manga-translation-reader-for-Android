@@ -1,0 +1,20 @@
+<resources>
+    <plurals name="screen_translation_pipeline_count">
+        <item quantity="other">屏幕流水：%1$d 章（每章 1 页）</item>
+    </plurals>
+    <string name="screen_translation_start">▷ 启动屏幕翻译</string>
+    <string name="screen_translation_stop">□ 停止屏幕翻译</string>
+    <string name="screen_translation_prepare_engine">启动翻译引擎</string>
+    <string name="screen_translation_stop_engine">停止翻译引擎</string>
+    <string name="screen_translation_engine_loading">正在加载翻译引擎，请稍后</string>
+    <string name="screen_translation_engine_loaded">翻译引擎资源已加载</string>
+    <string name="screen_translation_engine_unloading">正在卸载翻译引擎</string>
+    <string name="screen_translation_engine_unloaded">翻译引擎资源已卸载</string>
+    <string name="screen_translation_engine_unload_failed">翻译引擎卸载失败</string>
+    <string name="screen_translation_accessibility_required">浏览和视频模式需要开启 LM-Reader 屏幕翻译辅助</string>
+    <string name="screen_translation_accessibility_settings_unavailable">此设备无法打开无障碍设置</string>
+    <string name="screen_translation_button">翻译屏幕</string>
+    <string name="screen_translation_notification_title">屏幕翻译资源</string>
+    <string name="screen_translation_accessibility_label">LM-Reader 屏幕翻译辅助</string>
+    <string name="screen_translation_accessibility_description">获取干净应用画面并检测窗口变化。浏览和视频模式需要开启；正常触摸操作继续传递给原应用。</string>
+</resources>

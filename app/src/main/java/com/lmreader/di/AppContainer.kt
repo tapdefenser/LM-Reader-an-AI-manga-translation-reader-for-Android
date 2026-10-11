@@ -89,7 +89,12 @@ class AppContainer(val application: Application) {
         translationCatalog, java.io.File(application.noBackupFilesDir,"translation-catalogs")) }
     val translationModels by lazy { com.lmreader.core.translation.TranslationModelManager(
         application, translationCatalogs, translationInstaller, translationSources, translationCatalog) }
-    val localTranslator by lazy { com.lmreader.core.translation.BergamotTextTranslator({translationModels.installedCatalog()}, translationInstaller) }
+    val machineTranslationPreferences by lazy { com.lmreader.core.storage.settings.MachineTranslationPreferences(application) }
+    val localTranslator by lazy { com.lmreader.core.translation.BergamotTextTranslator({translationModels.installedCatalog()}, translationInstaller,
+        { machineTranslationPreferences.settings.value }, {
+            val info = android.app.ActivityManager.MemoryInfo()
+            application.getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(info); info.availMem
+        }) }
     val loadedTranslationResources by lazy {
         kotlinx.coroutines.flow.combine(localVision.loadedResources, localTranslator.loadedResources) { vision, translation -> vision + translation }
             .stateIn(backgroundScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
@@ -101,6 +106,7 @@ class AppContainer(val application: Application) {
         java.io.File(application.filesDir, "translation-queue-order.json")) }
     val translationCachePreferences by lazy { com.lmreader.core.storage.settings.TranslationCachePreferences(application) }
     val translationQueue by lazy { com.lmreader.ui.queue.TranslationQueueCoordinator(this) }
+    val screenTranslation by lazy { com.lmreader.screen.ScreenTranslationController(this) }
     val exportSettings by lazy { com.lmreader.ui.queue.ExportSettingsStore(application) }
     val exportQueue by lazy { com.lmreader.ui.queue.ExportQueueCoordinator(this) }
     val taskService by lazy { com.lmreader.tasks.TaskServiceController(this) }

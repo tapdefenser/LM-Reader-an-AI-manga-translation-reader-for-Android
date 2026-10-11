@@ -43,7 +43,7 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
     val catalog = remember(installed) { TranslationModelCatalog.fromPacks(installed.values.toList()) }
     val workflow = workflows.firstOrNull { it.id == (state.settings.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
     val usesLocal = workflow?.program?.uses(WorkflowKind.TRANSLATE) != false
-    val apiLanguages = remember { java.util.Locale.getISOLanguages().mapNotNull { runCatching { LocalTranslationLanguage.fromTag(it) }.getOrNull() } + listOf(LocalTranslationLanguage.CHINESE_SIMPLIFIED, LocalTranslationLanguage.CHINESE_TRADITIONAL) }
+    val apiLanguages = remember { translationLanguageChoices(java.util.Locale.getISOLanguages().asIterable()) }
     val sources = remember(catalog, usesLocal, locale) { if(usesLocal) catalog.availableSources() else
         prioritizeInstalledLanguages(apiLanguages.distinct().sortedBy { it.localizedName(locale) }, catalog.availableSources()) }
     val source = matchEngineLanguage(state.settings.sourceLanguage, sources)

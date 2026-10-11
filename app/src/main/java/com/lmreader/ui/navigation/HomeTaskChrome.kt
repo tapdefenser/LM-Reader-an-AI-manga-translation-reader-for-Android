@@ -13,13 +13,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lmreader.R
 import com.lmreader.di.AppContainer
+import com.lmreader.screen.ScreenBallPosition
 import com.lmreader.tasks.TaskQueue
 import kotlin.math.roundToInt
 
@@ -28,6 +37,8 @@ import kotlin.math.roundToInt
 internal fun HomeTaskChrome(container: AppContainer, enabled: Boolean, onOpenQueue: () -> Unit,
     content: @Composable (Modifier) -> Unit) {
     val notices by container.taskNotifications.notices.collectAsStateWithLifecycle()
+    val screenState by container.screenTranslation.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val step by container.translationQueue.currentStep.collectAsStateWithLifecycle()
     val notice = notices[TaskQueue.TRANSLATION]?.takeIf { enabled && it.working }
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -57,28 +68,49 @@ internal fun HomeTaskChrome(container: AppContainer, enabled: Boolean, onOpenQue
             val rangeY = (with(density) { maxHeight.toPx() } - size * 2).coerceAtLeast(0f)
             var x by rememberSaveable { mutableFloatStateOf(.94f) }
             var y by rememberSaveable { mutableFloatStateOf(.76f) }
+            var tucked by rememberSaveable { mutableStateOf(false) }
             var menu by remember { mutableStateOf(false) }
-            var settings by remember { mutableStateOf(false) }
-            Box(Modifier.offset { IntOffset((x * rangeX).roundToInt(), (y * rangeY).roundToInt()) }) {
+            val touchSlop = LocalViewConfiguration.current.touchSlop
+            Box(Modifier.offset { IntOffset(ScreenBallPosition(x, y, tucked).offsetX(rangeX, size, size / 3).roundToInt(), (y * rangeY).roundToInt()) }) {
                 Surface(shape = CircleShape, shadowElevation = 6.dp, color = MaterialTheme.colorScheme.primaryContainer,
                     modifier = Modifier.size(48.dp).testTag("screen-translation-ball")
-                        .pointerInput(rangeX, rangeY) { detectDragGestures(onDragStart = { menu = false }) { change, delta ->
-                            change.consume()
-                            if (rangeX > 0) x = (x + delta.x / rangeX).coerceIn(0f, 1f)
-                            if (rangeY > 0) y = (y + delta.y / rangeY).coerceIn(0f, 1f)
-                        } }.clickable { menu = true }) {
+                        .pointerInput(rangeX, rangeY, touchSlop) {
+                            var start = ScreenBallPosition(x, y, tucked)
+                            var dx = 0f; var dy = 0f
+                            fun move(released: Boolean = false) {
+                                val next = start.drag(dx, dy, rangeX, rangeY, touchSlop, released)
+                                x = next.x; y = next.y; tucked = next.tucked
+                            }
+                            detectDragGestures(onDragStart = { menu = false; start = ScreenBallPosition(x, y, tucked); dx = 0f; dy = 0f },
+                                onDragEnd = { move(released = true) }, onDragCancel = { tucked = false }) { change, delta ->
+                                change.consume(); dx += delta.x; dy += delta.y; move()
+                            }
+                        }.clickable {
+                            if (tucked) { tucked = false; return@clickable }
+                            if (rangeY > 0) y = maxOf(y, (with(density) { 116.dp.toPx() } / rangeY).coerceAtMost(1f))
+                            menu = true
+                        }) {
                     Box(contentAlignment = Alignment.Center) { Icon(Icons.Outlined.Translate,
                         stringResource(R.string.screen_translation_settings)) }
                 }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text(stringResource(R.string.screen_translation_settings)) },
-                        onClick = { menu = false; settings = true })
+                if (menu) Popup(popupPositionProvider = remember { UpwardScreenMenuPosition() },
+                    onDismissRequest = { menu = false }, properties = PopupProperties(focusable = true)) {
+                    Surface(shape = MaterialTheme.shapes.small, shadowElevation = 8.dp) {
+                        Column(Modifier.width(IntrinsicSize.Max)) {
+                            DropdownMenuItem(text = { Text(stringResource(if (screenState.started) R.string.screen_translation_stop else R.string.screen_translation_start)) },
+                                onClick = { menu = false; if (screenState.started) container.screenTranslation.stop() else container.screenTranslation.start(context) })
+                            DropdownMenuItem(text = { Text(stringResource(R.string.screen_translation_settings)) },
+                                onClick = { menu = false; container.screenTranslation.openSettings(context) })
+                        }
+                    }
                 }
             }
-            if (settings) AlertDialog(onDismissRequest = { settings = false },
-                title = { Text(stringResource(R.string.screen_translation_settings)) },
-                text = { Text(stringResource(R.string.screen_translation_placeholder)) },
-                confirmButton = { TextButton(onClick = { settings = false }) { Text(stringResource(R.string.local_mt_close)) } })
         }
     }
+}
+
+internal class UpwardScreenMenuPosition : PopupPositionProvider {
+    override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset =
+        IntOffset((anchorBounds.right - popupContentSize.width).coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0)),
+            (anchorBounds.top - popupContentSize.height - 8).coerceAtLeast(0))
 }

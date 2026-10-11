@@ -57,7 +57,7 @@ internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWo
             for (state in segQueue) {
                 try {
                     val work = state.work
-                    val page = retry(work.retries) { translator.segment(work.source, work.page, work.threshold, work.textDetectionThreshold) { state.progress.value = it } }
+                    val page = retry(work.retries) { translator.segment(work.source, work.page, work.threshold, work.textDetectionThreshold, work.segTextScope) { state.progress.value = it } }
                     state.image.set(page)
                     state.lease!!.resizeForPage(page.image.allocationByteCount.toLong() +
                         page.seg.regions.sumOf { 256L + it.contour.size * 8L } + page.seg.textLines.size * 48L)

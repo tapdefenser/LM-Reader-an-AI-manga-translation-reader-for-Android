@@ -22,6 +22,9 @@ class VisionPreprocessingCache(private val root: File, private val limitBytes: (
     private val pendingPages = mutableSetOf<String>()
     private val mutableBytes = MutableStateFlow(0L)
     val bytes = mutableBytes.asStateFlow()
+    private val entryBytes = mutableMapOf<String, Long>()
+    private val mutableProtectedBytes = MutableStateFlow(0L)
+    val protectedBytes = mutableProtectedBytes.asStateFlow()
     private val mutableHits = MutableStateFlow(0)
     val hits = mutableHits.asStateFlow()
     init { root.mkdirs(); synchronized(diskLock) {
@@ -34,10 +37,11 @@ class VisionPreprocessingCache(private val root: File, private val limitBytes: (
         prune()
     } }
     /** Durable pins survive a failed API or process restart; only publication clears them. */
-    fun markPendingPage(pageId: String) = synchronized(diskLock) { pendingPages += pageId; savePending() }
+    fun markPendingPage(pageId: String) = synchronized(diskLock) { pendingPages += pageId; refreshProtection(); savePending() }
     fun commitPage(pageId: String) = synchronized(diskLock) { pendingPages -= pageId; savePending(); prune() }
     private fun rememberKey(key: String, pageId: String) = synchronized(diskLock) {
         keyPages[key] = pageId
+        if (key in entryBytes) refreshProtection()
         if(pageId in pendingPages) savePending()
     }
     private fun savePending() {
@@ -50,7 +54,7 @@ class VisionPreprocessingCache(private val root: File, private val limitBytes: (
             catch(failure: Throwable) { atomic.failWrite(output); throw failure }
         }
     }
-    fun retainPage(pageId: String) = synchronized(diskLock) { retainedPages[pageId] = (retainedPages[pageId] ?: 0) + 1 }
+    fun retainPage(pageId: String) = synchronized(diskLock) { retainedPages[pageId] = (retainedPages[pageId] ?: 0) + 1; refreshProtection() }
     fun releasePage(pageId: String) = synchronized(diskLock) {
         val count = (retainedPages[pageId] ?: 1) - 1
         if (count <= 0) retainedPages.remove(pageId) else retainedPages[pageId] = count
@@ -58,8 +62,8 @@ class VisionPreprocessingCache(private val root: File, private val limitBytes: (
     }
 
     suspend fun segment(imageId: String, sourceHash: String, width: Int, height: Int, threshold: Float,
-        detectionThreshold: Float, compute: suspend () -> SegResult): SegResult {
-        val key = key("seg", imageId, sourceHash, width, height, threshold, detectionThreshold)
+        detectionThreshold: Float, scope: SegTextScope = SegTextScope.ALL, compute: suspend () -> SegResult): SegResult {
+        val key = key("seg", imageId, sourceHash, width, height, threshold, detectionThreshold, scope)
         rememberKey(key, imageId)
         return stripes[(key.hashCode() and Int.MAX_VALUE) % stripes.size].withLock {
             val cached = read(key)?.let { json -> runCatching {
@@ -135,17 +139,25 @@ class VisionPreprocessingCache(private val root: File, private val limitBytes: (
     }
     private fun prune() {
         val files = root.listFiles().orEmpty().filter { it.name.matches(Regex("[a-f0-9]{64}\\.json")) }.sortedBy { it.lastModified() }
-        var used = files.sumOf { it.length() }
+        entryBytes.clear(); files.forEach { entryBytes[it.nameWithoutExtension] = it.length() }
+        var used = entryBytes.values.sum()
         for (file in files) {
             if (used <= limitBytes().coerceAtLeast(0)) break
             if (keyPages[file.nameWithoutExtension]?.let { retainedPages.containsKey(it) || it in pendingPages } == true) continue
-            val size = file.length(); if (file.delete()) used -= size
+            val size = entryBytes.getValue(file.nameWithoutExtension)
+            if (file.delete()) { used -= size; entryBytes.remove(file.nameWithoutExtension) }
         }
         val existing = root.listFiles().orEmpty().map { it.nameWithoutExtension }.toSet()
         // Another stripe can still be computing a registered key. Its pending
         // ownership must survive this writer's trim before that file exists.
         keyPages.entries.removeAll { (key, page) -> key !in existing && page !in pendingPages && page !in retainedPages }
         mutableBytes.value = used
+        refreshProtection()
+    }
+    private fun refreshProtection() {
+        mutableProtectedBytes.value = entryBytes.entries.sumOf { (key, size) ->
+            if (keyPages[key]?.let { it in pendingPages || it in retainedPages } == true) size else 0L
+        }
     }
     private fun rect(value: PixelRect) = JSONArray(listOf(value.left, value.top, value.right, value.bottom))
     private fun rect(value: JSONArray) = PixelRect(value.getDouble(0).toFloat(), value.getDouble(1).toFloat(), value.getDouble(2).toFloat(), value.getDouble(3).toFloat())

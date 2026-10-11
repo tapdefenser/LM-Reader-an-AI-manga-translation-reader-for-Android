@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -76,6 +79,23 @@
 
         <service android:name=".tasks.QueueTaskService" android:exported="false"
             android:foregroundServiceType="dataSync" android:stopWithTask="false" />
+        <service android:name=".screen.ScreenTranslationService" android:exported="false"
+            android:foregroundServiceType="mediaProjection|specialUse" android:stopWithTask="false">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started screen translation with a visible floating button and ongoing notification; preloads on-device engines and captures application windows using an optional accessibility service." />
+        </service>
+        <service android:name=".screen.ScreenAccessibilityService" android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:label="@string/screen_translation_accessibility_label">
+            <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/lmreader_screen_accessibility" />
+        </service>
+        <activity android:name=".screen.ScreenTranslationSettingsActivity" android:exported="false"
+            android:theme="@style/Theme.LmReader.ScreenTranslationDialog" android:excludeFromRecents="true"
+            android:launchMode="singleTop" />
+        <activity android:name=".screen.ScreenTranslationPermissionActivity" android:exported="false" android:excludeFromRecents="true" />
+        <activity android:name=".screen.ScreenRegionEditorActivity" android:exported="false" android:excludeFromRecents="true"
+            android:theme="@style/Theme.LmReader.ScreenRegionEditor" android:taskAffinity="${applicationId}.screenRegionEditor"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
         <activity
             android:name=".MainActivity"
