@@ -1,5 +1,18 @@
 # Changelog / 更新记录
 
+## v0.1.6 — Continuous browse translation and failure isolation / 浏览连续翻译与失败隔离
+
+- 弹窗遮挡保留底层气泡、只识别实际新增区域、新旧文字按可调间距合并后重 SEG；译文逐泡回填，旧译文保留到替换完成。
+- 独立会话数据库记录待填／已填／已过时区域；旧遮罩不会被迟到结果复活，失败与空结果不删除已发布译文。
+- 单页失败隔离覆盖漫画队列、整漫画预处理与屏幕三种模式；含失败页的章节保留错误与重试入口。
+- 引擎运行时自动应用屏幕设置与工作流修改，只重建变化的资源；录屏流结束后自动回退无障碍窗口截图。
+- Browse retains underlying bubbles through popups, recognizes only newly exposed tiles, re-runs SEG after merging nearby text at an adjustable distance, and backfills translations bubble by bubble.
+- A session database tracks pending, filled and obsolete regions; late results cannot revive old masks, and failures or empty results keep published translations.
+- Per-page failure isolation covers the comic queue, whole-comic preparation and all three screen modes, retaining the error and retry entry for affected chapters.
+- Screen settings and workflow edits apply while the engine runs with only changed resources rebuilt, and capture falls back to accessibility window screenshots when a recording stream ends.
+
+详见 [v0.1.6 中英发行说明 / Bilingual release notes](docs/releases/v0.1.6.md)。
+
 ## v0.1.5 — Translation scheduling and reader editing / 翻译调度与阅读器编辑
 
 - 资源利用／队列顺序优先、分资源限流、完整 SEG／OCR 缓存与通用阻塞检查。

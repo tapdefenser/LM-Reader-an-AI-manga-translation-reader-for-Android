@@ -2,7 +2,7 @@
 
 [简体中文](USAGE.zh-CN.md) · [Project home](../README.en.md)
 
-This guide covers `v0.1.5` and the screen translation feature in the current development build. Installation requires a signed APK; the unsigned candidate cannot be installed directly. Target devices are Android 8.0+ with arm64-v8a or x86_64.
+This guide covers `v0.1.6`, where screen translation ships as a released feature. Installation requires a signed APK; the unsigned candidate cannot be installed directly. Target devices are Android 8.0+ with arm64-v8a or x86_64.
 
 ## Library, reading and language
 
