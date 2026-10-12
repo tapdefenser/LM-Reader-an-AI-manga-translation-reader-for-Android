@@ -94,12 +94,12 @@ class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-prepr
     }
     /** Rebuild only the pool whose backend changed; trim unused models/clones before warming additions. */
     suspend fun reconfigure(needSeg: Boolean, languages: Set<LocalOcrLanguage>,
-        needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
+        needTextDetection: Boolean = needSeg || languages.isNotEmpty(), warm: Boolean = true) {
         val next = settings()
         segPool.configure(next)
         ocrPool.configure(next)
         retainModels(needSeg, languages, needTextDetection)
-        prepare(needSeg, languages, needTextDetection)
+        if (warm) prepare(needSeg, languages, needTextDetection)
     }
     suspend fun retainModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>, needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
         segPool.retain(if (needSeg) segConcurrency else 0, needSeg, false, emptySet())
@@ -108,11 +108,12 @@ class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-prepr
     }
 }
 
-private class VisionSessionPool(private val context: Context, private val name: String, private val report: (String) -> Unit) {
+internal class VisionSessionPool(private val context: Context, private val name: String, private val report: (String) -> Unit) {
     private class Slot {
         val mutex = Mutex()
         var settings: VisionExecutionSettings? = null
         var session: LocalVisionSession? = null
+        var retireWhenIdle = false
         @Volatile var resources: List<LoadedEngineResource> = emptyList()
         @Volatile var inUse = false
     }
@@ -123,7 +124,18 @@ private class VisionSessionPool(private val context: Context, private val name: 
     private val mutableActiveTasks = MutableStateFlow(0)
     val activeTasks = mutableActiveTasks.asStateFlow()
     private val configuration = Mutex()
-    private var retainedSettings: VisionExecutionSettings? = null
+    // Configuration never waits for an occupied slot: warm-up admission also needs this lock.
+    private data class Retention(val limit: Int, val seg: Boolean, val detection: Boolean, val languages: Set<LocalOcrLanguage>)
+    private var retention: Retention? = null
+    private fun compatible(previous: VisionExecutionSettings?, next: VisionExecutionSettings) = previous != null &&
+        if (name == "seg") previous.segGpu == next.segGpu else previous.ocrBackend == next.ocrBackend
+    private suspend fun clear(slot: Slot) {
+        slot.session?.releaseModels(); slot.session = null; slot.settings = null; slot.resources = emptyList(); slot.retireWhenIdle = false
+    }
+    private suspend fun trim(index: Int, slot: Slot, required: Retention) {
+        if (index >= required.limit) clear(slot)
+        else slot.session?.retainModels(required.seg, required.detection, required.languages)
+    }
     private fun publishResources() {
         mutableActiveTasks.update { slots.count { it.inUse } }
         mutableResources.update { slots.flatMapIndexed { index, slot ->
@@ -136,48 +148,56 @@ private class VisionSessionPool(private val context: Context, private val name: 
             val before = revision.value
             val admission = configuration.withLock {
                 slots.take(limit).firstOrNull { it.mutex.tryLock() }?.let { slot ->
-                    slot to (retainedSettings ?: settings.also { retainedSettings = it })
+                    slot to settings
                 }
             }
             if (admission != null) {
                 val (slot, retained) = admission
                 try {
                     slot.inUse = true; publishResources()
+                    if (slot.session != null && !compatible(slot.settings, retained)) clear(slot)
                     val session = slot.session ?: LocalVisionSession(context, retained, report) {
                         slot.resources = it; publishResources()
                     }.also { slot.session = it; slot.settings = retained }
                     return@withContext action(session)
-                } finally { slot.inUse = false; publishResources(); slot.mutex.unlock(); revision.update { it + 1 } }
+                } finally { withContext(NonCancellable) {
+                    try { configuration.withLock {
+                        slot.inUse = false
+                        if (slot.retireWhenIdle) clear(slot)
+                        else retention?.let { trim(slots.indexOf(slot), slot, it) }
+                    } } finally {
+                        slot.inUse = false; publishResources(); slot.mutex.unlock(); revision.update { it + 1 }
+                    }
+                } }
             }
             revision.first { it != before }
         }
         @Suppress("UNREACHABLE_CODE") error("unreachable")
     }
     suspend fun release() = configuration.withLock {
+        retention = null
         for (slot in slots) {
-            slot.mutex.lock()
-            try { slot.session?.releaseModels(); slot.session = null; slot.settings = null }
-            finally { slot.mutex.unlock(); revision.update { it + 1 } }
+            if (!slot.mutex.tryLock()) { slot.retireWhenIdle = true; continue }
+            try { clear(slot) } finally { slot.mutex.unlock() }
         }
-        retainedSettings = null
+        publishResources(); revision.update { it + 1 }
     }
     suspend fun configure(next: VisionExecutionSettings) = configuration.withLock {
-        val previous = retainedSettings
-        val backendChanged = previous != null &&
-            (if (name == "seg") previous.segGpu != next.segGpu else previous.ocrBackend != next.ocrBackend)
-        if (backendChanged) for (slot in slots) slot.mutex.withLock {
-            slot.session?.releaseModels(); slot.session = null; slot.settings = null
+        for (slot in slots) {
+            if (!slot.mutex.tryLock()) continue
+            try { if (slot.session != null && !compatible(slot.settings, next)) clear(slot) }
+            finally { slot.mutex.unlock() }
         }
-        retainedSettings = next
-        revision.update { it + 1 }
+        publishResources(); revision.update { it + 1 }
     }
     suspend fun retain(limit: Int, needSeg: Boolean, needTextDetection: Boolean, languages: Set<LocalOcrLanguage>) = configuration.withLock {
+        val required = Retention(limit, needSeg, needTextDetection, languages.toSet())
+        retention = required
         slots.forEachIndexed { index, slot ->
-            slot.mutex.withLock {
-                if (index >= limit) { slot.session?.releaseModels(); slot.session = null; slot.settings = null }
-                else slot.session?.retainModels(needSeg, needTextDetection, languages)
-            }
+            slot.retireWhenIdle = false
+            if (!slot.mutex.tryLock()) return@forEachIndexed
+            try { trim(index, slot, required) } finally { slot.mutex.unlock() }
         }
-        if (slots.all { it.session == null }) retainedSettings = null
+        publishResources(); revision.update { it + 1 }
     }
 }

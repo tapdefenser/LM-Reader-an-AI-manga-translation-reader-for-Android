@@ -135,6 +135,22 @@ class QueueSchedulingIntegrationTest {
         container.translationQueue.retainScreenTranslationModels(emptySet())
         assertTrue(engine.loadedResources.value.isEmpty())
     }
+    @Test fun currentApiPreparationDoesNotWarmUnrelatedQueuedModels() = runBlocking {
+        val queue = container.translationQueue
+        queue.pauseForPriority()
+        try {
+            val at = System.currentTimeMillis()
+            val snapshot = translationTaskSnapshot(TranslationWorkflow.LOCAL_MACHINE,
+                MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans"), "en", "zh-Hans", "", BubbleRenderSettings())
+            container.database.translationDao().upsertAll(listOf(ChapterTranslationEntity(b1, mangaB, "zh-Hans", "PENDING",
+                "en", false, snapshot, at, null, 0, null, at)))
+            container.localTranslator.releaseModels()
+            queue.prepareMangaResources(emptySet(), needsSeg = false, ocrSources = emptySet(), needTextDetection = true)
+            val loaded = withTimeout(5_000) { container.localVision.loadedResources.first { it.isNotEmpty() } }
+            assertTrue(loaded.all { it.id.endsWith(":det") })
+            assertTrue(container.localTranslator.loadedResources.value.isEmpty())
+        } finally { queue.resumeAfterPriority() }
+    }
 
     @Test fun damagedFirstPageIsSkippedAndRemainingPagesAndNextChapterFinish() = runBlocking {
         verifyDamagedPageIsolation(legacy = false)
@@ -287,12 +303,13 @@ class QueueSchedulingIntegrationTest {
         val engine = container.localTranslator
         container.translationQueue.prepareMangaResources(setOf(japanese))
         engine.translate(japanese.first, japanese.second, listOf(LocalTranslationText("synthetic-ja", "今日はいい天気です。")))
-        assertEquals(2, engine.loadedResources.value.size)
-        val shared = engine.loadedResources.value.single { it.id.startsWith("en-zh-Hans-") }.id
+        assertEquals(2, engine.loadedResources.value.map { it.id.substringBeforeLast(":session:") }.distinct().size)
+        val shared = engine.loadedResources.value.first { it.id.startsWith("en-zh-Hans-") }.id
         container.translationQueue.prepareMangaResources(setOf(korean))
-        assertEquals(listOf(shared), engine.loadedResources.value.map { it.id })
+        assertTrue(engine.loadedResources.value.any { it.id == shared })
+        assertTrue(engine.loadedResources.value.any { it.id.startsWith("ko-en-") })
         engine.translate(korean.first, korean.second, listOf(LocalTranslationText("synthetic-ko", "오늘 날씨가 좋네요.")))
-        assertEquals(2, engine.loadedResources.value.size)
+        assertEquals(2, engine.loadedResources.value.map { it.id.substringBeforeLast(":session:") }.distinct().size)
         assertFalse(engine.loadedResources.value.any { it.id.startsWith("ja-en-") })
         val image = BitmapFactory.decodeFile(pages[0].second.absolutePath)
         try {
@@ -393,17 +410,23 @@ class QueueSchedulingIntegrationTest {
             assertFalse(container.translationQueue.paused.value)
         } finally { server.reply.complete(Unit); server.close() }
     }
-    private suspend fun fullTasks(server: DelayedApiServer, includeNextManga: Boolean = false) {
-        val profile = ApiProfile(apiProfileId, ApiProfileKind.LLM, "Isolated queue test", "http://127.0.0.1:${server.port}/v1", apiKey = "1", model = "fixture", parallelLimit = 2, retryCount = 0)
-        container.apiProfiles.save(profile)
-        val full = TranslationWorkflow.FULL_MANGA_API.copy(id = "fixture", builtIn = false, program = WorkflowReferenceTemplates.fullManga(apiProfileId))
-        val settings = MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans")
-        val snapshot = translationTaskSnapshot(full, settings, "en", "zh-Hans", "", BubbleRenderSettings(), listOf(profile))
+    private suspend fun fullTasks(server: DelayedApiServer, includeNextManga: Boolean = false, afterPublication: Boolean = false) {
+        val snapshot = fullSnapshot(server, afterPublication)
         val at = System.currentTimeMillis()
         val ids = listOf(a1 to mangaA, a2 to mangaA) + if(includeNextManga) listOf(b1 to mangaB) else emptyList()
         container.database.translationDao().upsertAll(ids.map { (chapter, manga) -> ChapterTranslationEntity(chapter, manga, "zh-Hans", "PENDING", "en", false, snapshot, at, null, 0, null, at) })
         container.translationQueue.sortManga(listOf(mangaA, mangaB))
         container.translationQueue.sortChapters(mangaA, listOf(a1, a2))
+    }
+    private suspend fun fullSnapshot(server: DelayedApiServer, afterPublication: Boolean = false): String {
+        val profile = ApiProfile(apiProfileId, ApiProfileKind.LLM, "Isolated queue test", "http://127.0.0.1:${server.port}/v1", apiKey = "1", model = "fixture", parallelLimit = 2, retryCount = 0)
+        container.apiProfiles.save(profile)
+        val original = WorkflowReferenceTemplates.fullManga(apiProfileId)
+        val post = original.allNodes().first { it.kind == WorkflowKind.API }.copy(id = "post-publication-api")
+        val program = if (afterPublication) original.copy(rows = original.rows.map { it.copy(children = it.children + post) }) else original
+        val full = TranslationWorkflow.FULL_MANGA_API.copy(id = "fixture", builtIn = false, program = program)
+        val settings = MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans")
+        return translationTaskSnapshot(full, settings, "en", "zh-Hans", "", BubbleRenderSettings(), listOf(profile))
     }
     @Test fun resourcesPriorityAdvancesOtherApiAndLocalMangaWhileSameApiWaits() = runBlocking {
         val serverA=DelayedApiServer(pageRequests=true)
@@ -520,6 +543,66 @@ class QueueSchedulingIntegrationTest {
             assertEquals(0L, container.translationQueue.cacheBytes.value)
             assertTrue(container.database.translationDao().queueSnapshot().none { it.mangaId == mangaA })
         } finally { server.close() }
+    }
+    @Test fun cancelledApiBatchCanBeReenqueuedWhileItsCleanupIsStillRunning() = runBlocking {
+        verifyCancelledBatchRestart(waitForRelease = false)
+    }
+    @Test fun cancelledApiBatchCanBeReenqueuedAfterItsModelsHaveBeenUnloaded() = runBlocking {
+        verifyCancelledBatchRestart(waitForRelease = true)
+    }
+    @Test fun cancellingDuringEnginePreparationAllowsTheNextApiBatchToStart() = runBlocking {
+        verifyCancelledBatchRestart(waitForRelease = false, duringPreparation = true)
+    }
+    @Test fun completedChapterRowsDoNotCancelTheRemainingWorkflowSteps() = runBlocking {
+        val server = DelayedApiServer()
+        try {
+            fullTasks(server, afterPublication = true)
+            container.translationQueue.resume()
+            awaitRestartRequest(server, "initial API")
+            server.reply.complete(Unit)
+            withTimeout(30_000) { container.translationQueue.awaitCurrentPage() }
+            assertEquals(2, server.calls.get())
+            assertTrue(container.database.translationDao().byChapters(listOf(a1, a2)).all { it.state == "DONE" })
+        } finally { server.close() }
+    }
+    private suspend fun verifyCancelledBatchRestart(waitForRelease: Boolean, duringPreparation: Boolean = false) {
+        val first = DelayedApiServer()
+        val next = DelayedApiServer()
+        val queue = container.translationQueue
+        val dao = container.database.translationDao()
+        try {
+            fullTasks(first); queue.resume()
+            if (duringPreparation) withTimeout(30_000) { queue.activeSeg.first { it > 0 } }
+            else awaitRestartRequest(first, "first API")
+            queue.cancelManga(mangaA).join()
+            if (waitForRelease) {
+                withTimeout(10_000) { queue.awaitCurrentPage(); queue.awaitResourceRelease() }
+                withTimeout(5_000) { queue.loadedResources.first { it.isEmpty() } }
+            }
+            val snapshot = fullSnapshot(next)
+            val request = TranslationRequest("zh-Hans", sourceLanguage = "en", autoDetectSource = false,
+                configSnapshot = snapshot, at = System.currentTimeMillis())
+            assertEquals(2, queue.enqueue(mangaA, listOf(a1, a2), request))
+            awaitRestartRequest(next, "re-enqueued API")
+            withTimeout(5_000) { queue.loadedResources.first { it.isNotEmpty() } }
+            next.reply.complete(Unit)
+            withTimeout(60_000) { dao.observeQueue().map { dao.byChapters(listOf(a1, a2)) }.first { rows ->
+                rows.size == 2 && rows.all { it.state == "DONE" }
+            } }
+            queue.awaitCurrentPage()
+            assertTrue(pages.take(3).all { container.localPageTranslator.artifacts.has(it.first) })
+            assertEquals(0L, queue.cacheBytes.value)
+            assertFalse(queue.paused.value)
+        } finally { first.close(); next.close() }
+    }
+    private suspend fun awaitRestartRequest(server: DelayedApiServer, phase: String) {
+        try { withTimeout(60_000) { server.requested.await() } }
+        catch (failure: TimeoutCancellationException) {
+            val queue = container.translationQueue
+            error("$phase timed out: rows=${queue.items.value.map { it.state to it.failure }} paused=${queue.paused.value} " +
+                "resources=${queue.loadedResources.value.size} SEG=${queue.activeSeg.value} OCR=${queue.activeOcr.value} " +
+                "API=${queue.activeApi.value} leases=${container.taskService.leases.value} service=${container.taskService.failure.value}")
+        }
     }
     /** Local protocol fixture, never sends an image or prompt to a user service. */
     private class DelayedApiServer(private val pageRequests: Boolean = false) {

@@ -51,6 +51,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
     private val priorityActive = MutableStateFlow(false)
     @Volatile private var releasing: Job? = null
     @Volatile private var resourcesOwned = false
+    private var lastStartState = ""
     private val resourceMutex = Mutex()
     private val enqueueMutex = Mutex()
     val loadedResources get() = container.loadedTranslationResources
@@ -102,8 +103,13 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         }
     }
     @Synchronized fun start() {
+        val startState = "paused=${_paused.value} priority=$priority runnable=${_items.value.count(::runnable)} " +
+            "runner=${runner?.isActive}/${runner?.isCompleted} releasing=${releasing?.isActive}/${releasing?.isCompleted} " +
+            "service=${container.taskService.canStart()} resources=$resourcesOwned"
+        if (startState != lastStartState) { lastStartState = startState; android.util.Log.i("TranslationQueue", startState) }
         if (!container.taskService.canStart()) return
-        if (priority || releasing?.isActive == true || runner?.isActive == true) return
+        if (!_paused.value && _items.value.any(::runnable)) releasing?.cancel()
+        if (priority || releasing?.isActive == true || runner?.isCompleted == false) return
         if (_paused.value || _items.value.none { remaining(it) }) {
             if (resourcesOwned) scheduleResourceRelease()
             return
@@ -133,7 +139,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         val active = linkedMapOf<String, Pair<Job, TranslationResourcePlan>>()
         try {
             while (!_paused.value && !priority) {
-                active.entries.removeAll { !it.value.first.isActive }
+                active.entries.removeAll { it.value.first.isCompleted }
                 _activeMangas.value = active.keys.toSet()
                 val tasks = ordered(dao.queueSnapshot()).filter(::runnable).distinctBy { it.mangaId }
                 val candidates = tasks.filterNot { it.mangaId in active }.map { it to translationResourcePlan(it.configSnapshot) }
@@ -185,8 +191,9 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
     }
     @Synchronized private fun scheduleResourceRelease() {
         if (releasing?.isActive == true) return
+        val precedingRunner = runner
         val release = scope.launch(start = CoroutineStart.LAZY) {
-            runner?.join()
+            precedingRunner?.join()
             priorityActive.first { !it }
             resourceMutex.withLock {
                 if (!priority && (_paused.value || dao.queueSnapshot().none { remaining(it) })) {
@@ -201,7 +208,11 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         }
         release.start()
     }
-    @Synchronized fun resume() { container.taskService.allowRetry(); container.queueOrder.setPaused(false); _paused.value = false; start() }
+    @Synchronized fun resume() {
+        container.taskService.allowRetry(); container.queueOrder.setPaused(false); _paused.value = false
+        releasing?.cancel()
+        start()
+    }
     /** Notification resume restores paused items without silently retrying failed chapters. */
     fun resumePaused(): Job {
         val command = globalCommand.incrementAndGet()
@@ -320,6 +331,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         needsSeg: Boolean = true, ocrSources: Set<LocalTranslationLanguage> = routes.map { it.first }.toSet(),
         needTextDetection: Boolean = needsSeg || ocrSources.isNotEmpty()) = resourceMutex.withLock {
         resourcesOwned = true
+        android.util.Log.i("TranslationQueue", "Reconciling engines routes=${routes.size} SEG=$needsSeg OCR=${ocrSources.map { it.tag }}")
         val queued = dao.queueSnapshot().filter(::runnable).mapNotNull { task -> runCatching {
             val json = JSONObject(requireNotNull(task.configSnapshot))
             val program = json.optJSONObject("program")?.let { WorkflowProgramCodec.decode(it.toString()) } ?: WorkflowTemplates.localMachine()
@@ -329,10 +341,15 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         }.getOrNull() }
         val allRoutes = routes + queued.filter { it.first.first.uses(WorkflowKind.TRANSLATE) }.map { it.first.second to it.first.third }
         val allOcr = ocrSources + queued.filter { it.first.first.uses(WorkflowKind.OCR) }.map { it.first.second }
-        container.localVision.retainModels(needsSeg || queued.any { it.first.first.uses(WorkflowKind.SEG) && it.second != SegTextScope.FREE_TEXT },
+        container.localVision.reconfigure(needsSeg || queued.any { it.first.first.uses(WorkflowKind.SEG) && it.second != SegTextScope.FREE_TEXT },
             allOcr.map { com.lmreader.ui.reader.translation.LocalPageTranslator.ocrLanguage(it) }.toSet(),
-            needTextDetection || queued.any { it.first.first.uses(WorkflowKind.SEG) || it.first.first.uses(WorkflowKind.OCR) })
+            needTextDetection || queued.any { it.first.first.uses(WorkflowKind.SEG) || it.first.first.uses(WorkflowKind.OCR) }, warm = false)
+        container.localVision.prepare(needsSeg, ocrSources.map { com.lmreader.ui.reader.translation.LocalPageTranslator.ocrLanguage(it) }.toSet(), needTextDetection)
         container.localTranslator.retainModels(allRoutes)
+        val preparationOwner = "queue-prepare:${java.util.UUID.randomUUID()}"
+        try { container.localTranslator.prepare(preparationOwner, routes) }
+        finally { container.localTranslator.unpin(preparationOwner) }
+        android.util.Log.i("TranslationQueue", "Engines ready")
     }
     private suspend fun runManga(mangaId: String) {
         val task = ordered(dao.queueSnapshot()).firstOrNull { it.mangaId == mangaId && runnable(it) } ?: return
@@ -352,6 +369,23 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         val counts = ConcurrentHashMap<String, AtomicInteger>(); val totals = mutableMapOf<String, Int>(); val failures = ConcurrentHashMap<String, String>()
         val failedPages = ConcurrentHashMap.newKeySet<String>()
         val chapters = mutableListOf<WorkflowChapterInput>()
+        val runJob = currentCoroutineContext().job
+        val lifetime = launch(start = CoroutineStart.UNDISPATCHED) {
+            dao.observeQueue().collect { latest ->
+                val pending = latest.associateBy { it.chapterId }
+                if (tasks.any { task -> pending[task.chapterId]?.let { item ->
+                    item.queuedAt == task.queuedAt && item.configSnapshot == task.configSnapshot &&
+                        item.state in setOf("PENDING", "RUNNING", "PAUSED")
+                } == true }) return@collect
+                val stored = dao.byManga(mangaId).associateBy { it.chapterId }
+                if (tasks.any { task -> stored[task.chapterId]?.let { item ->
+                    item.queuedAt != task.queuedAt || item.configSnapshot != task.configSnapshot || item.state == "CANCELLED"
+                } != false }) {
+                    android.util.Log.i("TranslationQueue", "Cancelled obsolete batch manga=$mangaId")
+                    runJob.cancel(WorkflowPageStopped())
+                }
+            }
+        }
         var host: AndroidWorkflowHost? = null
         var observer: Job? = null
         var runCurrentPage: String? = null
@@ -367,6 +401,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             val manga = container.mangaRepository.getBackfillTarget(mangaId) ?: error("漫画或来源不存在")
             for (task in tasks) {
                 try {
+                    android.util.Log.i("TranslationQueue", "Opening chapter=${task.chapterId}")
                     require(task.sourceLanguage == json.getString("sourceLanguage") && task.targetLanguage == json.getString("targetLanguage")) { "任务语言与快照不一致" }
                     val chapter = manga.chapters.firstOrNull { it.chapterId == task.chapterId } ?: error("章节不存在")
                     val opened = container.pageSourceFactory.open(manga.sourceTreeUri, chapter)
@@ -386,16 +421,10 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                 }
             }
             if (chapters.isEmpty()) return@coroutineScope
-            // Retain the union of resources needed by every queued revision in this manga.
-            val mangaPrograms = ordered(dao.queueSnapshot()).filter { it.mangaId == mangaId && runnable(it) }.mapNotNull {
-                runCatching { val snapshot = JSONObject(it.configSnapshot!!); val p = snapshot.optJSONObject("program")?.let { v -> WorkflowProgramCodec.decode(v.toString()) } ?: WorkflowTemplates.localMachine()
-                    p to ((matchEngineLanguage(it.sourceLanguage, installedLanguages) ?: LocalTranslationLanguage.fromTag(it.sourceLanguage!!)) to
-                        (matchEngineLanguage(it.targetLanguage, installedLanguages) ?: LocalTranslationLanguage.fromTag(it.targetLanguage))) }.getOrNull()
-            }
-            val routes = mangaPrograms.filter { it.first.uses(WorkflowKind.TRANSLATE) }.map { it.second }.toSet()
+            val routes = if (program.uses(WorkflowKind.TRANSLATE)) setOf(source to target) else emptySet()
             routes.forEach { container.translationModels.installedCatalog().route(it.first, it.second) }
             prepareMangaResources(routes, program.uses(WorkflowKind.SEG) && SegTextScope.fromValue(json.optString("segTextScope")) != SegTextScope.FREE_TEXT,
-                mangaPrograms.filter { it.first.uses(WorkflowKind.OCR) }.map { it.second.first }.toSet(), program.uses(WorkflowKind.SEG))
+                if (program.uses(WorkflowKind.OCR)) setOf(source) else emptySet(), program.uses(WorkflowKind.SEG))
             val active = ConcurrentHashMap<String, Job>()
             val activeLock = Mutex()
             val preferredPages = chapters.firstOrNull()?.pages.orEmpty().map { it.pageId }
@@ -594,6 +623,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                 }
             }
             WorkflowRuntime(8, json.optInt("retries", 0).coerceIn(0, 5)).execute(program, runHost)
+            android.util.Log.i("TranslationQueue", "Workflow finished manga=$mangaId")
         } catch (failure: Exception) {
             if (failure is CancellationException) throw failure
             for (task in tasks) {
@@ -603,7 +633,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             }
         } finally {
             withContext(NonCancellable) {
-            observer?.cancelAndJoin(); host?.close(); updateFocus(mangaId, null)
+            lifetime.cancelAndJoin(); observer?.cancelAndJoin(); host?.close(); updateFocus(mangaId, null)
             for (task in tasks) {
                 val latest = dao.byChapter(task.chapterId).firstOrNull()
                 if (latest?.state == "RUNNING" && latest.queuedAt == task.queuedAt && latest.configSnapshot == task.configSnapshot)

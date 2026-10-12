@@ -1,5 +1,16 @@
 # Changelog / 更新记录
 
+## v0.1.7 - Queue restart and engine lifecycle / 队列恢复与引擎生命周期
+
+- 修复取消全部任务后重新入队卡住的问题，包括引擎加载期间的取消；旧任务完成清理后再启动替代任务。
+- 按实际驻留的引擎配置协调资源，只预热当前任务需要的模型；保留兼容及占用中的资源，避免影响屏幕翻译。
+- 正常完成章节后继续执行工作流收尾步骤，不误判成任务取消。
+- Fix queue restarts after cancelling all tasks, including cancellation during engine preparation; replacement work waits for old workers to finish cleanup.
+- Reconcile actual resident engine configurations and warm only the current task's models, preserving compatible and occupied resources used by screen translation.
+- Let post-publication workflow steps finish after chapter rows are completed.
+
+详见 [v0.1.7 中英发行说明 / Bilingual release notes](docs/releases/v0.1.7.md)。
+
 ## v0.1.6 — Continuous browse translation and failure isolation / 浏览连续翻译与失败隔离
 
 - 弹窗遮挡保留底层气泡、只识别实际新增区域、新旧文字按可调间距合并后重 SEG；译文逐泡回填，旧译文保留到替换完成。

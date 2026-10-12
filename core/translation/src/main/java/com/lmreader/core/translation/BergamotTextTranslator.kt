@@ -167,16 +167,19 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
 
     override suspend fun releaseModels() = retainModels(emptySet())
 
-    /** Called after the previous manga's workers have joined; keep shared route packs. */
+    /** Reconcile resident packs without waiting for or unloading occupied shared slots. */
     suspend fun retainModels(routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) = TranslationRuntime.mutex.withLock {
         withContext(TranslationRuntime.dispatcher) {
             val required = routes.flatMap { (source, target) -> catalog().route(source, target) }.map(::signature).toSet() + TranslationRuntime.pins.values.flatten()
-            TranslationRuntime.slots.forEach { slot -> slot.mutex.withLock {
-                slot.keys.filterNot { it.substringBeforeLast(":session:") in required }.toList().forEach { key ->
-                    BergamotNative.unload(key.toByteArray(Charsets.UTF_8)); slot.keys.remove(key)
-                    TranslationRuntime.resources.update { it.filterNot { resource -> resource.id == key } }
-                }
-            } }
+            TranslationRuntime.slots.forEach { slot ->
+                if (!slot.mutex.tryLock()) return@forEach
+                try {
+                    slot.keys.filterNot { it.substringBeforeLast(":session:") in required }.toList().forEach { key ->
+                        BergamotNative.unload(key.toByteArray(Charsets.UTF_8)); slot.keys.remove(key)
+                        TranslationRuntime.resources.update { it.filterNot { resource -> resource.id == key } }
+                    }
+                } finally { slot.mutex.unlock() }
+            }
         }
     }
 
