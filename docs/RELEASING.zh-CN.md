@@ -19,7 +19,7 @@
 
 APK SHA-256 见本版附件 `SHA256SUMS` 与 `release-metadata.json`。
 
-签名证书 SHA-256：`8b1051b89d4e4bf8c423e4f7a2ad19e9ef1ce3cd19041997a75b838b65ecc7`。后续版本继续使用同一密钥，以便覆盖升级。
+签名证书 SHA-256：`8b1051b89d4e4bf8c423e4f7a2ad19e9ef1cfce3cd19041997a75b838b65ecc7`。后续版本继续使用同一密钥，以便覆盖升级。
 
 附件包括 APK、`RELEASE_NOTES.md`、`SHA256SUMS`、`release-metadata.json`、`THIRD_PARTY_NOTICES.md` 和 `LICENSES.zip`。解压声明包后可核对校验清单中的文档与许可证。Metadata 记录真实 APK 签名、证书指纹、源码提交、ABI、Android 原生库对齐及独立的 Hexagon DSP 文件。
 

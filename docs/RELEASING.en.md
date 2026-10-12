@@ -19,7 +19,7 @@ Release date: 2026-10-12. This release provides a signed APK on [GitHub Releases
 
 The APK SHA-256 is recorded in this release's `SHA256SUMS` and `release-metadata.json` assets.
 
-Signer certificate SHA-256: `8b1051b89d4e4bf8c423e4f7a2ad19e9ef1ce3cd19041997a75b838b65ecc7`. Future releases must reuse this key for normal upgrades.
+Signer certificate SHA-256: `8b1051b89d4e4bf8c423e4f7a2ad19e9ef1cfce3cd19041997a75b838b65ecc7`. Future releases must reuse this key for normal upgrades.
 
 Assets include the APK, `RELEASE_NOTES.md`, `SHA256SUMS`, `release-metadata.json`, `THIRD_PARTY_NOTICES.md` and `LICENSES.zip`. Extract the notices archive before checking document/license paths in the checksum list. Metadata records signing, certificate fingerprint, source revision, ABIs, Android library alignment and separate Hexagon DSP files.
 
