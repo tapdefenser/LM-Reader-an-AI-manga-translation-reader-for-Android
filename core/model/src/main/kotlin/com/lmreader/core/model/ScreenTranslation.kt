@@ -24,6 +24,7 @@ data class ScreenTranslationSettings(
     val browseRegions: ScreenRegionSelection = ScreenRegionSelection(),
     val videoRegions: ScreenRegionSelection = ScreenRegionSelection(),
     val regionPresets: List<ScreenRegionSelection> = emptyList(),
+    val browseMergeDistancePixels: Int = 8,
 ) {
     init {
         require(cacheMegabytes in 32..1024 && sampleIntervalMillis in 100..2000)
@@ -33,6 +34,7 @@ data class ScreenTranslationSettings(
         require(changeThresholdPercent in 1..30)
         require(followFramesPerSecond in 5..60)
         require(minimumNewAreaPixels in 2..128)
+        require(browseMergeDistancePixels in 0..128)
     }
     val requiresAccessibility get() = mode != ScreenTranslationMode.MANUAL
     val usesAccessibility get() = requiresAccessibility || preferAccessibility
@@ -81,10 +83,11 @@ class ScreenFrameCadence(private val intervalMillis: Long) {
 class ScreenPublicationOrder {
     private var epoch = Long.MIN_VALUE
     private var last = Long.MIN_VALUE
+    fun allows(resultEpoch: Long, sequence: Long, currentEpoch: Long): Boolean =
+        resultEpoch == currentEpoch && (epoch != currentEpoch || sequence >= last)
     fun accept(resultEpoch: Long, sequence: Long, currentEpoch: Long): Boolean {
-        if (resultEpoch != currentEpoch) return false
+        if (!allows(resultEpoch, sequence, currentEpoch)) return false
         if (epoch != currentEpoch) { epoch = currentEpoch; last = Long.MIN_VALUE }
-        if (sequence < last) return false
         last = sequence
         return true
     }

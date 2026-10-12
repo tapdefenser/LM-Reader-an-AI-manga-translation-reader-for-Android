@@ -293,6 +293,29 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         pageUpdates.emit(pageId)
     }
     fun includePage(chapterId: String, pageId: String) { container.queueOrder.includePage(chapterId, pageId) }
+    /** Screen hot reload must preserve routes belonging to queued manga and an active reader page. */
+    suspend fun retainScreenTranslationModels(routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) = resourceMutex.withLock {
+        if (priorityPage.value != null) return@withLock
+        val queuedRoutes = dao.queueSnapshot().filter(::runnable).flatMap { task -> runCatching {
+            val json = JSONObject(requireNotNull(task.configSnapshot))
+            val program = json.optJSONObject("program")?.let { WorkflowProgramCodec.decode(it.toString()) } ?: WorkflowTemplates.localMachine()
+            val source = LocalTranslationLanguage.fromTag(json.getString("sourceLanguage"))
+            val target = LocalTranslationLanguage.fromTag(json.getString("targetLanguage"))
+            fun language(expression: WorkflowExpression?) = when (expression) {
+                is WorkflowExpression.Text -> LocalTranslationLanguage.fromTag(expression.value)
+                WorkflowSystem.ref(WorkflowSystem.SOURCE) -> source
+                WorkflowSystem.ref(WorkflowSystem.TARGET) -> target
+                else -> null
+            }
+            program.allNodes().filter { it.kind == WorkflowKind.TRANSLATE }.mapNotNull {
+                val from = language(it.inputs["source"]); val to = language(it.inputs["target"])
+                if (from != null && to != null) from to to else null
+            }
+        }.getOrDefault(emptyList()) }.toSet()
+        val catalog = container.translationModels.installedCatalog()
+        val installedQueuedRoutes = queuedRoutes.filter { (source, target) -> runCatching { catalog.route(source, target) }.isSuccess }
+        container.localTranslator.retainModels(routes + installedQueuedRoutes)
+    }
     suspend fun prepareMangaResources(routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>,
         needsSeg: Boolean = true, ocrSources: Set<LocalTranslationLanguage> = routes.map { it.first }.toSet(),
         needTextDetection: Boolean = needsSeg || ocrSources.isNotEmpty()) = resourceMutex.withLock {
@@ -327,6 +350,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         val tasks = ordered(dao.queueSnapshot()).filter { it.mangaId == mangaId && runnable(it) && it.configSnapshot == first.configSnapshot }
         val taskMap = tasks.associateBy { it.chapterId }
         val counts = ConcurrentHashMap<String, AtomicInteger>(); val totals = mutableMapOf<String, Int>(); val failures = ConcurrentHashMap<String, String>()
+        val failedPages = ConcurrentHashMap.newKeySet<String>()
         val chapters = mutableListOf<WorkflowChapterInput>()
         var host: AndroidWorkflowHost? = null
         var observer: Job? = null
@@ -342,17 +366,26 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                 runCatching { BubbleFont.valueOf(json.optString("font")) }.getOrDefault(BubbleFont.SYSTEM), json.optInt("fontScale", 100), json.optBoolean("bold"), json.optInt("freeTextMaskExpansion", 6))
             val manga = container.mangaRepository.getBackfillTarget(mangaId) ?: error("漫画或来源不存在")
             for (task in tasks) {
-                require(task.sourceLanguage == json.getString("sourceLanguage") && task.targetLanguage == json.getString("targetLanguage")) { "任务语言与快照不一致" }
-                val chapter = manga.chapters.firstOrNull { it.chapterId == task.chapterId } ?: error("章节不存在")
-                val opened = container.pageSourceFactory.open(manga.sourceTreeUri, chapter)
-                val pageSource = (opened as? PageSourceOpenResult.Ready)?.source ?: error((opened as PageSourceOpenResult.Unsupported).reason)
-                val pages = pageSource.pages(); require(pages.isNotEmpty()) { "章节没有图片" }
-                if (chapter.pageCount != pages.size) container.mangaRepository.updateChapterPageInfo(task.chapterId, pages.size, null)
-                totals[task.chapterId] = pages.size; counts[task.chapterId] = AtomicInteger()
-                val eligible = pages.filterNot { container.queueOrder.isPageExcluded(task.chapterId, task.queuedAt ?: 0, it.pageId) }
-                if (eligible.isEmpty()) dao.setQueueState(task.chapterId, task.targetLanguage, "CANCELLED", null, 0, now())
-                else chapters += WorkflowChapterInput(task.chapterId, chapter.title, pageSource, eligible)
+                try {
+                    require(task.sourceLanguage == json.getString("sourceLanguage") && task.targetLanguage == json.getString("targetLanguage")) { "任务语言与快照不一致" }
+                    val chapter = manga.chapters.firstOrNull { it.chapterId == task.chapterId } ?: error("章节不存在")
+                    val opened = container.pageSourceFactory.open(manga.sourceTreeUri, chapter)
+                    val pageSource = (opened as? PageSourceOpenResult.Ready)?.source ?: error((opened as PageSourceOpenResult.Unsupported).reason)
+                    val pages = pageSource.pages(); require(pages.isNotEmpty()) { "章节没有图片" }
+                    if (chapter.pageCount != pages.size) container.mangaRepository.updateChapterPageInfo(task.chapterId, pages.size, null)
+                    totals[task.chapterId] = pages.size; counts[task.chapterId] = AtomicInteger()
+                    val eligible = pages.filterNot { container.queueOrder.isPageExcluded(task.chapterId, task.queuedAt ?: 0, it.pageId) }
+                    if (eligible.isEmpty()) dao.setQueueState(task.chapterId, task.targetLanguage, "CANCELLED", null, 0, now())
+                    else chapters += WorkflowChapterInput(task.chapterId, chapter.title, pageSource, eligible)
+                } catch (failure: Exception) {
+                    if (failure is CancellationException) throw failure
+                    val latest = dao.byChapter(task.chapterId).firstOrNull()
+                    if (latest != null && latest.queuedAt == task.queuedAt && latest.configSnapshot == task.configSnapshot && runnable(latest))
+                        dao.setQueueState(task.chapterId, task.targetLanguage, "FAILED", failure.message, latest.translatedCount, now())
+                    android.util.Log.w("TranslationQueue", "Skipping unavailable chapter=${task.chapterId}", failure)
+                }
             }
+            if (chapters.isEmpty()) return@coroutineScope
             // Retain the union of resources needed by every queued revision in this manga.
             val mangaPrograms = ordered(dao.queueSnapshot()).filter { it.mangaId == mangaId && runnable(it) }.mapNotNull {
                 runCatching { val snapshot = JSONObject(it.configSnapshot!!); val p = snapshot.optJSONObject("program")?.let { v -> WorkflowProgramCodec.decode(v.toString()) } ?: WorkflowTemplates.localMachine()
@@ -387,6 +420,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                         (mangaId in allowed) to (stop || pause || high)
                     }.first { it.first || it.second }.let { it.first && !it.second }
                 override suspend fun canPrefetch(chapterId: String, pageId: String): Boolean {
+                    if (pageId in failedPages) return false
                     val task = taskMap[chapterId] ?: return false
                     val latest = dao.byChapter(chapterId).firstOrNull() ?: return false
                     return !stopping.value && !_paused.value && !priority && runnable(latest) &&
@@ -399,6 +433,9 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                     if(!wholeBatch.get()) return available
                     val rank = ordered(dao.queueSnapshot()).mapIndexed { index, task -> task.chapterId to index }.toMap()
                     return available.sortedBy { rank[(it.fields.getValue("id") as WorkflowValue.Text).value] ?: Int.MAX_VALUE }
+                }
+                override suspend fun pages(chapter: WorkflowValue.Record) = super.pages(chapter).filterNot {
+                    (it.fields.getValue("id") as WorkflowValue.Text).value in failedPages
                 }
                 override suspend fun api(call: WorkflowApiCall, frame: WorkflowFrame): WorkflowValue {
                     if(!call.wholeManga) return super.api(call, frame)
@@ -437,7 +474,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                     val pageId = requireNotNull(frame.identity(WorkflowSystem.PAGE)); val chapterId = requireNotNull(frame.identity(WorkflowSystem.CHAPTER))
                     val task = taskMap.getValue(chapterId)
                     activeLock.withLock {
-                        if ((!wholeBatch.get() && stopping.value) || container.queueOrder.isPageExcluded(chapterId, task.queuedAt ?: 0, pageId)) return WorkflowPageAdmission.SKIP
+                        if (pageId in failedPages || (!wholeBatch.get() && stopping.value) || container.queueOrder.isPageExcluded(chapterId, task.queuedAt ?: 0, pageId)) return WorkflowPageAdmission.SKIP
                         active[pageId] = job
                         if (runCurrentPage == null && (primaryStarted || pageId == firstPage)) {
                             runCurrentPage = pageId; primaryStarted = true
@@ -494,17 +531,30 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                     }
                 }
                 override suspend fun pageFailed(frame: WorkflowFrame, failure: Throwable) {
-                    val id = requireNotNull(frame.identity(WorkflowSystem.CHAPTER)); failures.putIfAbsent(id, failure.message ?: "工作流失败")
+                    val id = requireNotNull(frame.identity(WorkflowSystem.CHAPTER))
+                    val pageId = requireNotNull(frame.identity(WorkflowSystem.PAGE))
+                    failedPages += pageId
+                    failures.putIfAbsent(id, "${pageLabel(frame)}：${failure.message ?: "工作流失败"}")
+                    // Failed preparation has no later consumer. Release its lease while
+                    // retaining the reloadable preprocessing cache for an explicit retry.
+                    super.closePage(frame)
+                    android.util.Log.w("TranslationQueue", "Skipping failed page chapter=$id page=$pageId", failure)
                 }
                 override suspend fun chapterFinished(frame: WorkflowFrame, complete: Boolean) {
+                    val id = requireNotNull(frame.identity(WorkflowSystem.CHAPTER))
                     container.localPageTranslator.pageWriteMutex.withLock {
-                    val id = requireNotNull(frame.identity(WorkflowSystem.CHAPTER)); val task = taskMap.getValue(id)
+                    val task = taskMap.getValue(id)
                     val latest = dao.byChapter(id).firstOrNull() ?: return
                     if (latest.queuedAt != task.queuedAt || latest.configSnapshot != task.configSnapshot || latest.state !in setOf("PENDING", "RUNNING", "PAUSED")) return
                     val pages = chapters.first { it.id == id }.pages
                     val count = pages.count { container.localPageTranslator.artifacts.has(it.pageId) && !container.queueOrder.isPageExcluded(id, task.queuedAt ?: 0, it.pageId) }
                     val failure = failures[id]
-                    val state = when { failure != null -> "FAILED"; complete -> if (count == totals[id]) "DONE" else "CANCELLED"; latest.state == "PAUSED" -> "PAUSED"; else -> "PENDING" }
+                    val state = when {
+                        !complete -> if (latest.state == "PAUSED") "PAUSED" else "PENDING"
+                        failure != null -> "FAILED"
+                        count == totals[id] -> "DONE"
+                        else -> "CANCELLED"
+                    }
                     dao.setQueueState(id, task.targetLanguage, state, failure, count, now())
                     }
                 }
@@ -567,7 +617,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
         val initialControls = controlRevision.value
         val works = ArrayList<QueuePageWork>()
         val counts = mutableMapOf<String, Int>()
-        val totals = mutableMapOf<String, Int>()
+        val failures = mutableMapOf<String, String>()
         val pageTotals = mutableMapOf<String, Int>()
         for (task in ordered(dao.queueSnapshot()).filter { it.mangaId == mangaId && runnable(it) }) {
             if (runCatching { JSONObject(task.configSnapshot!!).optInt("schema") }.getOrDefault(1) != 1) continue
@@ -589,7 +639,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                 val pages = pageSource.pages(); require(pages.isNotEmpty()) { "章节没有可翻译图片" }
                 if (chapter.pageCount != pages.size) container.mangaRepository.updateChapterPageInfo(chapter.chapterId, pages.size, null)
                 val eligible = pages.filterNot { container.queueOrder.isPageExcluded(task.chapterId, task.queuedAt ?: 0L, it.pageId) }
-                totals[task.chapterId] = eligible.size; counts[task.chapterId] = 0
+                counts[task.chapterId] = 0
                 pageTotals[task.chapterId] = pages.size
                 if (eligible.isEmpty()) dao.setQueueState(task.chapterId, task.targetLanguage, "CANCELLED", null, 0, now())
                 works += eligible.map { QueuePageWork(task, pageSource, it, source, target, render,
@@ -634,22 +684,26 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                         consumed += work.page.pageId
                         val completed = (counts[task.chapterId] ?: 0) + 1; counts[task.chapterId] = completed
                         if (recognized != null) pageUpdates.emit(work.page.pageId)
+                        val exhausted = works.filter { it.task.chapterId == task.chapterId }.all { it.page.pageId in consumed }
                         val latest = dao.byChapter(task.chapterId).firstOrNull()
                         if (latest != null && latest.queuedAt == task.queuedAt && latest.configSnapshot == task.configSnapshot)
                             dao.setQueueState(task.chapterId, task.targetLanguage,
-                            if (latest.state == "CANCELLED") "CANCELLED" else if (completed == totals[task.chapterId])
-                                if (completed == pageTotals[task.chapterId]) "DONE" else "CANCELLED"
+                            if (latest.state == "CANCELLED") "CANCELLED" else if (exhausted)
+                                if (failures[task.chapterId] != null) "FAILED" else if (completed == pageTotals[task.chapterId]) "DONE" else "CANCELLED"
                             else if (latest.state == "PAUSED") "PAUSED" else "PENDING",
-                            null, completed, now())
+                            failures[task.chapterId], completed, now())
                     }
                 } catch (failure: Exception) {
                     if (failure is CancellationException) throw failure
+                    consumed += work.page.pageId
+                    failures.putIfAbsent(task.chapterId, "${work.page.displayName}：${failure.message ?: "翻译失败"}")
+                    val exhausted = works.filter { it.task.chapterId == task.chapterId }.all { it.page.pageId in consumed }
                     val latest = dao.queueSnapshot().firstOrNull { it.chapterId == task.chapterId }
-                    if (latest != null && runnable(latest)) dao.setQueueState(task.chapterId, task.targetLanguage,
-                        "FAILED", failure.message, counts[task.chapterId] ?: 0, now())
-                    // Discard remaining prefetch from the failed chapter so its buffers
-                    // cannot occupy the budget needed by the next runnable chapter.
-                    break
+                    if (latest != null && latest.queuedAt == task.queuedAt && latest.configSnapshot == task.configSnapshot &&
+                        latest.state in setOf("PENDING", "RUNNING", "PAUSED")) dao.setQueueState(task.chapterId, task.targetLanguage,
+                        if (exhausted) "FAILED" else if (latest.state == "PAUSED") "PAUSED" else "PENDING",
+                        failures[task.chapterId], counts[task.chapterId] ?: 0, now())
+                    android.util.Log.w("TranslationQueue", "Skipping failed page chapter=${task.chapterId} page=${work.page.pageId}", failure)
                 } finally {
                     observer.cancelAndJoin(); pipeline.consume(work.page.pageId)
                     updateFocus(mangaId, null)

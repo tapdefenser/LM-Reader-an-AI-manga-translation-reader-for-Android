@@ -112,6 +112,104 @@ class QueueSchedulingIntegrationTest {
         container.taskService.setVisible(false)
         if (root.canonicalFile.parentFile == Environment.getExternalStorageDirectory().canonicalFile && root.name == "LMReaderScheduleFixture-$token") root.deleteRecursively()
     }
+    @Test fun screenResourceRefreshRetainsQueuedRoutesAndActiveReaderResources() = runBlocking<Unit> {
+        val at = System.currentTimeMillis()
+        val snapshot = translationTaskSnapshot(TranslationWorkflow.LOCAL_MACHINE,
+            MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans", segTextScope = SegTextScope.FREE_TEXT),
+            "en", "zh-Hans", "", BubbleRenderSettings())
+        val dao = container.database.translationDao()
+        dao.upsertAll(listOf(ChapterTranslationEntity(a1, mangaA, "zh-Hans", "PENDING", "en", false, snapshot, at, null, 0, null, at)))
+        val engine = container.localTranslator
+        engine.translate(LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED,
+            listOf(LocalTranslationText("screen-retain-fixture", "Hello world")))
+        val loaded = engine.loadedResources.value.map { it.id }.toSet()
+        assertTrue(loaded.isNotEmpty())
+        container.translationQueue.retainScreenTranslationModels(emptySet())
+        assertEquals("Removing screen MT must preserve pending manga routes", loaded, engine.loadedResources.value.map { it.id }.toSet())
+        dao.cancelQueueItems(ids, at + 1)
+        try {
+            container.translationQueue.setPriorityPage("reader-resource-fixture")
+            container.translationQueue.retainScreenTranslationModels(emptySet())
+            assertEquals(loaded, engine.loadedResources.value.map { it.id }.toSet())
+        } finally { container.translationQueue.setPriorityPage(null) }
+        container.translationQueue.retainScreenTranslationModels(emptySet())
+        assertTrue(engine.loadedResources.value.isEmpty())
+    }
+
+    @Test fun damagedFirstPageIsSkippedAndRemainingPagesAndNextChapterFinish() = runBlocking {
+        verifyDamagedPageIsolation(legacy = false)
+    }
+    @Test fun legacyQueueAlsoSkipsDamagedFirstPageAndContinues() = runBlocking {
+        verifyDamagedPageIsolation(legacy = true)
+    }
+    @Test fun damagedLastPageIsSkippedAndNextChapterStillFinishes() = runBlocking {
+        verifyDamagedPageIsolation(legacy = false, last = true)
+    }
+    @Test fun unavailableChapterIsSkippedAndNextChapterFinishes() = runBlocking {
+        verifyUnavailableChapterIsolation(allUnavailable = false)
+    }
+    @Test fun allUnavailableChaptersFailWithoutPausingTheQueue() = runBlocking {
+        verifyUnavailableChapterIsolation(allUnavailable = true)
+    }
+    private suspend fun verifyUnavailableChapterIsolation(allUnavailable: Boolean) {
+        val unavailable = if (allUnavailable) listOf(a1, a2) else listOf(a1)
+        val db = container.database.openHelper.writableDatabase
+        for (chapter in unavailable) {
+            val missing = File(root, "missing-$chapter").absolutePath
+            db.execSQL("UPDATE chapters SET documentId = ? WHERE chapterId = ?", arrayOf(missing, chapter))
+        }
+        val settings = MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans")
+        val snapshot = translationTaskSnapshot(TranslationWorkflow.LOCAL_MACHINE, settings, "en", "zh-Hans", "", BubbleRenderSettings())
+        val at = System.currentTimeMillis()
+        val dao = container.database.translationDao()
+        dao.upsertAll(listOf(a1, a2).map { chapter -> ChapterTranslationEntity(chapter, mangaA, "zh-Hans", "PENDING",
+            "en", false, snapshot, at, null, 0, null, at) })
+        container.translationQueue.sortChapters(mangaA, listOf(a1, a2))
+        container.translationQueue.resume()
+        val secondState = if (allUnavailable) "FAILED" else "DONE"
+        withTimeout(120_000) {
+            dao.observeQueue().map { dao.byChapters(listOf(a1, a2)) }.first { rows ->
+                rows.any { it.chapterId == a1 && it.state == "FAILED" } &&
+                    rows.any { it.chapterId == a2 && it.state == secondState }
+            }
+        }
+        container.translationQueue.awaitCurrentPage()
+        for (chapter in unavailable) {
+            val failed = dao.byChapter(chapter).single()
+            assertEquals(0, failed.translatedCount)
+            assertTrue(failed.failure.orEmpty().isNotBlank())
+        }
+        assertFalse(container.localPageTranslator.artifacts.has(pages[0].first))
+        assertFalse(container.localPageTranslator.artifacts.has(pages[1].first))
+        assertEquals(!allUnavailable, container.localPageTranslator.artifacts.has(pages[2].first))
+        assertFalse(container.translationQueue.paused.value)
+    }
+    private suspend fun verifyDamagedPageIsolation(legacy: Boolean, last: Boolean = false) {
+        val damaged = if (last) 1 else 0
+        pages[damaged].second.writeText("damaged PNG fixture")
+        val settings = MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans")
+        val snapshot = translationTaskSnapshot(TranslationWorkflow.LOCAL_MACHINE, settings, "en", "zh-Hans", "", BubbleRenderSettings())
+            .let { if (legacy) JSONObject(it).put("schema", 1).put("retries", 0).toString() else it }
+        val at = System.currentTimeMillis()
+        val dao = container.database.translationDao()
+        dao.upsertAll(listOf(a1, a2).map { chapter -> ChapterTranslationEntity(chapter, mangaA, "zh-Hans", "PENDING",
+            "en", false, snapshot, at, null, 0, null, at) })
+        container.translationQueue.sortChapters(mangaA, listOf(a1, a2))
+        container.translationQueue.resume()
+        withTimeout(120_000) {
+            dao.observeQueue().map { dao.byChapters(listOf(a1, a2)) }.first { rows ->
+                rows.any { it.chapterId == a1 && it.state == "FAILED" } && rows.any { it.chapterId == a2 && it.state == "DONE" }
+            }
+        }
+        container.translationQueue.awaitCurrentPage()
+        val failed = dao.byChapter(a1).single()
+        assertEquals(1, failed.translatedCount)
+        assertTrue(failed.failure.orEmpty().contains("$damaged.png"))
+        assertFalse(container.localPageTranslator.artifacts.has(pages[damaged].first))
+        assertTrue(container.localPageTranslator.artifacts.has(pages[1 - damaged].first))
+        assertTrue(container.localPageTranslator.artifacts.has(pages[2].first))
+        assertFalse(container.translationQueue.paused.value)
+    }
     @Test fun reorderSwitchesAfterPageAndPauseCancelAndClearKeepOneTranslation() = runBlocking {
         val original = pages.associate { it.first to it.second.readBytes() }
         val settings = MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans")
@@ -273,6 +371,27 @@ class QueueSchedulingIntegrationTest {
         assertEquals(listOf(pages[2].first, pages[1].first, extraId), events.toList())
         assertEquals(0L, container.translationQueue.cacheBytes.value)
         observer.cancelAndJoin()
+    }
+    @Test fun fullMangaApiSkipsFailedPreparationAndPublishesEveryOtherPage() = runBlocking {
+        val server = DelayedApiServer()
+        try {
+            pages[0].second.writeText("damaged PNG fixture")
+            fullTasks(server)
+            container.translationQueue.resume()
+            withTimeout(60_000) { server.requested.await() }
+            server.reply.complete(Unit)
+            val dao = container.database.translationDao()
+            withTimeout(90_000) { dao.observeQueue().map { dao.byChapters(listOf(a1, a2)) }.first { rows ->
+                rows.any { it.chapterId == a1 && it.state == "FAILED" } && rows.any { it.chapterId == a2 && it.state == "DONE" }
+            } }
+            container.translationQueue.awaitCurrentPage()
+            assertEquals(1, server.calls.get())
+            assertEquals(1, dao.byChapter(a1).single().translatedCount)
+            assertFalse(container.localPageTranslator.artifacts.has(pages[0].first))
+            assertTrue(container.localPageTranslator.artifacts.has(pages[1].first))
+            assertTrue(container.localPageTranslator.artifacts.has(pages[2].first))
+            assertFalse(container.translationQueue.paused.value)
+        } finally { server.reply.complete(Unit); server.close() }
     }
     private suspend fun fullTasks(server: DelayedApiServer, includeNextManga: Boolean = false) {
         val profile = ApiProfile(apiProfileId, ApiProfileKind.LLM, "Isolated queue test", "http://127.0.0.1:${server.port}/v1", apiKey = "1", model = "fixture", parallelLimit = 2, retryCount = 0)

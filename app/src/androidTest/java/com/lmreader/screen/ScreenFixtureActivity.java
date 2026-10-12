@@ -10,6 +10,7 @@ import android.view.accessibility.AccessibilityEvent;
 /** Separate test APK window: realistic scrolling events and a continuously moving background. */
 public class ScreenFixtureActivity extends Activity {
     private Fixture view;
+    private android.app.Dialog popup;
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         view = new Fixture(); setContentView(view); configure(getIntent());
@@ -23,11 +24,27 @@ public class ScreenFixtureActivity extends Activity {
         view.fixedControls = intent.getBooleanExtra("fixedControls", view.fixedControls);
         view.tintOpacity = intent.getFloatExtra("tintOpacity", 0f);
         view.tintColor = intent.getIntExtra("tintColor", Color.BLACK);
+        view.inlinePopup = intent.getBooleanExtra("inlinePopup", false);
         view.invalidate();
+        if (intent.hasExtra("popup")) {
+            if (popup != null) { popup.dismiss(); popup = null; }
+            if (intent.getBooleanExtra("popup", false)) {
+                popup = new android.app.Dialog(this);
+                android.widget.TextView message = new android.widget.TextView(this);
+                message.setText("Fixture menu\nA temporary dialog"); message.setTextSize(24);
+                message.setTextColor(Color.BLACK); message.setGravity(Gravity.CENTER); message.setBackgroundColor(Color.WHITE);
+                popup.setContentView(message); popup.show();
+                popup.getWindow().addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                WindowManager.LayoutParams params = popup.getWindow().getAttributes(); params.dimAmount = .65f;
+                params.width = Math.round(getResources().getDisplayMetrics().widthPixels * .75f);
+                params.height = Math.round(getResources().getDisplayMetrics().heightPixels * .35f);
+                popup.getWindow().setAttributes(params);
+            }
+        }
     }
     private class Fixture extends View {
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        boolean video, dragged, held, fixedControls; int variant; float scale = 1, shift, lastY; long start = android.os.SystemClock.uptimeMillis();
+        boolean video, dragged, held, fixedControls, inlinePopup; int variant; float scale = 1, shift, lastY; long start = android.os.SystemClock.uptimeMillis();
         float tintOpacity; int tintColor = Color.BLACK;
         final android.os.Handler gestures = new android.os.Handler(android.os.Looper.getMainLooper());
         final Runnable longClick = () -> { if (!dragged) { held = true; performLongClick(); } };
@@ -83,6 +100,12 @@ public class ScreenFixtureActivity extends Activity {
             }
             if (tintOpacity > 0) canvas.drawColor(Color.argb(Math.round(255 * tintOpacity),
                 Color.red(tintColor), Color.green(tintColor), Color.blue(tintColor)));
+            if (inlinePopup) {
+                paint.setStyle(Paint.Style.FILL); paint.setColor(Color.WHITE);
+                canvas.drawRect(getWidth() * .25f, getHeight() * .25f, getWidth() * .75f, getHeight() * .81f, paint);
+                paint.setColor(Color.BLACK); paint.setTextSize(34); paint.setTextAlign(Paint.Align.CENTER);
+                canvas.drawText("A temporary menu", getWidth() * .5f, getHeight() * .5f, paint);
+            }
         }
         @Override public boolean onTouchEvent(MotionEvent event) {
             scaling.onTouchEvent(event);

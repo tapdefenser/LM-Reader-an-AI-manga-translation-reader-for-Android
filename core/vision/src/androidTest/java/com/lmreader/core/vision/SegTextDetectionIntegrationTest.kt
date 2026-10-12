@@ -14,6 +14,37 @@ import org.junit.runner.RunWith
 /** Real bundled models, generated images, and an isolated instrumentation package. */
 @RunWith(AndroidJUnit4::class)
 class SegTextDetectionIntegrationTest {
+    @Test fun backendHotReloadRebuildsOnlyAffectedPoolAndLanguageChangesRetainDetection() = runBlocking<Unit> {
+        var settings = VisionExecutionSettings(1, 1, false, OcrBackend.CPU)
+        val engine = LocalVisionEngine(ApplicationProvider.getApplicationContext()) { settings }
+        val changes = java.util.concurrent.CopyOnWriteArrayList<List<LoadedEngineResource>>()
+        val observer = launch(start = CoroutineStart.UNDISPATCHED) { engine.loadedResources.collect { changes += it } }
+        try {
+            engine.reconfigure(true, setOf(LocalOcrLanguage.ENGLISH))
+            engine.loadedResources.first { it.size == 3 }
+            changes.clear()
+            settings = settings.copy(segGpu = true)
+            engine.reconfigure(true, setOf(LocalOcrLanguage.ENGLISH))
+            engine.loadedResources.first { it.size == 3 }
+            assertTrue("SEG backend changes must keep DET/REC resident: $changes", changes.all { list ->
+                list.any { it.id.endsWith(":det") } && list.any { it.id.endsWith(":rec") }
+            })
+            changes.clear()
+            settings = settings.copy(ocrBackend = OcrBackend.AUTO)
+            engine.reconfigure(true, setOf(LocalOcrLanguage.ENGLISH))
+            engine.loadedResources.first { it.size == 3 }
+            assertTrue("OCR backend changes must keep SEG resident: $changes", changes.all { list ->
+                list.any { it.id.endsWith(":seg") }
+            })
+            changes.clear()
+            engine.reconfigure(false, setOf(LocalOcrLanguage.KOREAN))
+            val korean = withTimeout(10_000) { engine.loadedResources.first { list ->
+                list.size == 2 && list.any { it.id.endsWith(":ko") }
+            } }
+            assertEquals(setOf("det", "ko"), korean.map { it.id.substringAfterLast(":") }.toSet())
+            assertTrue("Changing recognizer languages must preserve DET", changes.all { list -> list.any { it.id.endsWith(":det") } })
+        } finally { observer.cancelAndJoin(); engine.releaseModels() }
+    }
     private fun engine() = LocalVisionEngine(ApplicationProvider.getApplicationContext()) {
         VisionExecutionSettings(segConcurrency = 1, ocrConcurrency = 1, segGpu = false, ocrBackend = OcrBackend.CPU)
     }

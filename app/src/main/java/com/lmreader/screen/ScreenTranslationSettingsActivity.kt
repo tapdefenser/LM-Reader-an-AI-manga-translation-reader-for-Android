@@ -228,7 +228,7 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("粗体"); Switch(render.bold, { value -> translation { it.copy(bubbleBold = value) } }) }
             HorizontalDivider(); Text("屏幕翻译独立资源", style = MaterialTheme.typography.titleMedium)
             Text("默认预处理下一画面，最多两张画面同时处理。上一张 SEG/OCR 就绪且提交间隔已到，才取下一张；两张占满时等待完成，缓存不足时暂停取图。", style = MaterialTheme.typography.bodySmall)
-            Text("以下 SEG、OCR 和缓存设置只用于屏幕翻译，修改后需重新加载引擎。", style = MaterialTheme.typography.bodySmall)
+            Text("以下 SEG、OCR 和缓存设置只用于屏幕翻译。引擎已启动时，设置和已保存的工作流修改会自动生效，只更新有变化的资源。", style = MaterialTheme.typography.bodySmall)
             ScreenChoice("SEG 并行数", if (config.vision.segConcurrency == 0) "自动" else config.vision.segConcurrency.toString(), (0..8).map { it.toString() to if (it == 0) "自动" else it.toString() }) { value -> update { it.copy(vision = it.vision.copy(segConcurrency = value.toInt())) } }
             ScreenChoice("OCR 并行数", if (config.vision.ocrConcurrency == 0) "自动" else config.vision.ocrConcurrency.toString(), (0..8).map { it.toString() to if (it == 0) "自动" else it.toString() }) { value -> update { it.copy(vision = it.vision.copy(ocrConcurrency = value.toInt())) } }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("SEG GPU 加速"); Switch(config.vision.segGpu, { value -> update { it.copy(vision = it.vision.copy(segGpu = value)) } }) }
@@ -251,8 +251,10 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
                 ScreenSlider("屏幕外保留边距", config.offscreenMarginPercent.toFloat(), 0f..200f, "%") { value -> update { it.copy(offscreenMarginPercent = value.toInt()) } }
                 ScreenSlider("新增区域最小边长", config.minimumNewAreaPixels.toFloat(), 2f..128f, "px") { value -> update { it.copy(minimumNewAreaPixels = value.toInt()) } }
                 Text("细小的新区域累积到此宽度后再识别，减少重复计算；单位为识别截图的像素。", style = MaterialTheme.typography.bodySmall)
+                ScreenSlider("新旧文字区域合并间距", config.browseMergeDistancePixels.toFloat(), 0f..128f, "px") { value -> update { it.copy(browseMergeDistancePixels = value.toInt()) } }
+                Text("新文字区域与已有原文区域的间距不超过此值时，合并原图裁块并重新 SEG，再提交 OCR。单位为识别截图像素；调大更容易合并，也会增加重识别范围。设为 0 时仅合并接触或重叠的区域。", style = MaterialTheme.typography.bodySmall)
                 Text("气泡完全离开按屏幕宽、高分别外扩的区域后删除。", style = MaterialTheme.typography.bodySmall)
-                Text("平移和缩放持续跟随。画面稳定后，新增区域与相交的原文区域合并裁块，重新识别；新结果完成后替换旧译文。", style = MaterialTheme.typography.bodySmall)
+                Text("平移和缩放持续跟随。画面稳定后仅检测新增区域，按该帧光流后的位置排除已有文字。新 SEG 气泡接近旧气泡时才合并重 SEG；新遮罩接管背景，旧译文保留到对应新译文完成。", style = MaterialTheme.typography.bodySmall)
             }
             if (config.mode == ScreenTranslationMode.MANUAL) ScreenSlider("手动遮罩消失延迟", config.manualClearMillis.toFloat(), 0f..1000f, "ms") { value -> update { it.copy(manualClearMillis = value.toInt()) } }
             if (config.mode == ScreenTranslationMode.VIDEO) Text("视频默认识别全屏，不等待画面稳定；空位开放后取最新画面。新结果准备好之前，上一张译文保持显示。", style = MaterialTheme.typography.bodySmall)

@@ -49,8 +49,8 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
         val budget = minOf(settings.memoryMegabytes.toLong() * 1_048_576, availableMemory() / 2)
         return minOf(automatic, ((budget - pinnedExtra).coerceAtLeast(0) / routeBytes).coerceIn(1, 8).toInt())
     }
-    private suspend fun <T> session(route: List<TranslationModelPack>, action: suspend (List<String>) -> T): T =
-        TranslationRuntime.pool.use(capacity(route), TranslationRuntime.slots.indices.sortedBy { index ->
+    private suspend fun <T> session(route: List<TranslationModelPack>, limit: Int = capacity(route), action: suspend (List<String>) -> T): T =
+        TranslationRuntime.pool.use(limit, TranslationRuntime.slots.indices.sortedBy { index ->
             route.count { pack -> TranslationRuntime.resources.value.none { it.id == "${signature(pack)}:session:$index" } }
         }) { index ->
             withContext(TranslationRuntime.dispatcher) { TranslationRuntime.slots[index].mutex.withLock {
@@ -99,10 +99,14 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
             } }
         }
     /** Pin a prepared screen session so queue completion cannot unload its engines. */
-    suspend fun prepare(owner: String, routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) {
+    suspend fun pinModels(owner: String, routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) {
         val packs = routes.flatMap { (from, to) -> catalog().route(from, to) }.distinctBy(::signature)
         packs.forEach { TranslationRuntime.costs[signature(it)] = it.installedBytes + 160L * 1_048_576 }
         TranslationRuntime.pins[owner] = packs.map(::signature).toSet()
+    }
+    suspend fun prepare(owner: String, routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) {
+        pinModels(owner, routes)
+        val packs = routes.flatMap { (from, to) -> catalog().route(from, to) }.distinctBy(::signature)
         if (packs.isEmpty()) return
         try {
             val count = capacity(packs)
@@ -110,7 +114,9 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
             val allLoaded = CompletableDeferred<Unit>()
             coroutineScope {
                 List(count) { async {
-                    session(packs) {
+                    // Every warm-up worker must use the same admission limit as the barrier.
+                    // Recomputing it after RAM changes can leave all admitted clones waiting forever.
+                    session(packs, count) {
                         // Keep each admitted slot until every clone is warmed;
                         // otherwise fast empty actions can reuse a single slot.
                         if (loaded.incrementAndGet() == count) allLoaded.complete(Unit)

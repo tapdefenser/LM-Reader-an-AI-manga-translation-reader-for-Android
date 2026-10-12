@@ -46,10 +46,14 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
     }
     private val bubbles = ArrayList<Bubble>()
     private val publications = ScreenRegionPublication()
+    private val replacementsInFlight = linkedMapOf<String, Set<String>>()
+    private val superseded = linkedSetOf<String>()
+    private var browseScene = false
     private var objectRevision = 0L
     private var contentToScreen = ScreenTransform()
     private var translationAreas: List<PixelRect>? = null
     private var translationClip: Path? = null
+    private var occlusions: List<PixelRect> = emptyList()
     var trackingRevision = 0L
         private set
     private var inside = true
@@ -58,7 +62,9 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
         var contentBounds: PixelRect = transform.bounds(bounds), val template: ScreenObjectTemplate? = null,
         val version: Long = 0, var revision: Long = 0, var fixedPose: ScreenTransform? = null,
         var failures: Int = 0, var sampledSequence: Long = Long.MIN_VALUE,
-        val capturedContentBounds: PixelRect = contentBounds)
+        val capturedContentBounds: PixelRect = contentBounds, val placeholder: Boolean = false,
+        var hiddenBy: Set<String> = emptySet(), var obsoleteBy: Set<String> = emptySet(),
+        val record: PageTranslatedRegion? = null)
     private val layer = object : View(context) {
         private val location = IntArray(2)
         override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -78,12 +84,33 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
             getLocationOnScreen(location)
             val root = canvas.save(); canvas.translate(-location[0].toFloat(), -location[1].toFloat())
             translationClip?.let(canvas::clipPath)
-            try { bubbles.forEach { bubble ->
+            occlusions.forEach { canvas.clipOutRect(it.left, it.top, it.right, it.bottom) }
+            val replacements = if (bubbles.any { it.hiddenBy.isNotEmpty() || it.obsoleteBy.isNotEmpty() })
+                bubbles.associateBy { it.id } else emptyMap()
+            fun draw(bubble: Bubble, mask: Boolean, text: Boolean, excluded: Set<String>) {
                 val save = canvas.save()
+                excluded.forEach { id -> replacements[id]?.let { replacement ->
+                    val r = (replacement.fixedPose ?: replacement.transform.then(contentToScreen)).bounds(replacement.bounds)
+                    canvas.clipOutRect(r.left, r.top, r.right, r.bottom)
+                } }
                 val pose = bubble.fixedPose ?: bubble.transform.then(contentToScreen)
                 canvas.translate(pose.x, pose.y); canvas.scale(pose.scale, pose.scale)
-                bubble.drawing.draw(canvas); canvas.restoreToCount(save)
-            } } finally { canvas.restoreToCount(root) }
+                bubble.drawing.draw(canvas, drawMask = mask, drawText = text); canvas.restoreToCount(save)
+            }
+            try {
+                if (!browseScene) {
+                    bubbles.forEach { draw(it, true, true, it.hiddenBy) }
+                    return
+                }
+                // There is one background owner per replacement group. Obsolete
+                // glyphs stay readable on the new masks until new text arrives.
+                bubbles.forEach { bubble ->
+                    if (bubble.obsoleteBy.isEmpty()) draw(bubble, true, false, emptySet())
+                    else if (bubble.obsoleteBy.any { it !in replacements })
+                        draw(bubble, true, false, bubble.obsoleteBy)
+                }
+                bubbles.filter { !it.placeholder }.forEach { draw(it, false, true, it.hiddenBy) }
+            } finally { canvas.restoreToCount(root) }
         }
     }
     private val layerParams = params(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE).apply { alpha = opacity }
@@ -263,12 +290,31 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
         } } }
         layer.invalidate()
     }
-    fun positions() = bubbles.associate { it.id to (it.fixedPose ?: it.transform.then(contentToScreen)).bounds(it.bounds) }
+    fun positions(includePlaceholders: Boolean = true) = bubbles.filter { includePlaceholders || !it.placeholder }
+        .associate { it.id to (it.fixedPose ?: it.transform.then(contentToScreen)).bounds(it.bounds) }
+    fun setOcclusions(areas: List<PixelRect>) { if (occlusions != areas) { occlusions = areas; layer.postInvalidateOnAnimation() } }
+    fun protectReplacements(pageId: String, ids: Set<String>) { replacementsInFlight[pageId] = ids }
+    fun releaseReplacements(pageId: String) { replacementsInFlight.remove(pageId) }
+    fun discardEmpty(ids: Set<String>) {
+        if (bubbles.removeAll { it.placeholder && it.id in ids }) { trackingRevision++; layer.invalidate() }
+    }
+    /** A failed replacement must give its still-readable predecessor back to tracking. */
+    fun discardFailedEmpty(ids: Set<String>): Set<String> {
+        val removed = bubbles.filter { it.placeholder && it.id in ids }.map { it.id }.toSet()
+        discardEmpty(removed)
+        val restored = bubbles.filter { it.obsoleteBy.isNotEmpty() && it.obsoleteBy.all(removed::contains) }
+        restored.forEach { bubble ->
+            bubble.obsoleteBy = emptySet(); bubble.hiddenBy = emptySet(); superseded.remove(bubble.id)
+        }
+        if (restored.isNotEmpty()) { trackingRevision++; layer.invalidate() }
+        return restored.map { it.id }.toSet()
+    }
     fun sourceRegions(rawPose: ScreenTransform) = bubbles.map { bubble -> ScreenSourceRegion(bubble.id,
-        (bubble.fixedPose ?: bubble.transform.then(rawPose)).bounds(bubble.bounds), bubble.version) }
-    fun fixedRegions() = bubbles.mapNotNull { bubble -> bubble.fixedPose?.bounds(bubble.bounds) }
-    fun fixedContentAreas() = bubbles.filter { it.fixedPose != null }.map { it.capturedContentBounds }
-    fun motionObjects(rawPose: ScreenTransform) = bubbles.map { bubble -> ScreenMotionObject(bubble.id, bubble.revision,
+        (bubble.fixedPose ?: bubble.transform.then(rawPose)).bounds(bubble.bounds), bubble.version, bubble.template) }
+        .filter { it.id !in superseded }
+    fun fixedRegions() = bubbles.filter { it.obsoleteBy.isEmpty() }.mapNotNull { bubble -> bubble.fixedPose?.bounds(bubble.bounds) }
+    fun fixedContentAreas() = bubbles.filter { it.fixedPose != null && it.obsoleteBy.isEmpty() }.map { it.capturedContentBounds }
+    fun motionObjects(rawPose: ScreenTransform) = bubbles.filter { it.obsoleteBy.isEmpty() }.map { bubble -> ScreenMotionObject(bubble.id, bubble.revision,
         bubble.bounds, bubble.fixedPose ?: bubble.transform.then(rawPose), bubble.template,
         if (bubble.fixedPose == null) ScreenObjectAttachment.CONTENT else ScreenObjectAttachment.FIXED,
         bubble.failures, bubble.sampledSequence) }
@@ -284,19 +330,28 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
             minOf(viewport.right, safe.right.toFloat()).coerceAtLeast(left + 1),
             minOf(viewport.bottom, safe.bottom.toFloat()).coerceAtLeast(top + 1))
     }
-    fun clear() { bubbles.clear(); publications.clear(); contentToScreen = ScreenTransform(); trackingRevision++; layer.invalidate() }
+    fun clear() { bubbles.clear(); publications.clear(); replacementsInFlight.clear(); superseded.clear(); browseScene = false; contentToScreen = ScreenTransform(); trackingRevision++; layer.invalidate() }
     fun clearArea(area: PixelRect) { bubbles.removeAll { (it.fixedPose ?: it.transform.then(contentToScreen)).bounds(it.bounds).intersects(area) }; trackingRevision++; layer.invalidate() }
+    /** Partial video backfills keep unfilled old text. Completion removes its
+     * leftovers without deleting ready bubbles or a newer frame's publication. */
+    fun finishVideoArea(area: PixelRect, version: Long, retained: Set<String>) {
+        if (bubbles.removeAll { it.version <= version && it.id !in retained &&
+                (it.fixedPose ?: it.transform.then(contentToScreen)).bounds(it.bounds).intersects(area) }) {
+            trackingRevision++; layer.invalidate()
+        }
+    }
     /** Resolve content/fixed candidates before the single render invalidation. */
     fun follow(rawPose: ScreenTransform, displayPose: ScreenTransform, viewport: PixelRect, margin: Int,
-        decisions: List<ScreenObjectDecision>): List<PixelRect> {
+        decisions: List<ScreenObjectDecision>, removed: (String) -> Unit = {}): List<PixelRect> {
         val invalidated = ArrayList<PixelRect>()
         var redraw = contentToScreen != displayPose
         for (decision in decisions) {
             val bubble = bubbles.find { it.id == decision.id && it.revision == decision.revision } ?: continue
             val before = bubble.fixedPose ?: bubble.transform.then(contentToScreen)
-            if (decision.remove) {
+            if (decision.remove && bubble.obsoleteBy.isEmpty()) {
                 invalidated += bubble.capturedContentBounds
                 invalidated += rawPose.inverse().bounds(decision.sourceToScreen.bounds(bubble.bounds))
+                superseded += bubble.id; removed(bubble.id)
                 bubbles.remove(bubble); redraw = true; continue
             }
             if (decision.attachment == ScreenObjectAttachment.FIXED) {
@@ -336,38 +391,55 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
         bubbles.removeAll { it.fixedPose == null && !it.contentBounds.intersects(retained) }
         layer.postInvalidateOnAnimation()
     }
-    data class PreparedBubble(val id: String, val bounds: PixelRect, val drawing: BubbleOverlay, val template: ScreenObjectTemplate? = null)
+    data class PreparedBubble(val id: String, val bounds: PixelRect, val drawing: BubbleOverlay,
+        val template: ScreenObjectTemplate? = null, val placeholder: Boolean = false, val record: PageTranslatedRegion? = null)
     /** Expensive paths and text layout run outside the gesture/event thread. */
-    fun prepare(source: Bitmap, regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings): List<PreparedBubble> {
+    fun prepare(source: Bitmap, regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings,
+        showEmpty: Boolean = false): List<PreparedBubble> {
         val render = settings.copy(opacityPercent = (minOf(settings.opacityPercent / 100f, opacity) / opacity * 100).toInt().coerceIn(0, 100))
         val renderer = BubbleMaskRenderer()
-        return regions.filter { it.translatedText.isNotBlank() }.map { region ->
-            PreparedBubble(region.region.id, region.region.bounds, renderer.prepare(source, listOf(region), render))
+        return regions.filter { showEmpty || it.translatedText.isNotBlank() }.map { region ->
+            PreparedBubble(region.region.id, region.region.bounds,
+                renderer.prepareSource(source, listOf(region.region)).layout(listOf(region), render, hideEmpty = !showEmpty),
+                placeholder = region.translatedText.isBlank(), record = region)
         }
     }
-    fun add(prepared: List<PreparedBubble>, transform: ScreenTransform) {
+    fun add(prepared: List<PreparedBubble>, transform: ScreenTransform, version: Long = 0) {
         val local = transform.then(contentToScreen.inverse())
         prepared.forEach { region ->
+            val index = bubbles.indexOfFirst { it.id == region.id }
+            if (index >= 0) {
+                val existing = bubbles[index]
+                if (existing.version <= version && (!region.placeholder || existing.placeholder))
+                    bubbles[index] = existing.copy(drawing = region.drawing, placeholder = region.placeholder, revision = ++objectRevision)
+                return@forEach
+            }
             val bounds = local.bounds(region.bounds)
             fun overlap(r: PixelRect) = (minOf(bounds.right, r.right) - maxOf(bounds.left, r.left)).coerceAtLeast(0f) *
                 (minOf(bounds.bottom, r.bottom) - maxOf(bounds.top, r.top)).coerceAtLeast(0f)
             // A context crop at an exposed edge may contain only part of an
             // already translated bubble. Preserve that complete old bubble.
-            if (bubbles.any { old -> val r = old.contentBounds
+            if (!region.placeholder && bubbles.any { old -> val r = old.contentBounds
+                !old.placeholder &&
                 bounds.area < r.area * .65f && overlap(r) > bounds.area * .65f }) return@forEach
-            bubbles.removeAll { old ->
+            if (!region.placeholder) bubbles.removeAll { old ->
                 val r = old.contentBounds
-                overlap(r) > minOf(bounds.area, r.area) * .65f
+                old.version <= version && overlap(r) > minOf(bounds.area, r.area) * .65f
             }
-            bubbles += Bubble(region.id, region.bounds, region.drawing, local)
+            bubbles += Bubble(region.id, region.bounds, region.drawing, local, version = version,
+                revision = ++objectRevision, placeholder = region.placeholder)
         }
         trackingRevision++; layer.invalidate()
     }
     fun replaceBrowse(prepared: List<PreparedBubble>, pageToCapture: ScreenTransform, atCapture: ScreenTransform,
         rawPose: ScreenTransform, displayPose: ScreenTransform, version: Long, crop: ScreenMergedCrop,
-        decisions: List<ScreenObjectDecision>, ownedAreas: List<PixelRect> = listOf(crop.bounds)) {
+        decisions: List<ScreenObjectDecision>, ownedAreas: List<PixelRect> = listOf(crop.bounds),
+        detected: List<ScreenSourceRegion> = prepared.map { ScreenSourceRegion(it.id, pageToCapture.bounds(it.bounds), version) }): Set<String> {
+        browseScene = true
         val selected = decisions.associateBy { it.id }
         val accepted = prepared.mapNotNull { region ->
+            if (region.id in superseded) return@mapNotNull null
+            if (ownedAreas.none { it.intersects(pageToCapture.bounds(region.bounds)) }) return@mapNotNull null
             if (crop.preserves.any { it.bounds.intersects(pageToCapture.bounds(region.bounds)) }) return@mapNotNull null
             val decision = selected[region.id]
             if (decision?.remove == true) return@mapNotNull null
@@ -376,20 +448,60 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
             val local = screen.then(rawPose.inverse())
             val ownership = if (fixed) screen.bounds(region.bounds) else atCapture.inverse().bounds(pageToCapture.bounds(region.bounds))
             if (!publications.accepts(ownership, version, fixed)) return@mapNotNull null
+            val existing = bubbles.firstOrNull { it.id == region.id && it.version == version }
+            if (existing != null) return@mapNotNull if (region.placeholder && !existing.placeholder) null else
+                existing.copy(drawing = region.drawing, placeholder = region.placeholder, revision = ++objectRevision, record = region.record)
             Bubble(region.id, region.bounds, region.drawing, local, local.bounds(region.bounds), region.template,
                 version, ++objectRevision, if (fixed) screen else null, decision?.failures ?: 0,
-                decision?.sequence ?: Long.MIN_VALUE, atCapture.inverse().bounds(pageToCapture.bounds(region.bounds)))
+                decision?.sequence ?: Long.MIN_VALUE, atCapture.inverse().bounds(pageToCapture.bounds(region.bounds)), region.placeholder,
+                record = region.record)
         }
-        bubbles.removeAll { old -> old.id in crop.replaces && old.version <= version &&
-            publications.accepts(old.fixedPose?.bounds(old.bounds) ?: old.contentBounds, version, old.fixedPose != null) }
+        val effectiveCrop = if (crop.replacedSources.isNotEmpty()) crop else crop.copy(replacedSources = bubbles.filter { it.id in crop.replaces }
+            .map { ScreenSourceRegion(it.id, atCapture.bounds(it.contentBounds), it.version) })
         val incomingIds = accepted.map { it.id }.toSet()
+        val visible = (bubbles.map { it.id } + incomingIds).toSet()
+        val newlySuperseded = linkedMapOf<String, Set<String>>()
+        for (source in effectiveCrop.replacedSources) {
+            val candidates = detected.filter { it.bounds.intersects(source.bounds) }.map { it.id }.toSet()
+            val old = bubbles.firstOrNull { it.id == source.id && it.version <= version } ?: continue
+            if (candidates.isNotEmpty() && candidates.all { it in visible } && old.id !in superseded) {
+                newlySuperseded[old.id] = candidates
+            }
+        }
+        // A successor can itself be merged while its translation is pending.
+        // Redirect every ancestor before withdrawing that successor's empty mask.
+        bubbles.forEach { old ->
+            newlySuperseded.forEach { (id, children) ->
+                if (id in old.obsoleteBy) old.obsoleteBy = old.obsoleteBy - id + children
+            }
+            newlySuperseded[old.id]?.let { old.obsoleteBy = it }
+        }
+        superseded += newlySuperseded.keys
+        bubbles.removeAll { it.placeholder && it.id in newlySuperseded }
         bubbles.removeAll { it.id in incomingIds && it.version <= version }
         bubbles.addAll(accepted)
-        for (area in ownedAreas) {
-            publications.commit(atCapture.inverse().bounds(area), version)
-            publications.commit(area, version, screenFixed = true)
+        val ready = bubbles.filter { !it.placeholder && it.obsoleteBy.isEmpty() }.map { it.id }.toSet()
+        bubbles.filter { it.obsoleteBy.isNotEmpty() }.forEach { old -> old.hiddenBy = old.obsoleteBy.intersect(ready) }
+        bubbles.removeAll { it.obsoleteBy.isNotEmpty() && it.obsoleteBy.all { child -> child in ready } }
+        for (bubble in accepted.filter { !it.placeholder }) {
+            publications.commit(bubble.capturedContentBounds, version)
+            bubble.fixedPose?.let { publications.commit(it.bounds(bubble.bounds), version, screenFixed = true) }
         }
         contentToScreen = displayPose; trackingRevision++; layer.invalidate()
+        return newlySuperseded.keys
+    }
+    /** Called at geometry/text commits only; no bitmap and no per-frame database writes. */
+    fun sessionRows(sessionId: String, epoch: Long): List<com.lmreader.core.database.ScreenBrowseRegionEntity> = bubbles.map { bubble ->
+        fun rect(value: PixelRect) = org.json.JSONArray().put(value.left).put(value.top).put(value.right).put(value.bottom)
+        val geometry = org.json.JSONObject().put("sourceBounds", rect(bubble.bounds))
+            .put("capturedContentBounds", rect(bubble.capturedContentBounds))
+            .put("contour", org.json.JSONArray().also { points -> bubble.record?.region?.contour?.forEach {
+                points.put(org.json.JSONArray().put(it.x).put(it.y))
+            } })
+        com.lmreader.core.database.ScreenBrowseRegionEntity(sessionId, bubble.id, epoch, bubble.version,
+            if (bubble.obsoleteBy.isNotEmpty()) "OBSOLETE" else if (bubble.placeholder) "PENDING" else "FILLED",
+            geometry.toString(), org.json.JSONArray(bubble.obsoleteBy.toList()).toString(),
+            bubble.record?.region?.sourceText.orEmpty(), bubble.record?.translatedText.orEmpty())
     }
     override fun close() {
         if (closed) return

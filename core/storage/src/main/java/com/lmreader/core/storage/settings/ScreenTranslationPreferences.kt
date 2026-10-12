@@ -35,7 +35,7 @@ class ScreenTranslationPreferences(private val context: Context) {
         }
         fun encode(s: ScreenTranslationSettings): String {
             val t = s.translation; val r = t.effectiveBubbleRender(BubbleRenderSettings())
-            return JSONObject().put("version", 3).put("mode", s.mode.name).put("source", t.sourceLanguage).put("target", t.targetLanguage)
+            return JSONObject().put("version", 4).put("mode", s.mode.name).put("source", t.sourceLanguage).put("target", t.targetLanguage)
                 .put("workflow", t.workflowId).put("api", t.apiProfileId).put("style", t.customStyle)
                 .put("seg", t.effectiveSegThreshold()).put("det", t.effectiveTextDetectionThreshold()).put("merge", t.effectiveFreeTextMergeGapRatio())
                 .put("scope", t.segTextScope.name).put("fill", r.fillMode.name).put("opacity", r.opacityPercent)
@@ -46,6 +46,7 @@ class ScreenTranslationPreferences(private val context: Context) {
                 .put("videoTop", s.videoTopPercent).put("videoBottom", s.videoBottomPercent).put("change", s.changeThresholdPercent)
                 .put("followFps", s.followFramesPerSecond).put("minimumNewArea", s.minimumNewAreaPixels)
                 .put("trackingAlgorithm", s.trackingAlgorithm.name)
+                .put("browseMergeDistance", s.browseMergeDistancePixels)
                 .put("browseRegions", encodeRegions(s.browseRegions)).put("videoRegions", encodeRegions(s.videoRegions))
                 .put("regionPresets", JSONArray().also { values -> s.regionPresets.forEach { values.put(encodeRegions(it)) } }).toString()
         }
@@ -67,7 +68,8 @@ class ScreenTranslationPreferences(private val context: Context) {
                 runCatching { ScreenTrackingAlgorithm.valueOf(j.optString("trackingAlgorithm", "GLOBAL_AND_REGIONS")) }
                     .getOrDefault(ScreenTrackingAlgorithm.GLOBAL_AND_REGIONS),
                 decodeRegions(j.optJSONObject("browseRegions")), decodeRegions(j.optJSONObject("videoRegions")),
-                j.optJSONArray("regionPresets")?.let { values -> (0 until values.length()).map { decodeRegions(values.getJSONObject(it)) } }.orEmpty())
+                j.optJSONArray("regionPresets")?.let { values -> (0 until values.length()).map { decodeRegions(values.getJSONObject(it)) } }.orEmpty(),
+                j.optInt("browseMergeDistance", 8))
         }.getOrDefault(ScreenTranslationSettings())
     }
 }

@@ -1,4 +1,7 @@
 {
+  "原文区域已被新 SEG 替代": "The source region has been replaced by new SEG results.",
+  "底层窗口暂时被弹窗遮挡": "The underlying window is temporarily covered by a dialog.",
+  "正在等待屏幕画面": "Waiting for a screen frame.",
   "\n__VAR0__不要说明或 Markdown。所有字段必须提供且不能添加字段。输出结构：__VAR1__": "\n__VAR0__Return no explanations or Markdown. Include every required field and no extra fields. Output structure: __VAR1__",
   "\n本次消息已附带 __VAR0__ 张实际图片，内容可能是气泡或游离文字区域。请直接读取图片，不要要求用户再次上传。__VAR1__": "\nThis message includes __VAR0__ actual images of bubbles or free text. Read the attached images directly without asking for another upload.__VAR1__",
   "\n本次请求已附带 __VAR0__ 张图片。": "\nThis request included __VAR0__ images.",
@@ -94,7 +97,6 @@
   "仅游离文字": "Text only",
   "从本章原文／译文对照中提取尚未收录的人物、地名、组织名。只提取有证据且原文与译文一一对应的专名，不提取普通词，不改写已有译名；没有新增项返回 []。已有字典：${译名字典}。本章对照：${本章对照}。": "Extract new character, place and organization names from this chapter's source/translation pairs. Include only supported proper names with corresponding translations; exclude common words and preserve existing names. Return [] if there are no new entries. Existing glossary: ${译名字典}. Chapter pairs: ${本章对照}.",
   "从本章原文／译文对照中提取尚未收录的人物、地名、组织名。只提取有证据且原文与译文一一对应的专名，不提取普通词，不改写已有译名；没有新增项返回 []。已有字典：\\__VAR0__。本章对照：\\__VAR1__。": "Extract new character, place and organization names from this chapter's source/translation pairs. Include only supported proper names with corresponding translations; exclude common words and preserve existing names. Return [] if there are no new entries. Existing glossary: __VAR0__. Chapter pairs: __VAR1__.",
-  "以下 SEG、OCR 和缓存设置只用于屏幕翻译，修改后需重新加载引擎。": "These SEG, OCR and cache settings apply only to screen translation. Reload the engine after changing them.",
   "优先使用无障碍辅助": "Prefer accessibility assistance",
   "使用 ONNX Runtime CPU。": "Use ONNX Runtime CPU.",
   "使用录屏帧跟踪位移和缩放，不使用滚动事件移动译文。通知栏、导航栏、刘海和自身遮罩不参与匹配。": "Track movement and scaling from captured frames. Scroll events do not move translations. System bars, display cutouts and our own overlays are excluded from matching.",
@@ -271,7 +273,6 @@
   "已移出书架": "Removed from bookshelf",
   "已获取发行版本，请到 GitHub 确认": "Release found. Please check its version on GitHub.",
   "平移和缩放复用已有译文，只识别新露出的区域。边缘文字可能不完整；点击翻译球关闭再开启可重译整屏，引擎资源保持加载。": "Panning and zooming reuse existing translations; only newly exposed areas are recognized. Partial edge text may be incomplete. Toggle the ball off and on to translate the whole screen again; engine resources stay loaded.",
-  "平移和缩放持续跟随。画面稳定后，新增区域与相交的原文区域合并裁块，重新识别；新结果完成后替换旧译文。": "Follow pan and zoom continuously. Once the image is stable, merge exposed areas with intersecting source regions into complete crops and recognize again. Keep existing translations until replacement results are ready.",
   "并行上限 __VAR0__": "Parallel limit __VAR0__",
   "应用主题": "App theme",
   "应用区域": "Apply regions",

@@ -26,6 +26,7 @@ data class WorkflowApiCall(val profileId: String, val messages: List<WorkflowRes
     val expectedItems: WorkflowValue.ListValue? = null, val wholeManga: Boolean = false, val stepName: String = "", val expectedCount: Int? = null)
 enum class WorkflowPageAdmission { RUN, CACHED, SKIP }
 class WorkflowPageStopped : CancellationException("队列调度已改变")
+class WorkflowBubbleStopped : CancellationException("原文区域已被新 SEG 替代")
 class WorkflowExecutionFailure(val rowId: String, val rowLabel: String, cause: Throwable) :
     IllegalStateException("$rowLabel：${cause.message ?: cause.javaClass.simpleName}", cause)
 
@@ -50,7 +51,12 @@ interface WorkflowRuntimeHost {
         return result
     }
     suspend fun previewPage(frame: WorkflowFrame) {}
+    /** An iterator's translation can be visible before its sibling branches join.
+     * This never writes a read-only parent's authoritative page list. */
+    suspend fun previewBubble(frame: WorkflowFrame, bubble: WorkflowValue.Record) {}
     suspend fun segmentedPage(frame: WorkflowFrame) {}
+    suspend fun canProcessBubble(frame: WorkflowFrame): Boolean = true
+    suspend fun runBubble(frame: WorkflowFrame, action: suspend () -> Boolean): Boolean = action()
     suspend fun beforePage(frame: WorkflowFrame) {}
     suspend fun admitPage(frame: WorkflowFrame, job: Job): WorkflowPageAdmission = WorkflowPageAdmission.RUN
     suspend fun publishPage(frame: WorkflowFrame) {}
@@ -61,6 +67,7 @@ interface WorkflowRuntimeHost {
         frame.read(WorkflowRef(WorkflowSystem.PAGE, listOf("records"))) as WorkflowValue.ListValue
     suspend fun closePreparationPage(frame: WorkflowFrame) = closePage(frame)
     suspend fun chapterFinished(frame: WorkflowFrame, complete: Boolean) {}
+    /** Returning handles this page's failure and permits the remaining pages to run. */
     suspend fun pageFailed(frame: WorkflowFrame, failure: Throwable) { throw failure }
     fun step(node: WorkflowNode, frame: WorkflowFrame) {}
     fun continueScheduling(frame: WorkflowFrame? = null): Boolean = true
@@ -80,8 +87,14 @@ class WorkflowFrame internal constructor(val host: WorkflowRuntimeHost, private 
         define(variable.id, value, variable.type)
         if (variable.type == WorkflowType.BUBBLE) bubbleIterator = variable.id
     }
-    internal suspend fun currentBubble(): WorkflowValue.Record? =
+    suspend fun currentBubble(): WorkflowValue.Record? =
         bubbleIterator?.let { read(WorkflowRef(it)) as WorkflowValue.Record } ?: parent?.currentBubble()
+    internal suspend fun translatedBubbleWrite(ref: WorkflowRef): WorkflowValue.Record? {
+        val target = owner(ref.variableId) ?: return null
+        if (target.types[ref.variableId] != WorkflowType.BUBBLE ||
+            ref.path.isNotEmpty() && ref.path != listOf("translation")) return null
+        return read(WorkflowRef(ref.variableId)) as? WorkflowValue.Record
+    }
     fun define(id: String, value: WorkflowValue, type: WorkflowType? = null) {
         val declared = type ?: types[id]
         if(declared != null) { require(WorkflowValueCodec.matches(value, declared)) { "变量初始值与声明类型不一致" }; types[id] = declared }
@@ -210,6 +223,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
     private suspend fun executeRows(rows: List<WorkflowNode>, frame: WorkflowFrame): Boolean {
         for (node in rows) {
             currentCoroutineContext().ensureActive()
+            if (!frame.host.canProcessBubble(frame)) throw WorkflowBubbleStopped()
             if (!frame.host.continueScheduling(frame)) return false
             frame.host.step(node, frame)
             try { if (!executeNode(node, frame)) return false; if(frame.returned != null) return true }
@@ -222,7 +236,12 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
     private suspend fun executeNode(n: WorkflowNode, frame: WorkflowFrame): Boolean {
         val host = frame.host
         suspend fun input(key: String) = frame.evaluate(n.inputs[key] ?: error("缺少参数：$key"))
-        fun output(value: WorkflowValue) = frame.write(n.target ?: error("缺少输出变量"), value)
+        suspend fun output(value: WorkflowValue) {
+            if (!host.canProcessBubble(frame)) throw WorkflowBubbleStopped()
+            val target = n.target ?: error("缺少输出变量")
+            frame.write(target, value)
+            frame.translatedBubbleWrite(target)?.let { host.previewBubble(frame, it) }
+        }
         when (n.kind) {
             WorkflowKind.MANGA -> {
                 val child = frame.child()
@@ -264,7 +283,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                                 true
                             } catch (stop: WorkflowPageStopped) { false }
                             catch (cancelled: CancellationException) { throw cancelled }
-                            catch (failure: Exception) { host.pageFailed(child, failure); false }
+                            catch (failure: Exception) { host.pageFailed(child, failure); true }
                             finally { withContext(NonCancellable) { host.closePage(child) } }
                         }
                         try { complete[index] = work.await() }
@@ -298,7 +317,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                                         records[index] = host.completePreparationPage(child); true
                                     } catch(stop: WorkflowPageStopped) { false }
                                     catch(cancelled: CancellationException) { throw cancelled }
-                                    catch(failure: Exception) { host.pageFailed(child, failure); false }
+                                    catch(failure: Exception) { host.pageFailed(child, failure); true }
                                     finally { withContext(NonCancellable) { host.closePreparationPage(child) } }
                                 }
                                 try { finished[index] = work.await() } catch(stop: WorkflowPageStopped) { finished[index] = false }
@@ -323,6 +342,8 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                 val iterator = n.variable ?: error("缺少循环变量")
                 val values = arrayOfNulls<WorkflowValue>(items.size); val results = arrayOfNulls<WorkflowValue>(items.size)
                 val complete = BooleanArray(items.size)
+                val cancelledBubbles = BooleanArray(items.size)
+                val failedPages = BooleanArray(items.size)
                 bounded(items, n, host) { index, item ->
                     val child = frame.child(n.mode == WorkflowMode.ASYNC); child.defineIterator(iterator, item)
                     suspend fun executeItem(): Boolean {
@@ -349,11 +370,16 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                                         true
                                     } catch(stop: WorkflowPageStopped) { false }
                                     catch(cancelled: CancellationException) { throw cancelled }
-                                    catch(failure: Exception) { host.pageFailed(child, failure); host.chapterFinished(child, false); false }
+                                    catch(failure: Exception) { host.pageFailed(child, failure); failedPages[index] = true; true }
                                     finally { withContext(NonCancellable) { if(publish) host.closePage(child) else host.closePreparationPage(child) } }
                                 }
                                 try { complete[index] = work.await() } catch(stop: WorkflowPageStopped) { complete[index] = false }
                             }
+                        }
+                    } else if (iterator.type == WorkflowType.BUBBLE) {
+                        try { complete[index] = host.runBubble(child) { executeItem() } }
+                        catch (stopped: WorkflowBubbleStopped) {
+                            cancelledBubbles[index] = true; complete[index] = true
                         }
                     } else complete[index] = executeItem()
                 }
@@ -362,7 +388,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                 if (itemsValue is WorkflowValue.ListValue && collectionRef != null && frame.canWrite(collectionRef))
                     frame.write(collectionRef, WorkflowValue.ListValue(values.filterNotNull()))
                 n.collectTo?.let { ref ->
-                    require(results.all { it != null }) { "收集结果的每个分支需要返回值" }
+                    require(results.indices.all { cancelledBubbles[it] || failedPages[it] || results[it] != null }) { "收集结果的每个分支需要返回值" }
                     frame.write(ref, WorkflowValue.ListValue(if(n.inputs["flatten"] == WorkflowExpression.Boolean(true)) results.filterNotNull().flatMap { (it as WorkflowValue.ListValue).items } else results.filterNotNull()))
                 }
             }

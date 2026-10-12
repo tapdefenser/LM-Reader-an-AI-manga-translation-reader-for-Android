@@ -9,6 +9,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.abs
 
+internal class ScreenContentTemporarilyOccluded : IllegalStateException("底层窗口暂时被弹窗遮挡")
+
 /** All recognition/tracking requests share one clean source and one window-screenshot rate gate. */
 internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture?,
     private val settings: () -> ScreenTranslationSettings, private val overlay: () -> ScreenOverlay?) : AutoCloseable {
@@ -33,7 +35,7 @@ internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture
     private var sourceEpoch = 1L
     private var closed = false
     val backend get() = if (cleanProjection) "单应用录屏流" else if (settings().usesAccessibility && Build.VERSION.SDK_INT >= 34) "无障碍窗口截图" else "手动录屏截图"
-    val streaming get() = cleanProjection && projection?.contentVisible == true
+    val streaming get() = cleanProjection && projection?.available == true && projection.contentVisible
     fun invalidate() { sourceEpoch++; projectionChecked = false; nextProjectionCheck = 0; cleanProjection = false; projectedBounds = null; cachedWindow?.release(); cachedWindow = null }
     private fun assist() = checkNotNull(ScreenAccessibilityService.instance) { "浏览和视频模式需要启用无障碍辅助" }
 
@@ -42,11 +44,13 @@ internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture
         check(Build.VERSION.SDK_INT >= 34) { "当前系统没有干净窗口截图能力，请使用手动模式" }
         val service = assist()
         val id = service.applicationWindow()?.id
+        if (!service.contentWindowAvailable && service.contentOcclusions.isNotEmpty()) throw ScreenContentTemporarilyOccluded()
         cachedWindow?.takeIf { !fresh && it.frame.windowId == id && SystemClock.uptimeMillis() - it.frame.capturedAt < 334 }?.let { return@withLock it.borrow(sourceEpoch) }
         repeat(3) {
             delay((lastWindowRequest + 334 - SystemClock.uptimeMillis()).coerceAtLeast(0))
             lastWindowRequest = SystemClock.uptimeMillis()
             try {
+                if (!service.contentWindowAvailable && service.contentOcclusions.isNotEmpty()) throw ScreenContentTemporarilyOccluded()
                 val captured = if (Build.VERSION.SDK_INT >= 34) service.capture() else error("当前系统不支持窗口截图")
                 if (service.applicationWindow()?.id != captured.windowId) { captured.close(); throw ScreenCaptureException(AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_WINDOW) }
                 val frame = CapturedScreen(captured.bitmap, captured.bounds, captured.windowId, ++windowSequence, captured.capturedAt) { captured.close() }
@@ -54,6 +58,10 @@ internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture
                 cachedWindow?.release(); cachedWindow = WindowFrame(frame)
                 return@withLock cachedWindow!!.borrow(sourceEpoch)
             } catch (failure: ScreenCaptureException) {
+                if (failure.code == AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_WINDOW) {
+                    service.applicationWindow() // refresh a transition which overtook this request
+                    if (!service.contentWindowAvailable && service.contentOcclusions.isNotEmpty()) throw ScreenContentTemporarilyOccluded()
+                }
                 if (failure.code != AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT && failure.code != AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_WINDOW || it == 2) throw failure
             }
         }
@@ -67,11 +75,11 @@ internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture
         if (cleanProjection || projectionChecked || SystemClock.uptimeMillis() < nextProjectionCheck) return@withLock
         nextProjectionCheck = SystemClock.uptimeMillis() + 2000
         val revision = sourceEpoch
-        val source = projection?.takeIf { it.contentVisible } ?: return@withLock
+        val source = projection?.takeIf { it.available && it.contentVisible } ?: return@withLock
         overlay()?.awaitDraw()
         val reference = window()
         try {
-            val raw = source.capture()
+            val raw = try { source.capture() } catch (failure: ScreenFrameUnavailable) { return@withLock }
             try {
                 // A full-display grant includes our button. Never turn it into a
                 // continuous hide/capture/show loop, even if its resolution looks correct.
@@ -99,9 +107,15 @@ internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture
         val config = settings()
         if (config.requiresAccessibility) {
             chooseContinuousSource()
-            if (cleanProjection && projection?.contentVisible == true) {
+            if (streaming) {
                 val bounds = projectedBounds!!; val sourceStamp = sourceEpoch
-                val raw = projection.capture()
+                val raw = try { checkNotNull(projection).capture() } catch (failure: ScreenFrameUnavailable) {
+                    deferProjection()
+                    return window(fresh)
+                }
+                if (!assist().contentWindowAvailable && assist().contentOcclusions.isNotEmpty()) {
+                    raw.close(); throw ScreenContentTemporarilyOccluded()
+                }
                 if (overlay()?.containsOwnButton(raw) == true) {
                     raw.close(); cleanProjection = false; sourceEpoch++
                     return window()
@@ -121,19 +135,32 @@ internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture
 
     suspend fun motion(): CapturedMotion {
         check(!closed); chooseContinuousSource()
-        val excluded = overlay()?.systemExclusions().orEmpty()
-        if (cleanProjection && projection?.contentVisible == true) {
+        if (streaming) {
             val bounds = projectedBounds!!; val sourceStamp = sourceEpoch
-            val frame = projection.motion(emptyList())
-            return frame.copy(bounds = bounds, sequence = (sourceStamp shl 40) + frame.sequence).excluding(excluded)
+            val frame = try { checkNotNull(projection).motion(emptyList()) } catch (failure: ScreenFrameUnavailable) {
+                deferProjection()
+                return windowMotion()
+            }
+            if (!assist().contentWindowAvailable && assist().contentOcclusions.isNotEmpty()) throw ScreenContentTemporarilyOccluded()
+            return frame.copy(bounds = bounds, sequence = (sourceStamp shl 40) + frame.sequence)
+                .excluding(overlay()?.systemExclusions().orEmpty() + assist().contentOcclusions)
         }
+        return windowMotion()
+    }
+    private fun deferProjection() {
+        cleanProjection = false; projectedBounds = null; sourceEpoch++
+        projectionChecked = false; nextProjectionCheck = SystemClock.uptimeMillis() + 2000
+        android.util.Log.w("ScreenTranslation", "Capture stream unavailable; using accessibility window screenshots")
+    }
+    private suspend fun windowMotion(): CapturedMotion {
         val frame = window()
         try {
             val cached = cachedWindow?.takeIf { it.frame.bitmap === frame.bitmap }
             // Converting the recognition bitmap must never hold the source lock
             // or prevent tiny streaming motion samples from being acquired.
             val gray = cached?.gray ?: withContext(Dispatchers.Default) { frame.gray() }.also { cached?.gray = it }
-            return CapturedMotion(gray, frame.bounds, frame.sequence, frame.capturedAt).excluding(excluded)
+            return CapturedMotion(gray, frame.bounds, frame.sequence, frame.capturedAt)
+                .excluding(overlay()?.systemExclusions().orEmpty() + assist().contentOcclusions)
         }
         finally { frame.close() }
     }

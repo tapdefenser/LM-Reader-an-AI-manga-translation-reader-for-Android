@@ -17,6 +17,20 @@ class UiTranslationTests(unittest.TestCase):
         for key in source:
             self.assertEqual(set(re.findall(r"%\d*\$?[sd]", source[key])), set(re.findall(r"%\d*\$?[sd]", english[key])), key)
 
+    def test_simplified_chinese_resources_stay_complete(self):
+        # The default folder is English; Simplified Chinese lives in the values-b+zh+Hans
+        # qualifier, so a missing or placeholder-broken entry there would silently fall
+        # back to English on a Chinese device.
+        resources = translations.ROOT / "app/src/main/res"
+        def strings(folder):
+            return {element.attrib["name"]: "".join(element.itertext())
+                    for file in folder.glob("*.xml") for element in ET.parse(file).getroot()
+                    if element.tag == "string" and element.attrib.get("translatable") != "false"}
+        source, chinese = strings(resources / "values"), strings(resources / "values-b+zh+Hans")
+        self.assertEqual([], sorted(source.keys() - chinese.keys()))
+        for key in source:
+            self.assertEqual(set(re.findall(r"%\d*\$?[sd]", source[key])), set(re.findall(r"%\d*\$?[sd]", chinese[key])), key)
+
     def test_nested_interpolation_does_not_split_a_kotlin_string(self):
         source = 'Text("版本 ${version} · ${if (expanded) "展开" else "折叠"} · 行数 ${rows.size}")'
         values = translations.literals(source)

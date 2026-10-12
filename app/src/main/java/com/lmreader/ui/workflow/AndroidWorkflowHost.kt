@@ -29,6 +29,7 @@ import kotlin.math.floor
 data class WorkflowChapterInput(val id: String, val name: String, val source: PageSource, val pages: List<ReaderPage>)
 /** Borrowed input: its caller keeps it alive until the host closes. */
 data class WorkflowPageImage(val bitmap: Bitmap, val sha256: String)
+data class WorkflowPageSegmentation(val result: SegResult, val regions: List<SegRegion>, val sha256: String? = null)
 data class WorkflowRunSettings(val source: LocalTranslationLanguage, val target: LocalTranslationLanguage,
     val style: String, val render: BubbleRenderSettings, val segThreshold: Float, val apiProfiles: List<ApiProfile> = emptyList(),
     val segTextScope: SegTextScope = SegTextScope.ALL, val textDetectionThreshold: Float = .35f,
@@ -74,6 +75,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     private val ocrBounds = ConcurrentHashMap<String, List<PixelRect>>()
     private val preparationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val preparedOcr = ConcurrentHashMap<String, Deferred<WorkflowValue>>()
+    private val segmentedHashes = ConcurrentHashMap<String, String>()
     val published = ConcurrentHashMap<String, ReaderPageTranslation>()
     init { inputs.keys.forEach { images["page:$it"] = ImageRef(it) } }
     override fun parallelism(node: WorkflowNode): Int = WorkflowResourceCapacities(
@@ -126,6 +128,18 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     protected open fun timing(pageId: String?, stage: String, elapsedMillis: Long) {}
     protected open suspend fun visionPrepared(pageId: String) {}
     protected open suspend fun regionsDetected(pageId: String, regions: List<SegRegion>) {}
+    protected open suspend fun segmentPage(pageId: String, bitmap: Bitmap, sha256: String, frame: WorkflowFrame): WorkflowPageSegmentation {
+        val result = vision.segment(pageId, bitmap, settings.segThreshold, settings.textDetectionThreshold,
+            sourceSha256 = sha256, scope = settings.segTextScope) {
+            progress(frame, PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total))
+        }
+        return WorkflowPageSegmentation(result, selectSegRegions(result, settings.segTextScope, settings.freeTextMergeGapRatio))
+    }
+    protected fun cancelRegionPreparation(ids: Set<String>) {
+        preparedOcr.filterKeys { key -> ids.any { key.startsWith("bubble:$it:") } }.values
+            .forEach { it.cancel(WorkflowBubbleStopped()) }
+    }
+    internal fun supersedeScreenRegions(ids: Set<String>) = cancelRegionPreparation(ids)
     private suspend fun requestEngine(kind: WorkflowKind, inputs: Map<String, WorkflowValue>, frame: WorkflowFrame): WorkflowValue {
         fun value(key: String) = (inputs.getValue(key) as WorkflowValue.Text).value
         return when (kind) {
@@ -136,9 +150,11 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 val state = image(reference.pageId)
                 try {
                 val detectStarted = System.nanoTime()
-                val seg = vision.segment(reference.pageId, state.bitmap!!, settings.segThreshold, settings.textDetectionThreshold, sourceSha256 = state.hash, scope = settings.segTextScope) { progress(frame, PageTranslationProgress(PageTranslationStage.SEGMENTING, it.completed, it.total)) }
+                val detection = segmentPage(reference.pageId, state.bitmap!!, state.hash, frame)
+                val seg = detection.result
+                detection.sha256?.let { state.hash = it; segmentedHashes[reference.pageId] = it }
                 timing(reference.pageId, "DETECT", (System.nanoTime() - detectStarted) / 1_000_000)
-                val regions = selectSegRegions(seg, settings.segTextScope, settings.freeTextMergeGapRatio)
+                val regions = detection.regions
                 require(regions.size <= 1000) { "气泡过多，请分批处理" }
                 // Invalidate only this page. A fresh generation prevents copied old iterators
                 // from resolving to new geometry when the detector reuses an indexed ID.
@@ -384,7 +400,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 try {
                     val borrowed = pageImages[id]
                     if (borrowed != null && !borrowed.bitmap.isRecycled) {
-                        state.bitmap = borrowed.bitmap; state.hash = borrowed.sha256; state.ownsBitmap = false
+                        state.bitmap = borrowed.bitmap; state.hash = segmentedHashes[id] ?: borrowed.sha256; state.ownsBitmap = false
                     } else {
                     val file = File.createTempFile("workflow-source-", ".image", context.cacheDir).also { temporary = it }
                     val (source, page) = inputs.getValue(id)
@@ -450,19 +466,34 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         pagePreviewed(frame, saved)
     }
     protected open suspend fun pagePreviewed(frame: WorkflowFrame, saved: ReaderPageTranslation) {}
+    override suspend fun previewBubble(frame: WorkflowFrame, bubble: WorkflowValue.Record) {
+        if (!ephemeral || bubble.string("translation").isBlank()) return
+        container.localPageTranslator.pageWriteMutex.withLock {
+            val id = frame.identity(WorkflowSystem.PAGE) ?: return@withLock
+            val state = states[id] ?: return@withLock
+            if (!canPublish(frame) || !geometry.containsKey(bubble.string("id"))) return@withLock
+            val saved = ReaderPageTranslation(id, java.util.UUID.randomUUID().toString(), File(context.cacheDir, "screen-session"),
+                settings.source, settings.target, state.hash, state.width, state.height,
+                kotlin.collections.listOf(translatedRegion(id, bubble)), emptyList(),
+                (System.nanoTime() - state.started) / 1_000_000, settings.render, preview = true)
+            pagePreviewed(frame, saved)
+        }
+    }
     override suspend fun segmentedPage(frame: WorkflowFrame) = previewPage(frame)
     private suspend fun translatedRegions(frame: WorkflowFrame, id: String): List<PageTranslatedRegion> {
         val bubbles = (frame.read(WorkflowRef(WorkflowSystem.PAGE, kotlin.collections.listOf("bubbles"))) as WorkflowValue.ListValue).items
-        val seg = states[id]?.seg ?: error("本页没有执行 SEG，无法建立译文气泡")
+        require(states[id]?.seg != null) { "本页没有执行 SEG，无法建立译文气泡" }
         require(bubbles.size <= 1000 && bubbles.map { (it as WorkflowValue.Record).string("id") }.distinct().size == bubbles.size) { "气泡列表重复或过多" }
-        return bubbles.map { value ->
-            val bubble = value as WorkflowValue.Record; val bubbleId = bubble.string("id")
-            val area = geometry[bubbleId] ?: error("气泡几何必须来自 SEG")
-            require(bubbleId.startsWith("$id:")) { "不能把其他页的气泡回填到本页" }
-            PageTranslatedRegion(PageTextRegion(bubbleId, area.kind, area.bounds, area.contour,
-                bubble.string("source"), ocrBounds[bubbleId] ?:
-                    selectRegionTextLines(area, seg.regions, seg.textLines).map { it.bounds }), bubble.string("translation"))
-        }
+        return bubbles.map { translatedRegion(id, it as WorkflowValue.Record) }
+    }
+    private fun translatedRegion(id: String, bubble: WorkflowValue.Record): PageTranslatedRegion {
+        val bubbleId = bubble.string("id")
+        val area = geometry[bubbleId] ?: error("气泡几何必须来自 SEG")
+        val seg = states[id]?.seg ?: error("本页没有执行 SEG，无法建立译文气泡")
+        require(bubbleId.startsWith("$id:")) { "不能把其他页的气泡回填到本页" }
+        return PageTranslatedRegion(PageTextRegion(bubbleId, area.kind, area.bounds, area.contour,
+            bubble.string("source"), ocrBounds[bubbleId] ?:
+                selectRegionTextLines(area, seg.regions, seg.textLines).map { it.bounds }), bubble.string("translation"))
     }
     override suspend fun completePreparationPage(frame: WorkflowFrame): WorkflowValue.ListValue {
         val id = requireNotNull(frame.identity(WorkflowSystem.PAGE))
@@ -476,6 +507,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     override suspend fun closePreparationPage(frame: WorkflowFrame) {
         val id = frame.identity(WorkflowSystem.PAGE) ?: return
         states[id]?.let { state -> state.mutex.withLock {
+            if (state.closed) return@withLock
             state.prepared = true
             // Only the reloadable image can be released. SEG/OCR and their lease
             // remain protected until this page is published or the run stops.

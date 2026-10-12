@@ -218,17 +218,18 @@ class BubbleOverlaySource internal constructor(seeds: List<OverlaySeed>) {
 /** Holds only vector paths, paints and text layouts; no source or translated bitmap. */
 class BubbleOverlay internal constructor(private val bubbles: List<OverlayBubble>) {
     private val editingPen = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-    fun draw(canvas: Canvas) {
+    fun draw(canvas: Canvas, drawMask: Boolean = true, drawText: Boolean = true) {
         bubbles.forEach { bubble ->
             val rotationSave = canvas.save()
             canvas.rotate(bubble.rotation, (bubble.region.bounds.left + bubble.region.bounds.right) / 2,
                 (bubble.region.bounds.top + bubble.region.bounds.bottom) / 2)
             try {
             val fillSave = canvas.save()
-            try {
+            try { if (drawMask) {
                 bubble.protectedInk?.let { canvas.clipOutPath(it) }
                 canvas.drawPath(bubble.path, bubble.fill)
-            } finally { canvas.restoreToCount(fillSave) }
+            } } finally { canvas.restoreToCount(fillSave) }
+            if (!drawText) return@forEach
             val layout = bubble.layout ?: return@forEach
             val rect = bubble.textRect
             val save = canvas.save()

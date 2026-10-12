@@ -14,6 +14,9 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.accessibility.AccessibilityManager
 import com.lmreader.core.model.PixelRect
+import com.lmreader.core.model.ScreenApplicationWindow
+import com.lmreader.core.model.ScreenApplicationWindows
+import com.lmreader.core.model.ScreenTranslationMode
 import com.lmreader.di.AppContainer
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -21,6 +24,19 @@ import kotlin.coroutines.resumeWithException
 
 /** Window/scroll hints only. Normal touch gestures are delivered unchanged to the application. */
 class ScreenAccessibilityService : AccessibilityService() {
+    private val applicationWindows = ScreenApplicationWindows()
+    private val modalWindowIds = mutableSetOf<Int>()
+    private var contentWindowId = -1
+    internal var contentWindowAvailable = false
+        private set
+    internal var contentPackage = ""
+        private set
+    internal var contentOcclusions: List<PixelRect> = emptyList()
+        private set
+    internal fun windowDiagnostics() = "content=$contentWindowId/$contentPackage occlusions=$contentOcclusions windows=" + windows.map { window ->
+        val bounds = Rect(); window.getBoundsInScreen(bounds)
+        "${window.id}/${window.type}/${window.layer} active=${window.isActive} focused=${window.isFocused} bounds=$bounds"
+    }
     internal var systemExclusions: List<PixelRect> = emptyList()
         private set
     private fun refreshSystemExclusions() {
@@ -42,6 +58,30 @@ class ScreenAccessibilityService : AccessibilityService() {
             }
         }
     }
+    private fun refreshApplicationWindows(event: AccessibilityEvent? = null) {
+        val applications = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+            (Build.VERSION.SDK_INT < 30 || it.displayId == android.view.Display.DEFAULT_DISPLAY) }
+        modalWindowIds.retainAll(applications.map { it.id }.toSet())
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.className?.toString()?.let { it.contains("Dialog", ignoreCase = true) || it.contains("PopupWindow", ignoreCase = true) } == true)
+            modalWindowIds += event.windowId
+        val choices = applications.mapNotNull { window ->
+            val bounds = Rect(); window.getBoundsInScreen(bounds)
+            if (bounds.isEmpty) return@mapNotNull null
+            val root = window.root
+            val pkg = root?.packageName?.toString().orEmpty()
+            @Suppress("DEPRECATION") root?.recycle()
+            ScreenApplicationWindow(window.id, pkg, bounds.toPixelRect(), window.layer, window.isActive, window.isFocused,
+                window.id in modalWindowIds)
+        }
+        if (AppContainer.from(this).screenTranslation.preferences.settings.value.mode != ScreenTranslationMode.BROWSE)
+            applicationWindows.reset()
+        val selection = applicationWindows.update(choices)
+        contentWindowId = selection?.window?.id ?: -1
+        contentWindowAvailable = choices.any { it.id == contentWindowId }
+        contentPackage = selection?.window?.packageName.orEmpty()
+        contentOcclusions = selection?.occlusions.orEmpty()
+    }
     override fun onServiceConnected() {
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_VIEW_SCROLLED or AccessibilityEvent.TYPE_WINDOWS_CHANGED or AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
@@ -51,24 +91,22 @@ class ScreenAccessibilityService : AccessibilityService() {
         }
         instance = this
         refreshSystemExclusions()
+        refreshApplicationWindows()
         AppContainer.from(this).screenTranslation.accessibilityChanged()
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         val controller = AppContainer.from(this).screenTranslation
         if (!controller.state.value.started || !controller.preferences.settings.value.usesAccessibility) return
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) refreshSystemExclusions()
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED || event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            refreshSystemExclusions(); refreshApplicationWindows(event)
+        }
         if (event.packageName?.toString() == packageName) return
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_CLICKED, AccessibilityEvent.TYPE_VIEW_LONG_CLICKED -> controller.interaction(event.windowId, action = true)
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> controller.interaction(event.windowId, action = false)
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> controller.scroll(event.windowId)
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> controller.windowChanged(event.windowId, event.packageName?.toString().orEmpty())
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED -> applicationWindow()?.let { window ->
-                val root = window.root
-                val pkg = root?.packageName?.toString().orEmpty()
-                @Suppress("DEPRECATION") root?.recycle()
-                if (pkg.isNotBlank()) controller.windowChanged(window.id, pkg)
-            }
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED, AccessibilityEvent.TYPE_WINDOWS_CHANGED ->
+                if (contentWindowId >= 0 && contentPackage.isNotBlank()) controller.windowChanged(contentWindowId, contentPackage)
         }
     }
     override fun onInterrupt() { AppContainer.from(this).screenTranslation.accessibilityInterrupted() }
@@ -78,8 +116,11 @@ class ScreenAccessibilityService : AccessibilityService() {
         AppContainer.from(this).screenTranslation.accessibilityInterrupted()
         super.onDestroy()
     }
-    fun applicationWindow(): AccessibilityWindowInfo? = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-        .firstOrNull { it.isActive } ?: windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isFocused }
+    fun applicationWindow(): AccessibilityWindowInfo? {
+        windows.firstOrNull { it.id == contentWindowId }?.let { return it }
+        refreshApplicationWindows()
+        return windows.firstOrNull { it.id == contentWindowId }
+    }
     @androidx.annotation.RequiresApi(34)
     suspend fun capture(): CapturedScreen {
         check(Build.VERSION.SDK_INT >= 34) { "窗口截图需要 Android 14 或以上版本" }
@@ -123,6 +164,8 @@ class ScreenAccessibilityService : AccessibilityService() {
 internal fun Rect.toPixelRect() = PixelRect(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
 class ScreenCaptureException(val code: Int) : IllegalStateException(when (code) {
     AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "截图过于频繁，正在等待下一帧"
+    AccessibilityService.ERROR_TAKE_SCREENSHOT_INVALID_WINDOW -> "当前窗口正在切换，正在等待下一帧"
+    AccessibilityService.ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR -> "系统暂时无法截图，正在重试"
     AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW -> "当前应用禁止截图"
     else -> "无法截取当前窗口，请重新启动屏幕翻译"
 })

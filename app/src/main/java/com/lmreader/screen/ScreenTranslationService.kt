@@ -56,7 +56,11 @@ class ScreenTranslationService : Service() {
                     val capture = if (projectionMode) {
                         @Suppress("DEPRECATION") val result = intent.getParcelableExtra<Intent>("capture") ?: error("截图授权已失效，请重新启动屏幕翻译")
                         val projection = requireNotNull(getSystemService(MediaProjectionManager::class.java).getMediaProjection(Activity.RESULT_OK, result))
-                        ProjectionScreenCapture(this, projection, controller.preferences.settings.value.maximumCaptureEdge) { controller.stop("屏幕截图会话已结束") }
+                        ProjectionScreenCapture(this, projection, controller.preferences.settings.value.maximumCaptureEdge) {
+                            if (Build.VERSION.SDK_INT >= 34 && controller.projectionStopped()) {
+                                ServiceCompat.startForeground(this, NOTICE, notice(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                            } else controller.stop("屏幕截图会话已结束")
+                        }
                     } else null
                     controller.attach(this, capture); running = true
                     scope.launch { merge(controller.state.map { Unit }, controller.vision.loadedResources.map { Unit },

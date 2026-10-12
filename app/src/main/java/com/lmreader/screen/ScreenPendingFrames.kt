@@ -9,7 +9,7 @@ import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 
 internal data class PendingScreenFrame(val pageId: String, val image: File, val bounds: PixelRect,
-    val settings: ScreenTranslationSettings, val snapshot: String)
+    val settings: ScreenTranslationSettings, val snapshot: String, val error: String? = null)
 
 /** Failed/cancelled admitted inputs survive restart, together with the pinned SEG/OCR. */
 internal class ScreenPendingFrames(private val root: File) {
@@ -43,6 +43,7 @@ internal class ScreenPendingFrames(private val root: File) {
     fun admit(frame: PendingScreenFrame) {
         val json = JSONObject().put("id", frame.pageId).put("bounds", org.json.JSONArray(listOf(frame.bounds.left, frame.bounds.top, frame.bounds.right, frame.bounds.bottom)))
             .put("settings", JSONObject(ScreenTranslationPreferences.encode(frame.settings))).put("snapshot", JSONObject(frame.snapshot))
+        frame.error?.let { json.put("error", it) }
         val atomic = AtomicFile(File(root, frame.image.nameWithoutExtension + ".json"))
         val output = atomic.startWrite()
         try { output.write(json.toString().toByteArray(Charsets.UTF_8)); atomic.finishWrite(output) }
@@ -59,7 +60,8 @@ internal class ScreenPendingFrames(private val root: File) {
             require(image.isFile)
             val b = j.getJSONArray("bounds")
             PendingScreenFrame(id, image, PixelRect(b.getDouble(0).toFloat(), b.getDouble(1).toFloat(), b.getDouble(2).toFloat(), b.getDouble(3).toFloat()),
-                ScreenTranslationPreferences.decode(j.getJSONObject("settings").toString()), j.getJSONObject("snapshot").toString())
+                ScreenTranslationPreferences.decode(j.getJSONObject("settings").toString()), j.getJSONObject("snapshot").toString(),
+                if (j.has("error")) j.getString("error") else null)
         }.getOrNull()
     }
     private fun refresh() { count.value = root.listFiles().orEmpty().count { it.extension == "json" } }

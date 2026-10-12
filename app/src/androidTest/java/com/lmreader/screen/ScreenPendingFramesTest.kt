@@ -18,12 +18,13 @@ class ScreenPendingFramesTest {
             store.writeImage(id) { it.write(ByteArray(256 * 1024) { 47 }) }
             val frame = PendingScreenFrame(id, store.file(id), PixelRect(0f, 50f, 1080f, 2300f),
                 ScreenTranslationSettings(translation = MangaTranslationSettings(sourceLanguage = "ja", targetLanguage = "zh-Hans", workflowId = "original")), "{\"schema\":2,\"retries\":3}")
-            store.admit(frame)
+            store.admit(frame.copy(error = "OCR fixture failure"))
             assertEquals(1, store.count.value)
             val restarted = ScreenPendingFrames(root)
             assertTrue(restarted.bytes() > 256 * 1024)
             val restored = restarted.latest()!!
             assertEquals(frame.pageId, restored.pageId); assertEquals(frame.bounds, restored.bounds); assertEquals(frame.snapshot, restored.snapshot)
+            assertEquals("OCR fixture failure", restored.error)
             assertEquals(ScreenTranslationPreferences.encode(frame.settings), ScreenTranslationPreferences.encode(restored.settings))
             assertTrue(store.file(id).isFile)
             restarted.complete(id)

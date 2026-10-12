@@ -5,6 +5,24 @@ import org.junit.Test
 import kotlin.math.*
 
 class ScreenLayeredMotionTest {
+    @Test fun inlineOpaqueDialogIsAnOcclusionButUnrelatedArtAndAFixedToolbarAreNot() {
+        val original = art()
+        val popup = original.copy(pixels = original.pixels.copyOf())
+        for (y in 64 until 208) for (x in 48 until 144) popup.pixels[y * original.width + x] = 252.toByte()
+        val areas = screenVisualOcclusions(original, popup)
+        assertTrue("Keep the surrounding art and mask the foreign center", areas.isNotEmpty())
+        assertTrue(areas.all { it.intersects(PixelRect(48f, 64f, 144f, 208f)) })
+        assertTrue("Subpixel motion jitter must not erase a stationary panel", screenVisualOcclusions(original, popup,
+            ScreenTransform(1.0025f, -.3f, -.238f)).isNotEmpty())
+        val unrelated = original.copy(pixels = ByteArray(original.pixels.size).also { java.util.Random(415).nextBytes(it) })
+        assertTrue(screenVisualOcclusions(original, unrelated).isEmpty())
+        for (y in 220 until original.height) for (x in 0 until original.width) unrelated.pixels[y * original.width + x] = original.pixels[y * original.width + x]
+        assertTrue("A retained toolbar cannot disguise a real page cut", screenVisualOcclusions(original, unrelated).isEmpty())
+        val repeated = original.copy(pixels = ByteArray(original.pixels.size).also { java.util.Random(715).nextBytes(it) })
+        for (y in 0 until original.height) for (x in 48 until 120) repeated.pixels[y * original.width + x] = original.pixels[y * original.width + x]
+        assertTrue("Repeated bubble geometry surrounded by new art is still a page cut", screenVisualOcclusions(original, repeated).isEmpty())
+        assertTrue(screenVisualOcclusions(original, tint(original, .65f)).isEmpty())
+    }
     private fun art(): ScreenGrayFrame {
         val w = 192; val h = 256
         val random = java.util.Random(19732)
@@ -160,6 +178,40 @@ class ScreenLayeredMotionTest {
         val stable = objects[0].copy(attachment = ScreenObjectAttachment.FIXED, sampledSequence = 1)
         assertEquals("A static frame must not change layer ownership", ScreenObjectAttachment.FIXED,
             ScreenObjectTracker.evaluate(listOf(stable), frame, bounds, ScreenTransform(), 2).single().attachment)
+    }
+    @Test fun mostlyOffscreenPanZoomAndTintCompareOnlyTheirVisibleTexture() {
+        val frame = art(); val bounds = PixelRect(0f, 0f, 192f, 256f)
+        val source = PixelRect(40f, 75f, 140f, 150f)
+        val template = ScreenObjectTemplate.capture(frame, bounds, source)!!
+        val pose = ScreenTransform(1.15f, -90f, -115f)
+        val current = tint(warp(frame, pose), .7f, 55)
+        val visible = template.compare(current, bounds, pose.bounds(source))!!
+        assertTrue("Only a small part of the original is on screen: $visible", visible.matches)
+        assertEquals(1f, visible.visible, .001f)
+        val obj = ScreenMotionObject("partial", 1, source, ScreenTransform(), template)
+        for (local in listOf(false, true)) {
+            val followed = ScreenObjectTracker.evaluate(listOf(obj), current, bounds, pose, 1, local).single()
+            assertFalse(followed.remove); assertEquals(0, followed.failures); assertEquals(pose, followed.sourceToScreen)
+            val random = java.util.Random(951)
+            val unrelated = frame.copy(pixels = ByteArray(frame.pixels.size) { random.nextInt(256).toByte() })
+            val partial = obj.copy(sourceToScreen = pose, sampledSequence = 1)
+            val first = ScreenObjectTracker.evaluate(listOf(partial), unrelated, bounds, ScreenTransform(), 2, local).single()
+            assertEquals(1, first.failures)
+            val next = partial.copy(failures = first.failures, sampledSequence = 2)
+            assertTrue(ScreenObjectTracker.evaluate(listOf(next), unrelated, bounds, ScreenTransform(), 3, local).single().remove)
+        }
+    }
+    @Test fun visibleFlatReplacementRejectsButMaskedPopupAndOffscreenObjectsDoNot() {
+        val frame = art(); val bounds = PixelRect(0f, 0f, 192f, 256f); val source = PixelRect(40f, 75f, 140f, 150f)
+        val obj = ScreenMotionObject("region", 1, source, ScreenTransform(), ScreenObjectTemplate.capture(frame, bounds, source), failures = 1)
+        val blank = frame.copy(pixels = ByteArray(frame.pixels.size) { 230.toByte() })
+        assertTrue(ScreenObjectTracker.evaluate(listOf(obj), blank, bounds, ScreenTransform(), 1).single().remove)
+        val hidden = blank.copy(valid = ByteArray(frame.pixels.size))
+        assertFalse(ScreenObjectTracker.evaluate(listOf(obj), hidden, bounds, ScreenTransform(), 1).single().remove)
+        assertFalse("Faint surviving texture under an almost opaque tint is inconclusive, not unrelated",
+            ScreenObjectTracker.evaluate(listOf(obj), tint(frame, .97f, 55), bounds, ScreenTransform(), 1).single().remove)
+        val outside = obj.copy(sourceToScreen = ScreenTransform(y = -300f))
+        assertFalse(ScreenObjectTracker.evaluate(listOf(outside), blank, bounds, ScreenTransform(), 1).single().remove)
     }
     @Test fun deletionRequiresTwoDistinctValidMismatchesAndPartialVisibilityIsPreserved() {
         val frame = art(); val bounds = PixelRect(0f, 0f, 192f, 256f); val source = PixelRect(40f, 75f, 140f, 150f)

@@ -19,18 +19,28 @@ class ScreenObjectTemplate private constructor(private val samples: List<Sample>
             objectBounds.left + support.right * objectBounds.width,
             objectBounds.top + support.bottom * objectBounds.height)
         val appearance = ScreenAppearanceSamples()
+        var onScreen = 0
         for (sample in samples) {
             val x = (patch.left + sample.u * patch.width - frameBounds.left) * frame.width / frameBounds.width
             val y = (patch.top + sample.v * patch.height - frameBounds.top) * frame.height / frameBounds.height
+            // Off-screen strokes are neither a mismatch nor missing evidence.
+            // Occluded on-screen samples still count, so a popup cannot look like
+            // a confidently unrelated object through a handful of remaining pixels.
+            if (!inside(frame, x, y)) continue
+            onScreen++
             val value = pixel(frame, x, y) ?: continue
             appearance.add(sample.value, value)
         }
-        val correlation = appearance.correlation() ?: return null
-        return Similarity(ScreenAppearanceSamples.error(correlation), correlation, appearance.count.toFloat() / samples.size)
+        val correlation = appearance.correlation(rejectFlatCurrent = true) ?: return null
+        return Similarity(ScreenAppearanceSamples.error(correlation), correlation, appearance.count.toFloat() / onScreen)
     }
+    fun compareOriginalFrame(frame: ScreenGrayFrame, frameBounds: PixelRect, objectBounds: PixelRect): Similarity? =
+        frame.trackingContrast()?.let { compare(it, frameBounds, objectBounds) }
     companion object {
+        private fun inside(frame: ScreenGrayFrame, x: Float, y: Float) =
+            x >= 1 && y >= 1 && x < frame.width - 2 && y < frame.height - 2
         private fun pixel(frame: ScreenGrayFrame, x: Float, y: Float): Float? {
-            if (x < 1 || y < 1 || x >= frame.width - 2 || y >= frame.height - 2) return null
+            if (!inside(frame, x, y)) return null
             val l = floor(x).toInt(); val t = floor(y).toInt(); val i = t * frame.width + l
             if (frame.valid?.let { it[i] == 0.toByte() || it[i + 1] == 0.toByte() ||
                 it[i + frame.width] == 0.toByte() || it[i + frame.width + 1] == 0.toByte() } == true) return null
@@ -39,8 +49,11 @@ class ScreenObjectTemplate private constructor(private val samples: List<Sample>
                 (frame.at(l, t + 1) * (1 - u) + frame.at(l + 1, t + 1) * u) * v
         }
         fun capture(source: ScreenGrayFrame, frameBounds: PixelRect, objectBounds: PixelRect): ScreenObjectTemplate? {
-            if (objectBounds.width <= 0 || objectBounds.height <= 0) return null
             val frame = source.trackingContrast() ?: return null
+            return captureContrast(frame, frameBounds, objectBounds)
+        }
+        internal fun captureContrast(frame: ScreenGrayFrame, frameBounds: PixelRect, objectBounds: PixelRect): ScreenObjectTemplate? {
+            if (objectBounds.width <= 0 || objectBounds.height <= 0) return null
             val mx = minOf(objectBounds.width * .15f, frameBounds.width * 3 / frame.width)
             val my = minOf(objectBounds.height * .15f, frameBounds.height * 3 / frame.height)
             val patch = PixelRect(objectBounds.left - mx, objectBounds.top - my, objectBounds.right + mx, objectBounds.bottom + my)
@@ -71,7 +84,7 @@ data class ScreenObjectDecision(val id: String, val revision: Long, val sourceTo
 
 object ScreenObjectTracker {
     fun evaluate(objects: List<ScreenMotionObject>, frame: ScreenGrayFrame, bounds: PixelRect,
-        delta: ScreenTransform, sequence: Long): List<ScreenObjectDecision> = objects.map { obj ->
+        delta: ScreenTransform, sequence: Long, allowFixedCorrection: Boolean = true): List<ScreenObjectDecision> = objects.map { obj ->
         val moving = obj.sourceToScreen.then(delta)
         val fixed = obj.sourceToScreen
         fun decision(pose: ScreenTransform, attachment: ScreenObjectAttachment, failures: Int = 0, remove: Boolean = false) =
@@ -80,6 +93,10 @@ object ScreenObjectTracker {
             return@map decision(if (obj.attachment == ScreenObjectAttachment.FIXED) fixed else moving, obj.attachment, obj.failures)
         }
         val movingMatch = obj.template.compare(frame, bounds, moving.bounds(obj.sourceBounds))
+        if (!allowFixedCorrection) {
+            val failures = if (movingMatch?.rejects == true) obj.failures + 1 else 0
+            return@map decision(moving, ScreenObjectAttachment.CONTENT, failures, remove = failures >= 2)
+        }
         val fixedMatch = obj.template.compare(frame, bounds, fixed.bounds(obj.sourceBounds))
         if (movingMatch?.matches == true && fixedMatch?.matches == true &&
             abs(moving.scale / fixed.scale - 1) < .002f && abs(moving.x - fixed.x) < .35f && abs(moving.y - fixed.y) < .35f)

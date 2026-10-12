@@ -78,13 +78,28 @@ class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-prepr
             }
         }
         try {
-            if (needSeg) warm(segPool, segConcurrency) { it.segment("warmup", sample) }
+            if (needSeg) warm(segPool, segConcurrency) {
+                if ("seg" !in it.residentModels()) it.segment("warmup", sample)
+            }
             if (needTextDetection || languages.isNotEmpty()) warm(ocrPool, ocrConcurrency) { session ->
-                session.detectTextLines("warmup", sample)
-                for (language in languages) session.recognize("warmup", sample, language, null,
-                    listOf(DetectedTextLine(PixelRect(0f, 0f, 64f, 64f), 1f)))
+                val resident = session.residentModels()
+                if ("det" !in resident) session.detectTextLines("warmup", sample)
+                for (language in languages.distinctBy { it == LocalOcrLanguage.KOREAN }) {
+                    if ((if (language == LocalOcrLanguage.KOREAN) "ko" else "rec") !in resident)
+                        session.recognize("warmup", sample, language, null,
+                            listOf(DetectedTextLine(PixelRect(0f, 0f, 64f, 64f), 1f)))
+                }
             }
         } finally { sample.recycle() }
+    }
+    /** Rebuild only the pool whose backend changed; trim unused models/clones before warming additions. */
+    suspend fun reconfigure(needSeg: Boolean, languages: Set<LocalOcrLanguage>,
+        needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
+        val next = settings()
+        segPool.configure(next)
+        ocrPool.configure(next)
+        retainModels(needSeg, languages, needTextDetection)
+        prepare(needSeg, languages, needTextDetection)
     }
     suspend fun retainModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>, needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
         segPool.retain(if (needSeg) segConcurrency else 0, needSeg, false, emptySet())
@@ -145,6 +160,16 @@ private class VisionSessionPool(private val context: Context, private val name: 
             finally { slot.mutex.unlock(); revision.update { it + 1 } }
         }
         retainedSettings = null
+    }
+    suspend fun configure(next: VisionExecutionSettings) = configuration.withLock {
+        val previous = retainedSettings
+        val backendChanged = previous != null &&
+            (if (name == "seg") previous.segGpu != next.segGpu else previous.ocrBackend != next.ocrBackend)
+        if (backendChanged) for (slot in slots) slot.mutex.withLock {
+            slot.session?.releaseModels(); slot.session = null; slot.settings = null
+        }
+        retainedSettings = next
+        revision.update { it + 1 }
     }
     suspend fun retain(limit: Int, needSeg: Boolean, needTextDetection: Boolean, languages: Set<LocalOcrLanguage>) = configuration.withLock {
         slots.forEachIndexed { index, slot ->

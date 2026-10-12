@@ -5,6 +5,61 @@ import org.junit.Test
 
 class ScreenBrowseRegionsTest {
     private val screen = PixelRect(0f, 0f, 400f, 800f)
+    @Test fun fragmentedOwnershipIsPackedWhileThinLShapedExposuresStayBounded() {
+        val cut = screenExposedRegions(screen, PixelRect(80f, 200f, 230f, 400f))
+        assertEquals(listOf(screen), screenBrowseRecognitionCrops(cut, listOf(screen), 0f))
+        val strips = listOf(PixelRect(0f, 700f, 400f, 800f), PixelRect(300f, 0f, 400f, 700f))
+        assertEquals(2, screenBrowseRecognitionCrops(strips, listOf(screen), 0f).size)
+        val thin = listOf(PixelRect(0f, 700f, 8f, 800f), PixelRect(8f, 700f, 16f, 800f))
+        assertEquals(listOf(PixelRect(0f, 700f, 16f, 800f)), screenBrowseRecognitionCrops(thin, listOf(screen), 0f))
+    }
+    @Test fun contextNeverBridgesTwoIndependentSelectedAreas() {
+        val scopes = listOf(PixelRect(0f, 0f, 80f, 800f), PixelRect(320f, 0f, 400f, 800f))
+        assertEquals(scopes, screenBrowseRecognitionCrops(listOf(screen), scopes, 64f))
+    }
+    @Test fun mergeMembershipDoesNotFollowTheBoundingRectangle() {
+        val fresh = listOf(ScreenSourceRegion("new", PixelRect(100f, 600f, 200f, 660f)))
+        val old = listOf(ScreenSourceRegion("near", PixelRect(100f, 530f, 200f, 595f)),
+            ScreenSourceRegion("far", PixelRect(5f, 600f, 50f, 700f)))
+        val groups = screenBrowseMergeGroups(fresh, old, 8f)
+        assertEquals(listOf("near"), groups.single().old.map { it.id })
+        assertFalse(groups.single().bounds.intersects(old[1].bounds))
+    }
+    @Test fun zeroThresholdIncludesTouchingButNotSeparatedSourceFrames() {
+        val fresh = listOf(ScreenSourceRegion("new", PixelRect(100f, 300f, 200f, 350f)))
+        val old = listOf(ScreenSourceRegion("touch", PixelRect(100f, 250f, 200f, 300f)),
+            ScreenSourceRegion("gap", PixelRect(210f, 300f, 300f, 350f)))
+        assertEquals(setOf("touch"), screenBrowseMergeGroups(fresh, old, 0f).single().old.map { it.id }.toSet())
+        assertEquals(setOf("touch", "gap"), screenBrowseMergeGroups(fresh, old, 10f).single().old.map { it.id }.toSet())
+    }
+    @Test fun movedAndZoomedSourceGeometryDeterminesMergeMembership() {
+        val old = PixelRect(100f, 300f, 200f, 350f)
+        val pose = ScreenTransform(1.5f, -50f, -450f)
+        val moved = pose.bounds(old)
+        val new = ScreenSourceRegion("new", PixelRect(moved.left, moved.bottom, moved.right, moved.bottom + 50f))
+        assertTrue(screenBrowseMergeGroups(listOf(new), listOf(ScreenSourceRegion("old", old)), 0f).single().old.isEmpty())
+        assertEquals(listOf("old"), screenBrowseMergeGroups(listOf(new), listOf(ScreenSourceRegion("old", moved)), 0f).single().old.map { it.id })
+    }
+    @Test fun unchangedReuseRequiresBothGeometryAndStrongVisibleAppearance() {
+        val bounds = PixelRect(30f, 40f, 200f, 100f)
+        val good = ScreenObjectTemplate.Similarity(0f, .99f, 1f)
+        assertTrue(screenSameSourceRegion(bounds, bounds, good))
+        assertFalse(screenSameSourceRegion(bounds, bounds, good.copy(correlation = .8f)))
+        assertFalse(screenSameSourceRegion(bounds, bounds, good.copy(visible = .7f)))
+        assertFalse(screenSameSourceRegion(bounds, bounds.offset(100f, 0f), good))
+        assertFalse(screenSameSourceRegion(bounds, bounds, null))
+    }
+    @Test fun replacementsWaitForEveryDetectedFragmentAndNeverDeleteForEmptyOutput() {
+        val a = ScreenSourceRegion("old-a", PixelRect(0f, 0f, 100f, 100f))
+        val b = ScreenSourceRegion("old-b", PixelRect(200f, 200f, 300f, 300f))
+        val crop = ScreenMergedCrop(screen, setOf(a.id, b.id), replacedSources = listOf(a, b))
+        val detected = listOf(ScreenSourceRegion("a1", PixelRect(0f, 0f, 100f, 50f)),
+            ScreenSourceRegion("a2", PixelRect(0f, 50f, 100f, 100f)), ScreenSourceRegion("b1", b.bounds))
+        assertTrue(screenReadyReplacements(crop, emptyList(), emptySet()).isEmpty())
+        assertTrue(screenReadyReplacements(crop, detected, emptySet()).isEmpty())
+        assertEquals(setOf("old-b"), screenReadyReplacements(crop, detected, setOf("a1", "b1")))
+        assertEquals(setOf("old-a", "old-b"), screenReadyReplacements(crop, detected, setOf("a1", "a2", "b1")))
+    }
     @Test fun mergedPixelsIncludeTransitiveOldRegionsAndOtherNewCrops() {
         val old = listOf(ScreenSourceRegion("a", PixelRect(80f, 450f, 190f, 600f)),
             ScreenSourceRegion("b", PixelRect(180f, 400f, 250f, 470f)),

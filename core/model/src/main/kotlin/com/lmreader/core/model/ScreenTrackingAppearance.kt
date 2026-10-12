@@ -25,14 +25,16 @@ internal class ScreenAppearanceSamples {
     var count = 0; private set
     private var a = 0.0; private var b = 0.0
     private var aa = 0.0; private var bb = 0.0; private var ab = 0.0
+    val textured get() = count >= 12 && aa - a * a / count >= count * 4.0
     fun add(first: Float, second: Float) {
         count++; a += first; b += second
         aa += first.toDouble() * first; bb += second.toDouble() * second; ab += first.toDouble() * second
     }
-    fun correlation(): Float? {
+    fun correlation(rejectFlatCurrent: Boolean = false): Float? {
         if (count < 12) return null
         val va = aa - a * a / count; val vb = bb - b * b / count
-        if (minOf(va, vb) < count * 4.0) return null
+        if (va < count * 4.0) return null
+        if (vb < count * 4.0) return if (rejectFlatCurrent && vb < count * .01) 0f else null
         return ((ab - a * b / count) / sqrt(va * vb)).toFloat().coerceIn(-1f, 1f)
     }
     companion object {

@@ -42,6 +42,14 @@ class ScreenTranslationPreferencesTest {
         assertEquals(200, decoded.sampleIntervalMillis)
         assertEquals(ScreenTrackingAlgorithm.GLOBAL_AND_REGIONS, decoded.trackingAlgorithm)
     }
+    @Test fun browseMergeDistanceRoundTripsAndOldSettingsUseEightPixels() {
+        val settings = ScreenTranslationSettings(mode = ScreenTranslationMode.BROWSE, browseMergeDistancePixels = 23)
+        val decoded = ScreenTranslationPreferences.decode(ScreenTranslationPreferences.encode(settings))
+        assertEquals(ScreenTranslationMode.BROWSE, decoded.mode)
+        assertEquals(23, decoded.browseMergeDistancePixels)
+        val old = org.json.JSONObject(ScreenTranslationPreferences.encode(settings)); old.remove("browseMergeDistance")
+        assertEquals(8, ScreenTranslationPreferences.decode(old.toString()).browseMergeDistancePixels)
+    }
     @Test fun presetsAndBothModesRoundTripWithIndependentOrientations() {
         val browse = ScreenRegionSelection("manga", listOf(ScreenNormalizedRegion(.1f, .2f, .8f, .9f)))
         val video = ScreenRegionSelection("subtitles", landscape = listOf(ScreenNormalizedRegion(.2f, .6f, .9f, .95f)))

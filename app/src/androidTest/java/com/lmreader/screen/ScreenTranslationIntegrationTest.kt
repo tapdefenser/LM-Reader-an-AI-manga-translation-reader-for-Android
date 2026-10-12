@@ -25,7 +25,8 @@ class ScreenTranslationIntegrationTest {
     private val controller get() = container.screenTranslation
     private suspend fun waitState(predicate: (ScreenTranslationState) -> Boolean) = withTimeout(90_000) { controller.state.first(predicate) }
     private suspend fun start(mode: ScreenTranslationMode,
-        workflowId: String = TranslationWorkflow.LOCAL_MACHINE_ID, appStream: Boolean = false, manualProjection: Boolean = false): ScreenTranslationSettings {
+        workflowId: String = TranslationWorkflow.LOCAL_MACHINE_ID, appStream: Boolean = false, manualProjection: Boolean = false,
+        regions: ScreenRegionSelection = ScreenRegionSelection()): ScreenTranslationSettings {
         // Instrumentation force-stops the old target process, including its
         // bound assistant. Rebind after startup while automation leaves normal
         // accessibility services enabled. This changes only the MuMu test app.
@@ -39,7 +40,8 @@ class ScreenTranslationIntegrationTest {
         val original = controller.preferences.current()
         val settings = ScreenTranslationSettings(mode = mode, preferAccessibility = !manualProjection,
             translation = MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans", workflowId = workflowId, segTextScope = SegTextScope.FREE_TEXT),
-            vision = VisionExecutionSettings(1, 1, false, OcrBackend.CPU), maximumCaptureEdge = 1600, sampleIntervalMillis = 200)
+            vision = VisionExecutionSettings(1, 1, false, OcrBackend.CPU), maximumCaptureEdge = 1600, sampleIntervalMillis = 200,
+            browseRegions = regions, videoRegions = regions)
         controller.preferences.update { settings }
         controller.preferences.settings.first { it.mode == mode && it.preferAccessibility == !manualProjection && it.translation.sourceLanguage == "en" && it.translation.workflowId == workflowId }
         withContext(Dispatchers.Main) { controller.start(context) }
@@ -104,6 +106,450 @@ class ScreenTranslationIntegrationTest {
         }
     }
 
+    private suspend fun awaitApplied(settings: (ScreenTranslationSettings) -> Boolean = { true },
+        workflowId: String? = null, revision: Int? = null) = withTimeout(90_000) {
+        while (!withContext(Dispatchers.Main) {
+            controller.state.value.engine == ScreenEngineState.READY &&
+                controller.appliedEngineSettings()?.let(settings) == true &&
+                (workflowId == null || controller.appliedEngineWorkflow()?.id == workflowId) &&
+                (revision == null || controller.appliedEngineWorkflow()?.revision == revision)
+        }) delay(20)
+    }
+
+    @Test fun liveSettingsRetainOcrAndAddOrRemoveOnlyNeededSegClones() = runBlocking<Unit> {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            val original = start(ScreenTranslationMode.MANUAL)
+            val observed = java.util.concurrent.CopyOnWriteArrayList<List<LoadedEngineResource>>()
+            val observer = launch(start = CoroutineStart.UNDISPATCHED) { controller.vision.loadedResources.collect { observed += it } }
+            try {
+                val initial = controller.vision.loadedResources.first { it.size == 2 }
+                controller.preferences.update { it.copy(sampleIntervalMillis = 777) }
+                awaitApplied({ it.sampleIntervalMillis == 777 })
+                controller.preferences.update { it.copy(translation = it.translation.copy(segTextScope = SegTextScope.ALL)) }
+                awaitApplied({ it.translation.segTextScope == SegTextScope.ALL })
+                controller.vision.loadedResources.first { it.size == 3 && it.any { r -> r.kind == InferenceEngineKind.SEG } }
+                controller.preferences.update { it.copy(vision = it.vision.copy(segConcurrency = 2)) }
+                awaitApplied({ it.vision.segConcurrency == 2 })
+                controller.vision.loadedResources.first { it.count { r -> r.kind == InferenceEngineKind.SEG } == 2 }
+                controller.preferences.update { it.copy(translation = it.translation.copy(segTextScope = SegTextScope.FREE_TEXT)) }
+                awaitApplied({ it.translation.segTextScope == SegTextScope.FREE_TEXT })
+                val final = controller.vision.loadedResources.first { it.size == 2 }
+                assertEquals(initial.map { it.id }.toSet(), final.map { it.id }.toSet())
+                assertTrue("Common OCR resources must remain resident throughout hot reload: $observed",
+                    observed.all { resources -> initial.all { old -> resources.any { it.id == old.id } } })
+                assertTrue(container.localTranslator.loadedResources.value.isNotEmpty())
+            } finally {
+                observer.cancelAndJoin(); controller.stopAndAwait(); controller.preferences.update { original }
+            }
+        }
+    }
+
+    @Test fun selectedWorkflowSaveAndSwitchReconcileResourcesAndResumeBrowseWithoutTapping() = runBlocking<Unit> {
+        val changed = container.translationWorkflows.create()
+        val unrelated = container.translationWorkflows.create()
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                val original = start(ScreenTranslationMode.BROWSE)
+                try {
+                    fixture(); withContext(Dispatchers.Main) { controller.tap() }
+                    waitState { !it.busy && it.bubbles > 0 }
+                    controller.preferences.update { it.copy(translation = it.translation.copy(workflowId = changed.id)) }
+                    awaitApplied(workflowId = changed.id, revision = changed.revision)
+                    assertTrue(controller.state.value.continuous)
+                    controller.vision.loadedResources.first { it.size == 1 && it.single().id.endsWith(":det") }
+                    withTimeout(10_000) { container.localTranslator.loadedResources.first { it.isEmpty() } }
+                    val edited = container.translationWorkflows.update(changed.copy(program = WorkflowTemplates.localMachine(), retries = 0))
+                    awaitApplied(workflowId = changed.id, revision = edited.revision)
+                    assertTrue(controller.state.value.continuous)
+                    waitState { !it.busy && it.bubbles > 0 }
+                    assertTrue(container.localTranslator.loadedResources.value.isNotEmpty())
+                    val before = withContext(Dispatchers.Main) { controller.bubblePositions().keys }
+                    container.translationWorkflows.update(unrelated.copy(name = "Unrelated saved edit"))
+                    delay(600)
+                    assertEquals("Unselected workflow edits must not interrupt this screen session", before,
+                        withContext(Dispatchers.Main) { controller.bubblePositions().keys })
+                    // Manual stop remains authoritative even when the selected workflow changes.
+                    withContext(Dispatchers.Main) { controller.stopEngine() }
+                    waitState { it.engine == ScreenEngineState.STOPPED }
+                    container.translationWorkflows.update(edited.copy(name = "Saved while stopped"))
+                    controller.preferences.update { it.copy(sampleIntervalMillis = 888) }
+                    delay(600)
+                    assertEquals(ScreenEngineState.STOPPED, controller.state.value.engine)
+                    assertTrue(controller.vision.loadedResources.value.isEmpty())
+                } finally { controller.stopAndAwait(); controller.preferences.update { original } }
+            }
+        } finally {
+            container.translationWorkflows.delete(changed.id); container.translationWorkflows.delete(unrelated.id)
+        }
+    }
+
+    @Test fun liveApiProfileAndWorkflowPromptEditsApplyToNextScreenRequests() = runBlocking<Unit> {
+        val profileId = java.util.UUID.randomUUID().toString()
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val server = okhttp3.mockwebserver.MockWebServer().apply {
+            dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse {
+                    requests += request.body.readUtf8()
+                    return okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream")
+                        .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"Translated\"}}]}\n\ndata: [DONE]\n\n")
+                }
+            }
+            start()
+        }
+        val created = container.translationWorkflows.create()
+        val profile = ApiProfile(profileId, ApiProfileKind.LLM, "Live API fixture", server.url("/v1").toString(), model = "initial-model", retryCount = 0)
+        fun program(prompt: String) = com.lmreader.core.workflow.WorkflowEditing.update(WorkflowTemplates.localMachine(), "translate") { node ->
+            node.copy(kind = WorkflowKind.API, resultType = WorkflowType.TEXT, inputs = mapOf(
+                "profile" to WorkflowExpression.Text(profileId), "prompt" to WorkflowExpression.Text(prompt)))
+        }
+        try {
+            container.apiProfiles.save(profile)
+            val selected = container.translationWorkflows.update(created.copy(program = program("initial-prompt"), retries = 0))
+            ActivityScenario.launch(MainActivity::class.java).use {
+                val original = start(ScreenTranslationMode.BROWSE, workflowId = created.id)
+                try {
+                    fixture(); withContext(Dispatchers.Main) { controller.tap() }
+                    waitState { !it.busy && it.bubbles > 0 }
+                    container.apiProfiles.save(profile.copy(model = "updated-model"))
+                    withTimeout(60_000) { while (requests.none { it.contains("updated-model") }) delay(20) }
+                    val edited = container.translationWorkflows.update(selected.copy(program = program("updated-prompt")))
+                    awaitApplied(workflowId = created.id, revision = edited.revision)
+                    withTimeout(60_000) { while (requests.none { it.contains("updated-prompt") && it.contains("updated-model") }) delay(20) }
+                    waitState { it.continuous && !it.busy && it.bubbles > 0 }
+                } finally { controller.stopAndAwait(); controller.preferences.update { original } }
+            }
+        } finally {
+            container.translationWorkflows.delete(created.id); container.apiProfiles.delete(profileId); server.shutdown()
+        }
+    }
+
+    @Test fun invalidAndRapidConfigurationChangesRecoverToLatestRequestedEngine() = runBlocking<Unit> {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            val original = start(ScreenTranslationMode.MANUAL)
+            try {
+                controller.preferences.update { it.copy(translation = it.translation.copy(workflowId = "deleted-fixture-workflow")) }
+                waitState { it.engine == ScreenEngineState.FAILED }
+                // Validation failures must not discard the last usable models.
+                assertEquals(setOf("det", "rec"), controller.vision.loadedResources.value.map { it.id.substringAfterLast(":") }.toSet())
+                controller.preferences.update { it.copy(translation = it.translation.copy(workflowId = TranslationWorkflow.LOCAL_MACHINE_ID, segTextScope = SegTextScope.ALL)) }
+                controller.preferences.settings.first { it.translation.segTextScope == SegTextScope.ALL }
+                controller.preferences.update { it.copy(vision = it.vision.copy(segGpu = true), sampleIntervalMillis = 654) }
+                controller.preferences.update { it.copy(vision = it.vision.copy(segGpu = false),
+                    translation = it.translation.copy(segTextScope = SegTextScope.FREE_TEXT), sampleIntervalMillis = 987) }
+                awaitApplied({ it.sampleIntervalMillis == 987 && !it.vision.segGpu && it.translation.segTextScope == SegTextScope.FREE_TEXT })
+                withTimeout(10_000) { controller.vision.loadedResources.first { it.size == 2 && it.none { r -> r.kind == InferenceEngineKind.SEG } } }
+                fixture(); withContext(Dispatchers.Main) { controller.tap() }
+                waitState { !it.busy && it.bubbles > 0 }
+            } finally { controller.stopAndAwait(); controller.preferences.update { original } }
+        }
+    }
+
+    @Test fun engineWarmupKeepsItsAdmissionLimitWhenAvailableMemoryChanges() = runBlocking<Unit> {
+        controller.stopAndAwait()
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val translator = com.lmreader.core.translation.BergamotTextTranslator(
+            { container.translationModels.installedCatalog() }, container.translationInstaller,
+            { MachineTranslationResources(2, 1024) },
+            { if (reads.incrementAndGet() <= 2) 4L * 1024 * 1_048_576 else 64L * 1_048_576 })
+        val owner = "warmup-memory-fixture"
+        try {
+            withTimeout(20_000) { translator.prepare(owner, setOf(LocalTranslationLanguage.ENGLISH to LocalTranslationLanguage.CHINESE_SIMPLIFIED)) }
+            assertEquals(2, translator.loadedResources.value.size)
+            assertEquals("Warm-up must snapshot capacity once rather than change it between workers", 2, reads.get())
+        } finally { translator.unpin(owner); translator.retainModels(emptySet()) }
+    }
+
+    @Test fun dialogsAndInlineMenusKeepPublishedBubblesAndTrackingResumesAfterDismissal() = runBlocking<Unit> {
+        for (appStream in listOf(false, true)) {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+                waitState { it.inside }
+                val original = start(ScreenTranslationMode.BROWSE, appStream = appStream)
+                fun popup(window: Boolean = false, inline: Boolean = false) {
+                    context.startActivity(Intent().setComponent(ComponentName(instrumentation.context.packageName, ScreenFixtureActivity::class.java.name))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        .putExtra("popup", window).putExtra("inlinePopup", inline).putExtra("fixedControls", true))
+                }
+                try {
+                    fixture(fixedControls = true, orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                    withContext(Dispatchers.Main) { controller.traceMotion = true; controller.motionTrace.clear(); controller.tap() }
+                    waitState { it.bubbles > 0 && !it.busy }
+                    val before = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                    popup(window = true)
+                    try { withTimeout(3000) { while (ScreenAccessibilityService.instance?.contentOcclusions.isNullOrEmpty()) delay(20) } }
+                    catch (timeout: TimeoutCancellationException) { throw AssertionError("Dialog detection appStream=$appStream: ${ScreenAccessibilityService.instance?.windowDiagnostics()} trace=${controller.motionTrace} root=${automation.rootInActiveWindow}", timeout) }
+                    delay(1500)
+                    assertEquals("A real dialog must not clear the underlying page: ${controller.motionTrace}", before.keys,
+                        withContext(Dispatchers.Main) { controller.bubblePositions().keys })
+                    popup(); delay(650)
+                    assertEquals(before.keys, withContext(Dispatchers.Main) { controller.bubblePositions().keys })
+                    val panelReference = withContext(Dispatchers.Main) { controller.trackingSample() }
+                    popup(inline = true); delay(1500)
+                    if (before.keys != withContext(Dispatchers.Main) { controller.bubblePositions().keys }) {
+                        panelReference?.let { saveMotionSample("panel-before", it) }
+                        controller.rejectedMotion?.second?.let { saveMotionSample("panel-after", it) }
+                    }
+                    assertEquals("An in-window menu is occlusion rather than a scene cut: ${controller.motionDiagnostics()} ${controller.motionTrace}", before.keys,
+                        withContext(Dispatchers.Main) { controller.bubblePositions().keys })
+                    popup(); delay(650)
+                    val restored = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                    assertEquals(before.keys, restored.keys)
+                    swipe(distance = 120f)
+                    awaitMovement("tracking after both kinds of popup close", restored) { old, now -> kotlin.math.abs(now.top - old.top + 120f) < 16f }
+                } finally { popup(); withContext(Dispatchers.Main) { controller.traceMotion = false; controller.stop() }; controller.preferences.update { original } }
+            }
+        }
+    }
+
+    @Test fun everyModeSkipsAnExhaustedPageAndCanTranslateTheNextFrame() = runBlocking<Unit> {
+        for (mode in ScreenTranslationMode.entries) {
+            val profileId = "screen-failure-${java.util.UUID.randomUUID()}"
+            val calls = java.util.concurrent.atomic.AtomicInteger()
+            val server = okhttp3.mockwebserver.MockWebServer().apply {
+                dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                    override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse =
+                        if (calls.incrementAndGet() == 1) okhttp3.mockwebserver.MockResponse().setResponseCode(400).setBody("Fixture page failed")
+                        else okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream")
+                            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"Translated\"}}]}\n\ndata: [DONE]\n\n")
+                }; start()
+            }
+            var workflowId: String? = null
+            try {
+                container.apiProfiles.save(ApiProfile(profileId, ApiProfileKind.LLM, "Screen failure fixture", server.url("/v1").toString(),
+                    model = "fixture", parallelLimit = 1, retryCount = 0))
+                val created = container.translationWorkflows.create().also { workflowId = it.id }
+                val api = com.lmreader.core.workflow.WorkflowEditing.update(WorkflowTemplates.localMachine(), "translate") { node ->
+                    node.copy(kind = WorkflowKind.API, resultType = WorkflowType.TEXT, inputs = mapOf(
+                        "profile" to WorkflowExpression.Text(profileId), "prompt" to WorkflowExpression.Text("Translate this fixture.")))
+                }
+                val program = com.lmreader.core.workflow.WorkflowEditing.update(api, "bubbles") { it.copy(mode = WorkflowMode.SYNC) }
+                container.translationWorkflows.update(created.copy(program = program, retries = 0))
+                ActivityScenario.launch(MainActivity::class.java).use {
+                    val original = start(mode, workflowId = created.id)
+                    val pendingRoot = java.io.File(context.noBackupFilesDir, "screen-pending")
+                    var failedId: String? = null
+                    try {
+                        val retained = ScreenPendingFrames(pendingRoot).count.value
+                        fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                        withContext(Dispatchers.Main) { controller.tap() }
+                        waitState { !it.busy && it.status.startsWith("当前画面失败") }
+                        assertEquals(ScreenEngineState.READY, controller.state.value.engine)
+                        assertEquals("$mode must release the failed frame slot", 0, controller.state.value.activeChapters)
+                        assertEquals(mode != ScreenTranslationMode.MANUAL, controller.state.value.continuous)
+                        assertTrue("Failed detection masks must be withdrawn", withContext(Dispatchers.Main) { controller.bubblePositions(true).isEmpty() })
+                        val saved = ScreenPendingFrames(pendingRoot).latest()!!; failedId = saved.pageId
+                        assertEquals(retained + 1, controller.pendingFrames.value)
+                        assertNotNull(saved.error); assertTrue(saved.image.isFile)
+                        delay(750)
+                        assertEquals("A static failed page must not immediately resubmit", 1, calls.get())
+                        when (mode) {
+                            ScreenTranslationMode.MANUAL -> withContext(Dispatchers.Main) { controller.tap() }
+                            ScreenTranslationMode.BROWSE -> swipe(distance = 400f)
+                            ScreenTranslationMode.VIDEO -> press(longPress = false)
+                        }
+                        waitState { !it.busy && it.bubbles > 0 }
+                        assertTrue("A later frame must reach the API", calls.get() > 1)
+                        assertEquals(retained + 1, controller.pendingFrames.value)
+                        assertTrue("Later success must retain the failed retry input", saved.image.isFile)
+                    } finally {
+                        withContext(Dispatchers.Main) { controller.stopAndAwait() }
+                        failedId?.let { ScreenPendingFrames(pendingRoot).complete(it) }
+                        controller.preferences.update { original }
+                    }
+                }
+            } finally { server.shutdown(); workflowId?.let { container.translationWorkflows.delete(it) }; container.apiProfiles.delete(profileId) }
+        }
+    }
+
+    @Test fun browseFailureBeforeSegSkipsStaticPixelsAndRecognizesNewExposure() = runBlocking<Unit> {
+        val profileId = "screen-preseg-failure-${java.util.UUID.randomUUID()}"
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = okhttp3.mockwebserver.MockWebServer().apply {
+            dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse =
+                    if (calls.incrementAndGet() == 1) okhttp3.mockwebserver.MockResponse().setResponseCode(400).setBody("Fixture before SEG failed")
+                    else okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream")
+                        .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"Translated\"}}]}\n\ndata: [DONE]\n\n")
+            }; start()
+        }
+        var workflowId: String? = null
+        try {
+            container.apiProfiles.save(ApiProfile(profileId, ApiProfileKind.LLM, "Screen before SEG fixture", server.url("/v1").toString(),
+                model = "fixture", parallelLimit = 1, retryCount = 0))
+            val created = container.translationWorkflows.create().also { workflowId = it.id }
+            val api = com.lmreader.core.workflow.WorkflowEditing.update(WorkflowTemplates.localMachine(), "translate") { node ->
+                node.copy(kind = WorkflowKind.API, resultType = WorkflowType.TEXT, inputs = mapOf(
+                    "profile" to WorkflowExpression.Text(profileId), "prompt" to WorkflowExpression.Text("Translate this fixture.")))
+            }
+            val checked = WorkflowVariable("screen-check", "Frame check", WorkflowType.TEXT)
+            val declare = WorkflowNode("declare-screen-check", WorkflowKind.DECLARE, variable = checked)
+            val gate = WorkflowNode("before-seg", WorkflowKind.API, target = WorkflowRef(checked.id), inputs = mapOf(
+                "profile" to WorkflowExpression.Text(profileId), "prompt" to WorkflowExpression.Text("Check this fixture page.")))
+            val program = com.lmreader.core.workflow.WorkflowEditing.update(api, "pages") { it.copy(children = listOf(declare, gate) + it.children) }
+            container.translationWorkflows.update(created.copy(program = program, retries = 0))
+            ActivityScenario.launch(MainActivity::class.java).use {
+                val original = start(ScreenTranslationMode.BROWSE, workflowId = created.id)
+                val pendingRoot = java.io.File(context.noBackupFilesDir, "screen-pending")
+                var failedId: String? = null
+                try {
+                    fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                    withContext(Dispatchers.Main) { controller.tap() }
+                    waitState { !it.busy && it.status.startsWith("当前画面失败") }
+                    failedId = ScreenPendingFrames(pendingRoot).latest()!!.pageId
+                    assertTrue(controller.browseRecognitionHistory.isEmpty())
+                    delay(750); assertEquals(1, calls.get()); assertTrue(controller.state.value.continuous)
+                    swipe(distance = 400f)
+                    waitState { !it.busy && it.bubbles > 0 }
+                    assertTrue(controller.browseRecognitionHistory.isNotEmpty())
+                } finally {
+                    withContext(Dispatchers.Main) { controller.stopAndAwait() }
+                    failedId?.let { ScreenPendingFrames(pendingRoot).complete(it) }
+                    controller.preferences.update { original }
+                }
+            }
+        } finally { server.shutdown(); workflowId?.let { container.translationWorkflows.delete(it) }; container.apiProfiles.delete(profileId) }
+    }
+
+    @Test fun videoFailureInOneSelectedCropDoesNotSkipOtherCropsOfTheSameFrame() = runBlocking<Unit> {
+        val profileId = "screen-crop-failure-${java.util.UUID.randomUUID()}"
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        val server = okhttp3.mockwebserver.MockWebServer().apply {
+            dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse =
+                    if (calls.incrementAndGet() == 1) okhttp3.mockwebserver.MockResponse().setResponseCode(400).setBody("Fixture first crop failed")
+                    else okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream")
+                        .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"Translated\"}}]}\n\ndata: [DONE]\n\n")
+            }; start()
+        }
+        var workflowId: String? = null
+        try {
+            container.apiProfiles.save(ApiProfile(profileId, ApiProfileKind.LLM, "Screen crop fixture", server.url("/v1").toString(),
+                model = "fixture", parallelLimit = 1, retryCount = 0))
+            val created = container.translationWorkflows.create().also { workflowId = it.id }
+            val api = com.lmreader.core.workflow.WorkflowEditing.update(WorkflowTemplates.localMachine(), "translate") { node ->
+                node.copy(kind = WorkflowKind.API, resultType = WorkflowType.TEXT, inputs = mapOf(
+                    "profile" to WorkflowExpression.Text(profileId), "prompt" to WorkflowExpression.Text("Translate this fixture.")))
+            }
+            val program = com.lmreader.core.workflow.WorkflowEditing.update(api, "bubbles") { it.copy(mode = WorkflowMode.SYNC) }
+            container.translationWorkflows.update(created.copy(program = program, retries = 0))
+            ActivityScenario.launch(MainActivity::class.java).use {
+                val regions = ScreenRegionSelection(portrait = listOf(ScreenNormalizedRegion(0f, .05f, 1f, .45f), ScreenNormalizedRegion(0f, .5f, 1f, .95f)))
+                val original = start(ScreenTranslationMode.VIDEO, workflowId = created.id, regions = regions)
+                val pendingRoot = java.io.File(context.noBackupFilesDir, "screen-pending")
+                var failedId: String? = null
+                try {
+                    val retained = ScreenPendingFrames(pendingRoot).count.value
+                    fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                    withContext(Dispatchers.Main) { controller.tap() }
+                    waitState { !it.busy && it.status.startsWith("当前画面失败") }
+                    failedId = ScreenPendingFrames(pendingRoot).latest()!!.pageId
+                    assertTrue("The second crop must publish despite the first crop's error", withContext(Dispatchers.Main) { controller.bubblePositions().isNotEmpty() })
+                    assertTrue(calls.get() > 1); assertTrue(controller.state.value.continuous)
+                    assertEquals(0, controller.state.value.activeChapters)
+                    assertEquals(retained + 1, controller.pendingFrames.value)
+                } finally {
+                    withContext(Dispatchers.Main) { controller.stopAndAwait() }
+                    failedId?.let { ScreenPendingFrames(pendingRoot).complete(it) }
+                    controller.preferences.update { original }
+                }
+            }
+        } finally { server.shutdown(); workflowId?.let { container.translationWorkflows.delete(it) }; container.apiProfiles.delete(profileId) }
+    }
+
+    @Test fun onlyBrowseShowsDetectionMasksAndEveryModePublishesBeforeTheNextBubbleCompletes() = runBlocking<Unit> {
+        for (mode in ScreenTranslationMode.entries) {
+            val profileId = "screen-progress-${java.util.UUID.randomUUID()}"
+            val first = CompletableDeferred<Unit>(); val second = CompletableDeferred<Unit>()
+            val firstReply = java.util.concurrent.CountDownLatch(1); val secondReply = java.util.concurrent.CountDownLatch(1)
+            val calls = java.util.concurrent.atomic.AtomicInteger()
+            val server = okhttp3.mockwebserver.MockWebServer().apply {
+                dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                    override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse {
+                        when (calls.incrementAndGet()) {
+                            1 -> { first.complete(Unit); firstReply.await(60, java.util.concurrent.TimeUnit.SECONDS) }
+                            2 -> { second.complete(Unit); secondReply.await(60, java.util.concurrent.TimeUnit.SECONDS) }
+                        }
+                        return okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream")
+                            .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"Translated\"}}]}\n\ndata: [DONE]\n\n")
+                    }
+                }; start()
+            }
+            var workflowId: String? = null
+            try {
+                container.apiProfiles.save(ApiProfile(profileId, ApiProfileKind.LLM, "Screen progress fixture", server.url("/v1").toString(),
+                    model = "fixture", parallelLimit = 1, retryCount = 0))
+                val workflow = container.translationWorkflows.create().also { workflowId = it.id }
+                val program = com.lmreader.core.workflow.WorkflowEditing.update(WorkflowTemplates.localMachine(), "translate") { node ->
+                    node.copy(kind = WorkflowKind.API, resultType = WorkflowType.TEXT, inputs = mapOf(
+                        "profile" to WorkflowExpression.Text(profileId), "prompt" to WorkflowExpression.Text("Translate this fixture.")))
+                }
+                container.translationWorkflows.update(workflow.copy(program = program, retries = 0))
+                ActivityScenario.launch(MainActivity::class.java).use {
+                    val original = start(mode, workflowId = workflow.id)
+                    try {
+                        fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                        withContext(Dispatchers.Main) { controller.traceMotion = true; controller.motionTrace.clear(); controller.tap() }
+                        withTimeout(90_000) { first.await() }
+                        val masks = withContext(Dispatchers.Main) { controller.bubblePositions(includePlaceholders = true) }
+                        assertTrue("No translation exists while the first request is blocked", withContext(Dispatchers.Main) { controller.bubblePositions().isEmpty() })
+                        if (mode == ScreenTranslationMode.BROWSE) {
+                            assertTrue("Detection must draw masks before translation", masks.isNotEmpty())
+                            swipe(distance = 100f)
+                            withTimeout(3000) { while (withContext(Dispatchers.Main) { masks.none { (id, old) ->
+                                controller.bubblePositions(true)[id]?.let { kotlin.math.abs(it.top - old.top + 100f) < 16f } == true } }) delay(20) }
+                        } else assertTrue("$mode must not show empty detection masks", masks.isEmpty())
+                        firstReply.countDown(); withTimeout(20_000) { second.await() }
+                        withTimeout(3000) { while (withContext(Dispatchers.Main) { controller.bubblePositions().isEmpty() }) delay(20) }
+                        assertTrue("A ready bubble appears while a sibling is still waiting", controller.state.value.busy)
+                        if (mode == ScreenTranslationMode.BROWSE) {
+                            val filled = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                            assertTrue("Fill the existing tracking identity", filled.keys.any { it in masks })
+                            val beforeMove = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                            swipe(distance = 40f)
+                            awaitMovement("a newly filled bubble immediately participates in flow", beforeMove) { old, now -> kotlin.math.abs(now.top - old.top + 40f) < 16f }
+                        }
+                        secondReply.countDown(); waitState { !it.busy }
+                        assertTrue(controller.state.value.status, withContext(Dispatchers.Main) { controller.bubblePositions().isNotEmpty() })
+                    } finally { firstReply.countDown(); secondReply.countDown(); withContext(Dispatchers.Main) { controller.traceMotion = false; controller.stop() }; controller.preferences.update { original } }
+                }
+            } finally {
+                firstReply.countDown(); secondReply.countDown(); server.shutdown()
+                workflowId?.let { container.translationWorkflows.delete(it) }; container.apiProfiles.delete(profileId)
+            }
+        }
+    }
+
+    @Test fun stoppedProjectionKeepsBubblesAndContinuousTrackingResumesOnWindowScreenshots() = runBlocking<Unit> {
+        ActivityScenario.launch(MainActivity::class.java).use {
+            fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+            context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+            waitState { it.inside }
+            val original = start(ScreenTranslationMode.BROWSE, appStream = true)
+            try {
+                fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+                withContext(Dispatchers.Main) { controller.tap() }
+                waitState { it.bubbles > 0 && !it.busy }
+                val before = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                assertTrue(withContext(Dispatchers.Main) { controller.motionDiagnostics().contains("source=单应用录屏流") })
+                // Stop the actual projection through Android's public API, delivering
+                // its normal onStop callback rather than invoking a controller stub.
+                val captureField = ScreenTranslationController::class.java.getDeclaredField("projection").apply { isAccessible = true }
+                val capture = captureField.get(controller) as ProjectionScreenCapture
+                val projectionField = ProjectionScreenCapture::class.java.getDeclaredField("projection").apply { isAccessible = true }
+                val projection = projectionField.get(capture) as android.media.projection.MediaProjection
+                withContext(Dispatchers.Main) { projection.stop() }
+                withTimeout(10_000) { while (!withContext(Dispatchers.Main) {
+                    controller.motionDiagnostics().contains("source=无障碍窗口截图") && controller.state.value.continuous
+                }) delay(100) }
+                assertEquals(before.keys, withContext(Dispatchers.Main) { controller.bubblePositions().keys })
+                swipe(distance = 90f)
+                awaitMovement("projection stopped, window capture follows again", before) { old, now -> kotlin.math.abs(now.top - old.top + 90f) < 16f }
+                assertTrue(controller.state.value.continuous)
+                assertEquals(ScreenEngineState.READY, controller.state.value.engine)
+            } finally { withContext(Dispatchers.Main) { controller.stop() }; controller.preferences.update { original } }
+        }
+    }
     @Test fun singleAppStreamExcludesOurOverlayAndFollowsPanAndZoom() = runBlocking<Unit> {
         for (orientation in listOf(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)) {
             ActivityScenario.launch(MainActivity::class.java).use {
@@ -171,7 +617,7 @@ class ScreenTranslationIntegrationTest {
             ActivityScenario.launch(MainActivity::class.java).use {
                 val original = start(ScreenTranslationMode.BROWSE, workflowId = created.id)
                 try {
-                    val retainedBefore = controller.pendingFrames.value
+                    val retainedBefore = ScreenPendingFrames(java.io.File(context.noBackupFilesDir, "screen-pending")).count.value
                     fixture(); withContext(Dispatchers.Main) { controller.tap() }
                     withTimeout(90_000) { requested.await() }
                     val nextSeg = async {
@@ -356,10 +802,24 @@ class ScreenTranslationIntegrationTest {
                 withContext(Dispatchers.Main) { controller.tap() }
                 waitState { it.bubbles > 0 && !it.busy }
                 val before = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                val firstRecognition = withContext(Dispatchers.Main) { controller.browseRecognitionHistory.last() }
+                val firstSegArea = firstRecognition.initialInputs.sumOf { it.area.toDouble() }
                 swipe(distance = 120f)
                 awaitMovement("browse forward pan", before) { old, now -> kotlin.math.abs(now.top - old.top + 120f) < 16f }
                 delay(1200)
                 waitState { !it.busy && it.bubbles > 0 }
+                val incremental = withTimeout(15_000) {
+                    var next: ScreenTranslationController.BrowseRecognition? = null
+                    while (next == null) {
+                        next = withContext(Dispatchers.Main) {
+                            controller.browseRecognitionHistory.firstOrNull { it.sequence > firstRecognition.sequence }
+                        }
+                        if (next == null) delay(20)
+                    }
+                    next
+                }
+                assertTrue("The real SEG calls must crop a new strip rather than re-segment the screen: $incremental",
+                    incremental.initialInputs.isNotEmpty() && incremental.initialInputs.sumOf { it.area.toDouble() } < firstSegArea * .5)
                 val beforeReverse = withContext(Dispatchers.Main) { controller.bubblePositions() }
                 swipe(reverse = true, distance = 120f)
                 awaitMovement("browse reverse pan", beforeReverse) { old, now -> kotlin.math.abs(now.top - old.top - 120f) < 16f }
@@ -375,7 +835,8 @@ class ScreenTranslationIntegrationTest {
                         waitState { it.bubbles > 0 && !it.busy }
                         val previousIds = withContext(Dispatchers.Main) { controller.bubblePositions().keys }
                         press(longPress)
-                        withTimeout(5000) { while (withContext(Dispatchers.Main) { controller.bubblePositions().keys.any { it in previousIds } }) delay(20) }
+                        try { withTimeout(5000) { while (withContext(Dispatchers.Main) { controller.bubblePositions().keys.any { it in previousIds } }) delay(20) } }
+                        catch (timeout: TimeoutCancellationException) { throw AssertionError("Scene cut longPress=$longPress state=${controller.state.value} positions=${controller.bubblePositions()} tracking=${controller.motionDiagnostics()} trace=${controller.motionTrace}", timeout) }
                         waitState { it.continuous && it.bubbles > 0 && !it.busy }
                         assertEquals(ScreenEngineState.READY, controller.state.value.engine)
                     }
@@ -410,15 +871,16 @@ class ScreenTranslationIntegrationTest {
             withTimeout(3000) { while (withContext(Dispatchers.Main) { before.none { (id, rect) -> controller.bubblePositions()[id]?.let { matches(rect, it) } == true } }) delay(10) }
         } catch (timeout: TimeoutCancellationException) {
             withContext(Dispatchers.Main) { controller.rejectedMotion?.let { (a, b) ->
-                listOf("before" to a, "after" to b).forEach { (name, frame) ->
-                    java.io.File(context.cacheDir, "motion-$name.pgm").outputStream().use { out ->
-                        out.write("P5\n${frame.width} ${frame.height}\n255\n".toByteArray()); out.write(frame.pixels)
-                    }
-                    frame.valid?.let { java.io.File(context.cacheDir, "motion-$name.mask").writeBytes(it) }
-                }
+                listOf("before" to a, "after" to b).forEach { (name, frame) -> saveMotionSample(name, frame) }
             } }
             throw AssertionError("$stage: before=$before after=${withContext(Dispatchers.Main) { controller.bubblePositions() }} state=${controller.state.value} trace=${controller.motionTrace} diagnostics=${withContext(Dispatchers.Main) { controller.motionDiagnostics() }}", timeout)
         }
+    }
+    private fun saveMotionSample(name: String, frame: ScreenGrayFrame) {
+        java.io.File(context.cacheDir, "motion-$name.pgm").outputStream().use { out ->
+            out.write("P5\n${frame.width} ${frame.height}\n255\n".toByteArray()); out.write(frame.pixels)
+        }
+        frame.valid?.let { java.io.File(context.cacheDir, "motion-$name.mask").writeBytes(it) }
     }
     private fun swipe(reverse: Boolean = false, distance: Float? = null) {
         val metrics = context.resources.displayMetrics

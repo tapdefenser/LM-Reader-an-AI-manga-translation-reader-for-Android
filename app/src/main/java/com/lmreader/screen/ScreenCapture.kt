@@ -58,14 +58,16 @@ internal data class CapturedMotion(val gray: ScreenGrayFrame, val bounds: PixelR
 
 /** Blank pixels outside the union before SEG/OCR; do not change the captured
  * original or create artificial edges in the motion sampler. */
-internal fun maskedScreenCrop(image: Bitmap, crop: PixelRect, areas: List<PixelRect>): Bitmap {
-    if (com.lmreader.core.model.screenExposedRegions(crop, areas).isEmpty()) return image
-    val masked = image.copy(Bitmap.Config.ARGB_8888, true)!!
+internal fun maskedScreenCrop(image: Bitmap, crop: PixelRect, areas: List<PixelRect>, copy: Boolean = true): Bitmap {
+    val disjoint = ArrayList<PixelRect>()
+    areas.forEach { disjoint += com.lmreader.core.model.screenExposedRegions(it, disjoint) }
+    if (com.lmreader.core.model.screenExposedRegions(crop, disjoint).isEmpty()) return image
+    val masked = if (copy) image.copy(Bitmap.Config.ARGB_8888, true)!! else image
     val canvas = android.graphics.Canvas(masked)
     val outside = android.graphics.Path().apply {
         fillType = android.graphics.Path.FillType.EVEN_ODD
         addRect(0f, 0f, image.width.toFloat(), image.height.toFloat(), android.graphics.Path.Direction.CW)
-        for (area in areas) {
+        for (area in disjoint) {
             val l = ((maxOf(crop.left, area.left) - crop.left) * image.width / crop.width).coerceIn(0f, image.width.toFloat())
             val t = ((maxOf(crop.top, area.top) - crop.top) * image.height / crop.height).coerceIn(0f, image.height.toFloat())
             val r = ((minOf(crop.right, area.right) - crop.left) * image.width / crop.width).coerceIn(l, image.width.toFloat())
@@ -148,9 +150,10 @@ internal class ProjectionScreenCapture(private val context: Context, private val
     var contentVisible = true
         private set
     val sequence get() = frameSequence.value
+    val available get() = !closed
     val bounds get() = PixelRect(0f, 0f, width.toFloat(), height.toFloat())
     private val callback = object : MediaProjection.Callback() {
-        override fun onStop() { close(); stopped() }
+        override fun onStop() { if (!closed) { close(); stopped() } }
         override fun onCapturedContentResize(width: Int, height: Int) { if (!closed) { resize(width, height); onContentChanged?.invoke() } }
         override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
             if (contentVisible != isVisible) { contentVisible = isVisible; onContentChanged?.invoke() }
@@ -195,11 +198,11 @@ internal class ProjectionScreenCapture(private val context: Context, private val
         val previous = surface; surface = nextSurface; previous?.retire()
     }
     private suspend fun latest(after: Long = -1): ProjectedImage {
-        return withTimeout(2000) {
+        return awaitScreenFrame {
             while (true) {
                 synchronized(frameLock) {
-                    check(!closed) { "屏幕录制已停止" }
-                    latestImage?.takeIf { it.sequence > after }?.let { return@withTimeout it.retain() }
+                    if (closed) throw ScreenFrameUnavailable()
+                    latestImage?.takeIf { it.sequence > after }?.let { return@awaitScreenFrame it.retain() }
                 }
                 // A resize retires the last image without resetting the monotonic
                 // sequence. Wait for an actual new image, not the previous counter.

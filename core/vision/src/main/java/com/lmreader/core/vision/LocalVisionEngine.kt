@@ -21,6 +21,14 @@ internal class LocalVisionSession(context: Context, private val settings: Vision
     private var detector: PaddleDetector? = null
     private var recognizer: PaddleRecognizer? = null
     private var koreanRecognizer: PaddleRecognizer? = null
+    suspend fun residentModels(): Set<String> = mutex.withLock {
+        buildSet {
+            if (segmenter != null) add("seg")
+            if (detector != null) add("det")
+            if (recognizer != null) add("rec")
+            if (koreanRecognizer != null) add("ko")
+        }
+    }
     private fun publishResources() = resourcesChanged(buildList {
         segmenter?.let { add(LoadedEngineResource("seg", InferenceEngineKind.SEG, "气泡分割模型", it.backend)) }
         detector?.let { add(LoadedEngineResource("det", InferenceEngineKind.OCR, "文字检测模型", it.backend)) }
