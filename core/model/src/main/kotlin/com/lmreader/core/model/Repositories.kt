@@ -193,7 +193,7 @@ interface MangaRepository {
     suspend fun getChapters(mangaId: String): List<ChapterRecord>
 
     /**
-     * 详情页章节列表：**按用户看到的顺序**（`position`）返回。
+     * 详情页与阅读器章节列表：**按用户看到的顺序**（`position`）返回。
      *
      * 与 [getChapters] 分成两条而不是让调用方自己排：封面与简介要求"**自然序**第一章"
      * （开发文档 7.1/7.2），而用户手动拖过章节之后这两者必然不同。合成一条就一定会

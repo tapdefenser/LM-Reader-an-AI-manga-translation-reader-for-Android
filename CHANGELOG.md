@@ -1,5 +1,16 @@
 # Changelog / 更新记录
 
+## v0.1.8 - Reader chapter order / 阅读器章节顺序
+
+- 阅读器沿用详情页保存的章节顺序，支持首字母、修改时间、自然数字正反向排序及手动拖动。
+- 上一章、下一章、连续跨章和相邻章节预载统一使用该顺序，保留现有预载预算、缓存及位置定位逻辑。
+- 排序后继续阅读仍恢复原章节与页码；封面和元数据补全继续使用自然序。
+- The reader follows the chapter order saved on the detail page, including alphabetical, modification-time, natural-number and manual ordering.
+- Adjacent-chapter buttons, continuous reading and neighboring-chapter preloading share that order while retaining existing preload budgets, caching and position anchoring.
+- Resume keeps the saved chapter and page after reordering; cover and metadata selection retain natural order.
+
+详见 [v0.1.8 中英发行说明 / Bilingual release notes](docs/releases/v0.1.8.md)。
+
 ## v0.1.7 - Queue restart and engine lifecycle / 队列恢复与引擎生命周期
 
 - 修复取消全部任务后重新入队卡住的问题，包括引擎加载期间的取消；旧任务完成清理后再启动替代任务。

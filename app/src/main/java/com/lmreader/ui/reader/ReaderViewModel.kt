@@ -129,21 +129,23 @@ class ReaderViewModel(
             try {
                 val target = mangaRepository.getBackfillTarget(mangaId)
                     ?: error("漫画或来源已不存在")
-                if (target.chapters.isEmpty()) error("这部漫画还没有可读章节")
+                // 补全投影按自然序取章以选择封面；阅读与预载共用详情页保存的显示顺序。
+                val chapters = mangaRepository.getChaptersInDisplayOrder(mangaId)
+                if (chapters.isEmpty()) error("这部漫画还没有可读章节")
                 savedProgress = progressRepository.get(mangaId)
                 // 旧版漫画覆盖列保留以兼容备份，但阅读器始终使用全局偏好。
                 val global = readerPreferences.settings.first()
                 _state.update { it.copy(settings = global) }
                 val desired = requestedChapterId.takeUnless { it == RESUME_CHAPTER }
                     ?: savedProgress?.chapterId
-                val index = target.chapters.indexOfFirst { it.chapterId == desired }
+                val index = chapters.indexOfFirst { it.chapterId == desired }
                     .takeIf { it >= 0 }
                     ?: 0
                 _state.update {
                     it.copy(
                         mangaTitle = target.manga.displayName,
                         sourceTreeUri = target.sourceTreeUri,
-                        chapterList = target.chapters,
+                        chapterList = chapters,
                     )
                 }
                 // 恢复页码的三种来源，按优先级：
@@ -153,7 +155,7 @@ class ReaderViewModel(
                 val fromProgress = savedProgress
                     ?.takeIf {
                         requestedChapterId == RESUME_CHAPTER &&
-                            it.chapterId == target.chapters[index].chapterId
+                            it.chapterId == chapters[index].chapterId
                     }
                     ?.pageOrdinal
                 val restorePage = fromRoute ?: fromProgress ?: 0
