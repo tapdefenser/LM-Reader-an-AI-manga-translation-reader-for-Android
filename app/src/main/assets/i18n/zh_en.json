@@ -1910,5 +1910,9 @@
   "＋ 添加区域": "+ Add region",
   "，最后枚举：__VAR0__": "Last count: __VAR0__",
   "，最多并行 __VAR0__": ", at most __VAR0__ concurrent items",
-  "，访问 __VAR0__ 个目录": ", access to __VAR0__ directories"
+  "，访问 __VAR0__ 个目录": ", access to __VAR0__ directories",
+  "截图延时": "Capture delay",
+  "视频 SEG 区域相似度": "Video SEG region similarity",
+  "最多缓冲两张截图。SEG 完成后才允许下一张截图；延时从上一张 SEG 完成开始，与新一张 SEG 并行计时。缓冲区满时，等待最早一张完成回填再截图。新气泡填出前保留上一张译文。": "Buffer at most two screenshots. Capture the next frame only after SEG finishes. The delay starts at the preceding SEG completion and overlaps the new frame’s SEG. When the buffer is full, wait for the oldest frame to finish backfilling. Keep the preceding translation until the next bubbles are filled.",
+  "逐区域比较 SEG 形状和原文字纹理；相似度超过此值时复用旧气泡及仍在处理的译文，不重复识别或翻译。值越高越严格，100 时不复用。": "Compare SEG shapes and source-text texture per region. Reuse matching bubbles and their pending translations above this threshold, without repeating OCR or translation. Higher values are stricter; 100 disables reuse."
 }

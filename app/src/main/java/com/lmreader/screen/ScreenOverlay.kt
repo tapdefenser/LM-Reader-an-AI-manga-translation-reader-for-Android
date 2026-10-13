@@ -431,6 +431,37 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
         }
         trackingRevision++; layer.invalidate()
     }
+    /** Video has frame ownership rather than browse context-crop overlap rules. */
+    fun addVideo(prepared: List<PreparedBubble>, transform: ScreenTransform, version: Long) {
+        val local = transform.then(contentToScreen.inverse())
+        for (region in prepared.filterNot { it.placeholder }) {
+            val existing = bubbles.firstOrNull { it.id == region.id }
+            if (existing != null && existing.version > version) continue
+            val bounds = local.bounds(region.bounds)
+            bubbles.removeAll { old ->
+                val overlap = (minOf(bounds.right, old.contentBounds.right) - maxOf(bounds.left, old.contentBounds.left)).coerceAtLeast(0f) *
+                    (minOf(bounds.bottom, old.contentBounds.bottom) - maxOf(bounds.top, old.contentBounds.top)).coerceAtLeast(0f)
+                old.id == region.id || old.version < version && overlap > minOf(bounds.area, old.contentBounds.area) * .65f
+            }
+            bubbles += Bubble(region.id, region.bounds, region.drawing, local, version = version,
+                revision = ++objectRevision, record = region.record)
+        }
+        trackingRevision++; layer.invalidate()
+    }
+    /** Includes still-pending IDs: an old workflow's late text is forwarded by the controller. */
+    fun promoteVideo(targets: Map<String, PixelRect>, version: Long): Boolean {
+        var ready = false
+        for (i in bubbles.indices) {
+            val old = bubbles[i]; val target = targets[old.id] ?: continue
+            if (old.version > version || old.bounds.area <= 0 || target.area <= 0) continue
+            val local = screenVideoRegionTransform(old.bounds, target).then(contentToScreen.inverse())
+            bubbles[i] = old.copy(transform = local, contentBounds = local.bounds(old.bounds), version = version,
+                fixedPose = null, revision = ++objectRevision)
+            ready = ready || !old.placeholder
+        }
+        if (ready) { trackingRevision++; layer.invalidate() }
+        return ready
+    }
     fun replaceBrowse(prepared: List<PreparedBubble>, pageToCapture: ScreenTransform, atCapture: ScreenTransform,
         rawPose: ScreenTransform, displayPose: ScreenTransform, version: Long, crop: ScreenMergedCrop,
         decisions: List<ScreenObjectDecision>, ownedAreas: List<PixelRect> = listOf(crop.bounds),

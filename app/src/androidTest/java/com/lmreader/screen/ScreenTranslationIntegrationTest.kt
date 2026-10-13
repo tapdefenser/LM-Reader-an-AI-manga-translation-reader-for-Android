@@ -64,10 +64,12 @@ class ScreenTranslationIntegrationTest {
             delay(100)
         }
     }
-    private suspend fun fixture(video: Boolean = false, fixedControls: Boolean = false, orientation: Int? = null) {
+    private suspend fun fixture(video: Boolean = false, fixedControls: Boolean = false, orientation: Int? = null,
+        videoText: String? = null, subtitleShift: Float = 0f) {
         val intent = Intent().setComponent(ComponentName(instrumentation.context.packageName, ScreenFixtureActivity::class.java.name))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             .putExtra("video", video).putExtra("fixedControls", fixedControls)
+            .putExtra("videoText", videoText).putExtra("subtitleShift", subtitleShift)
         orientation?.let { intent.putExtra("orientation", it) }
         context.startActivity(intent)
         waitState { !it.inside }; delay(700)
@@ -438,19 +440,30 @@ class ScreenTranslationIntegrationTest {
                 val original = start(ScreenTranslationMode.VIDEO, workflowId = created.id, regions = regions)
                 val pendingRoot = java.io.File(context.noBackupFilesDir, "screen-pending")
                 var failedId: String? = null
+                val existingInputs = pendingRoot.listFiles().orEmpty().filter { it.extension == "json" }.map { it.name }.toSet()
                 try {
                     val retained = ScreenPendingFrames(pendingRoot).count.value
                     fixture(orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
                     withContext(Dispatchers.Main) { controller.tap() }
-                    waitState { !it.busy && it.status.startsWith("当前画面失败") }
-                    failedId = ScreenPendingFrames(pendingRoot).latest()!!.pageId
+                    withTimeout(90_000) {
+                        while (failedId == null || controller.state.value.bubbles == 0) {
+                            failedId = pendingRoot.listFiles().orEmpty().filter { it.extension == "json" && it.name !in existingInputs }
+                                .firstNotNullOfOrNull { file -> runCatching {
+                                    org.json.JSONObject(file.readText()).takeIf { it.has("error") }?.getString("id")
+                                }.getOrNull() }
+                            delay(20)
+                        }
+                    }
                     assertTrue("The second crop must publish despite the first crop's error", withContext(Dispatchers.Main) { controller.bubblePositions().isNotEmpty() })
                     assertTrue(calls.get() > 1); assertTrue(controller.state.value.continuous)
-                    assertEquals(0, controller.state.value.activeChapters)
-                    assertEquals(retained + 1, controller.pendingFrames.value)
+                    assertTrue(controller.state.value.activeChapters in 0..2)
+                    assertTrue(controller.pendingFrames.value >= retained + 1)
                 } finally {
                     withContext(Dispatchers.Main) { controller.stopAndAwait() }
-                    failedId?.let { ScreenPendingFrames(pendingRoot).complete(it) }
+                    pendingRoot.listFiles().orEmpty().filter { it.extension == "json" && it.name !in existingInputs }.forEach { file ->
+                        runCatching { org.json.JSONObject(file.readText()).getString("id") }.getOrNull()
+                            ?.let { ScreenPendingFrames(pendingRoot).complete(it) }
+                    }
                     controller.preferences.update { original }
                 }
             }
@@ -789,6 +802,144 @@ class ScreenTranslationIntegrationTest {
             block.set(false); reply.countDown(); server.shutdown()
             workflowId?.let { container.translationWorkflows.delete(it) }
             container.apiProfiles.delete(profileId)
+        }
+    }
+    @Test fun videoTwoFrameBufferWaitsForFirstFillAndReusesPendingSubtitleWork() = runBlocking<Unit> {
+        val requested = CompletableDeferred<Unit>(); val reply = java.util.concurrent.CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        withVideoApi({
+            if (calls.incrementAndGet() == 1) { requested.complete(Unit); reply.await(60, java.util.concurrent.TimeUnit.SECONDS) }
+        }) { workflowId ->
+            ActivityScenario.launch(MainActivity::class.java).use {
+                val subtitles = ScreenRegionSelection(portrait = listOf(ScreenNormalizedRegion(.05f, .80f, .95f, .91f)))
+                val original = start(ScreenTranslationMode.VIDEO, workflowId, regions = subtitles)
+                try {
+                    fixture(true, orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, videoText = "The rabbit is blue.")
+                    withContext(Dispatchers.Main) { controller.tap() }
+                    withTimeout(90_000) { requested.await() }
+                    withTimeout(30_000) {
+                        while (withContext(Dispatchers.Main) { controller.videoRecognitionHistory.size < 2 }) delay(20)
+                    }
+                    val initial = withContext(Dispatchers.Main) { controller.videoRecognitionHistory.toList() }
+                    assertEquals(2, controller.state.value.activeChapters)
+                    assertTrue("Same detected subtitles reuse even unfinished text", initial[1].reused.isNotEmpty())
+                    assertEquals(initial[0].regions, initial[1].regions)
+                    delay(1200)
+                    assertEquals("A finished reusable second frame must not free a third slot", 2,
+                        withContext(Dispatchers.Main) { controller.videoRecognitionHistory.size })
+                    assertEquals(1, calls.get())
+                    reply.countDown()
+                    withTimeout(30_000) {
+                        while (withContext(Dispatchers.Main) { controller.videoRecognitionHistory.size < 4 || controller.bubblePositions().isEmpty() }) delay(20)
+                    }
+                    val ready = withContext(Dispatchers.Main) { controller.bubblePositions().keys }
+                    assertTrue("Late first-frame text is forwarded to reused newer-frame identities", ready.all { it in initial[0].regions })
+                    val completeCalls = calls.get()
+                    delay(1200)
+                    assertEquals("A moving background must not cause the same subtitles to be translated again", completeCalls, calls.get())
+                    assertTrue(controller.state.value.continuous)
+                } finally { reply.countDown(); withContext(Dispatchers.Main) { controller.stopAndAwait() }; controller.preferences.update { original } }
+            }
+        }
+    }
+    @Test fun videoChangedSubtitleKeepsOldTextUntilFillAndRetainsTheUnchangedLine() = runBlocking<Unit> {
+        val block = java.util.concurrent.atomic.AtomicBoolean()
+        val requested = CompletableDeferred<Unit>(); val reply = java.util.concurrent.CountDownLatch(1)
+        withVideoApi({ if (block.get()) { requested.complete(Unit); reply.await(60, java.util.concurrent.TimeUnit.SECONDS) } }) { workflowId ->
+            ActivityScenario.launch(MainActivity::class.java).use {
+                // Keep the moving background and the fixture's vertical panel
+                // edges outside this subtitle-only selection.
+                val subtitles = ScreenRegionSelection(portrait = listOf(ScreenNormalizedRegion(.10f, .72f, .90f, .91f)))
+                val original = start(ScreenTranslationMode.VIDEO, workflowId, regions = subtitles)
+                try {
+                    fixture(true, orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, videoText = "The rabbit is blue.")
+                    withContext(Dispatchers.Main) { controller.tap() }
+                    withTimeout(90_000) {
+                        while (!withContext(Dispatchers.Main) {
+                            val detected = controller.videoRecognitionHistory.lastOrNull()?.regions.orEmpty()
+                            val filled = controller.bubblePositions().keys
+                            // A preview may finish before its workflow. Two fully
+                            // reused successors prove FIFO has drained all initial
+                            // translation work before blocking genuinely new text.
+                            val recent = controller.videoRecognitionHistory.takeLast(2)
+                            controller.videoRecognitionHistory.size >= 4 && detected.size >= 2 && detected.all { it in filled } &&
+                                recent.all { it.regions == it.reused }
+                        }) delay(20)
+                    }
+                    val before = withContext(Dispatchers.Main) { controller.bubblePositions() }
+                    block.set(true)
+                    fixture(true, orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, videoText = "A new story begins.")
+                    withTimeout(30_000) { requested.await() }
+                    delay(500)
+                    assertEquals("Keep the preceding translation until a new subtitle is filled", before.keys,
+                        withContext(Dispatchers.Main) { controller.bubblePositions().keys })
+                    val next = withContext(Dispatchers.Main) { controller.videoRecognitionHistory.last() }
+                    assertTrue("The unchanged second line must keep its original identity", next.reused.isNotEmpty())
+                    assertTrue("Changed first-line SEG must be sent through OCR/translation: frame=$next previous=${before.keys}", next.regions.any { it !in before.keys })
+                    block.set(false); reply.countDown()
+                    withTimeout(30_000) {
+                        while (withContext(Dispatchers.Main) { controller.bubblePositions().keys == before.keys }) delay(20)
+                    }
+                    val after = withContext(Dispatchers.Main) { controller.bubblePositions().keys }
+                    assertTrue(after.intersect(before.keys).isNotEmpty())
+                    assertTrue(after.any { it !in before.keys })
+                } finally { reply.countDown(); withContext(Dispatchers.Main) { controller.stopAndAwait() }; controller.preferences.update { original } }
+            }
+        }
+    }
+    @Test fun videoPendingRetryPublishesOutsideTheContinuousFrameWindow() = runBlocking<Unit> {
+        val requested = CompletableDeferred<Unit>(); val reply = java.util.concurrent.CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        withVideoApi({ if (calls.incrementAndGet() == 1) { requested.complete(Unit); reply.await(60, java.util.concurrent.TimeUnit.SECONDS) } }) { workflowId ->
+            ActivityScenario.launch(MainActivity::class.java).use {
+                val subtitles = ScreenRegionSelection(portrait = listOf(ScreenNormalizedRegion(.10f, .80f, .90f, .91f)))
+                val original = start(ScreenTranslationMode.VIDEO, workflowId, regions = subtitles)
+                try {
+                    fixture(true, orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, videoText = "The rabbit is blue.")
+                    withContext(Dispatchers.Main) { controller.tap() }
+                    withTimeout(90_000) { requested.await() }
+                    withContext(Dispatchers.Main) { controller.tap() }
+                    reply.countDown()
+                    delay(500) // allow the cancelled workflow to finish its retry-journal write
+                    assertFalse(controller.state.value.continuous)
+                    withContext(Dispatchers.Main) { controller.retryPendingFrame() }
+                    withTimeout(60_000) {
+                        while (!controller.state.value.let { !it.busy && it.bubbles > 0 }) delay(20)
+                    }
+                    delay(500)
+                    assertTrue("A completed retry keeps its own filled bubbles", withContext(Dispatchers.Main) { controller.bubblePositions().isNotEmpty() })
+                    assertFalse(controller.state.value.continuous)
+                } finally { reply.countDown(); withContext(Dispatchers.Main) { controller.stopAndAwait() }; controller.preferences.update { original } }
+            }
+        }
+    }
+    private suspend fun withVideoApi(beforeResponse: () -> Unit, test: suspend (String) -> Unit) {
+        val profileId = "video-seg-${java.util.UUID.randomUUID()}"
+        val server = okhttp3.mockwebserver.MockWebServer().apply {
+            dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): okhttp3.mockwebserver.MockResponse {
+                    beforeResponse()
+                    return okhttp3.mockwebserver.MockResponse().setHeader("Content-Type", "text/event-stream")
+                        .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"Translated\"}}]}\n\ndata: [DONE]\n\n")
+                }
+            }; start()
+        }
+        var workflowId: String? = null
+        val priority = container.translationQueue.schedulingPriority.value
+        try {
+            container.apiProfiles.save(ApiProfile(profileId, ApiProfileKind.LLM, "Video SEG fixture", server.url("/v1").toString(),
+                model = "fixture", parallelLimit = 1, retryCount = 0))
+            val created = container.translationWorkflows.create().also { workflowId = it.id }
+            val program = com.lmreader.core.workflow.WorkflowEditing.update(WorkflowTemplates.localMachine(), "translate") { node ->
+                node.copy(kind = WorkflowKind.API, resultType = WorkflowType.TEXT, inputs = mapOf(
+                    "profile" to WorkflowExpression.Text(profileId), "prompt" to WorkflowExpression.Text("Translate this fixture subtitle.")))
+            }
+            container.translationWorkflows.update(created.copy(program = program, retries = 0))
+            container.translationQueue.setSchedulingPriority(com.lmreader.ui.queue.TranslationSchedulingPriority.RESOURCES)
+            test(created.id)
+        } finally {
+            server.shutdown(); workflowId?.let { container.translationWorkflows.delete(it) }
+            container.apiProfiles.delete(profileId); container.translationQueue.setSchedulingPriority(priority)
         }
     }
     @Test fun browseFramesFollowPanAndZoomAndReplaceChangedScenes() = runBlocking<Unit> {

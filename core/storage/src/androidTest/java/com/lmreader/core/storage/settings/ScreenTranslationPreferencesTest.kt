@@ -5,6 +5,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ScreenTranslationPreferencesTest {
+    @Test fun videoSimilarityRoundTripsAndLegacySettingsDefaultToSixty() {
+        val settings = ScreenTranslationSettings(mode = ScreenTranslationMode.VIDEO, videoSimilarityPercent = 84)
+        val decoded = ScreenTranslationPreferences.decode(ScreenTranslationPreferences.encode(settings))
+        assertEquals(84, decoded.videoSimilarityPercent)
+        assertEquals(ScreenTranslationMode.VIDEO, decoded.mode)
+        assertEquals(settings.changeThresholdPercent, decoded.changeThresholdPercent)
+        val old = org.json.JSONObject(ScreenTranslationPreferences.encode(settings)); old.remove("videoSimilarity")
+        assertEquals(60, ScreenTranslationPreferences.decode(old.toString()).videoSimilarityPercent)
+        assertEquals(100, ScreenTranslationPreferences.decode(old.put("videoSimilarity", 150).toString()).videoSimilarityPercent)
+    }
     @Test fun completeSettingsRoundTripIncludingIndependentScreenResources() {
         val translation = MangaTranslationSettings(sourceLanguage = "ja", targetLanguage = "zh-Hans", workflowId = "fixture", apiProfileId = "override", customStyle = "polite",
             segThreshold = .4f, textDetectionThreshold = .6f, freeTextMergeGapRatio = .7f, segTextScope = SegTextScope.FREE_TEXT,

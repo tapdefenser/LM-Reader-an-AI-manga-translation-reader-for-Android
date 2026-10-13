@@ -64,6 +64,19 @@ class ScreenTranslationController(private val container: AppContainer) {
     private val captureWakeups = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
     private var worker: Job? = null
     private val chapterWindow = ScreenChapterWindow()
+    private data class VideoFrame(val chapter: ScreenChapterWindow.Chapter, val cropCount: Int, val capturedAt: Long,
+        val previous: List<ScreenVideoRegion>, val crops: MutableMap<Int, List<ScreenVideoRegion>> = linkedMapOf(),
+        val claimed: MutableMap<String, Int> = linkedMapOf(), var segmented: Boolean = false) {
+        val regions get() = crops.values.flatten()
+    }
+    private data class VideoTarget(val number: Long, val bounds: PixelRect)
+    internal data class VideoRecognition(val number: Long, val capturedAt: Long, val segmentedAt: Long,
+        val regions: Set<String>, val reused: Set<String>)
+    internal val videoRecognitionHistory = ArrayDeque<VideoRecognition>()
+    private val videoFrames = linkedMapOf<Long, VideoFrame>()
+    private var latestVideoFrame: VideoFrame? = null
+    private val videoTargets = linkedMapOf<String, VideoTarget>()
+    private var videoCadence: ScreenVideoCadence? = null
     private val chapterJobs = linkedMapOf<Long, Job>()
     private val chapterRevision = MutableStateFlow(0L)
     private val cacheBudget = TranslationCacheBudget(preferences.settings.value.cacheMegabytes.toLong() * 1_048_576)
@@ -202,6 +215,7 @@ class ScreenTranslationController(private val container: AppContainer) {
     private fun retire(job: Job?) { job?.let { it.cancel(); retiring += it } }
     private fun retireChapters() {
         chapterJobs.values.toList().forEach(::retire); chapterJobs.clear(); chapterWindow.clear()
+        clearVideoFrames()
         detectedBrowseRegions.clear(); stability.reset(); lastBrowseReliable = false
         chapterRevision.update { it + 1 }
     }
@@ -405,7 +419,7 @@ class ScreenTranslationController(private val container: AppContainer) {
         if (!state.value.started || state.value.inside || activeWindow >= 0 && windowId != activeWindow) return
         if (action) captureWakeups.trySend(Unit)
     }
-    private fun resetScene() { trace("reset epoch=$generation package=$activePackage window=$activeWindow"); generation++; clearing?.cancel(); clearing = null; coverage.clear(); coverageTracker.clear(); coverageProbeAt = 0L; detectedBrowseRegions.clear(); supersededBrowseRegions.clear(); stability.reset(); lastBrowseReliable = false; gray = null; grayArea = null; browseTracker.reset(); cumulative = ScreenTransform(); overlay?.clear(); if (configuration?.mode == ScreenTranslationMode.BROWSE) browseSession.submit(emptyList()); captureWakeups.trySend(Unit); state.update { it.copy(bubbles = 0) } }
+    private fun resetScene() { trace("reset epoch=$generation package=$activePackage window=$activeWindow"); generation++; clearing?.cancel(); clearing = null; coverage.clear(); coverageTracker.clear(); coverageProbeAt = 0L; detectedBrowseRegions.clear(); supersededBrowseRegions.clear(); clearVideoFrames(); stability.reset(); lastBrowseReliable = false; gray = null; grayArea = null; browseTracker.reset(); cumulative = ScreenTransform(); overlay?.clear(); if (configuration?.mode == ScreenTranslationMode.BROWSE) browseSession.submit(emptyList()); captureWakeups.trySend(Unit); state.update { it.copy(bubbles = 0) } }
     private var clearing: Job? = null
     private fun clearManualLater() {
         generation++
@@ -592,6 +606,7 @@ class ScreenTranslationController(private val container: AppContainer) {
             joinRetired()
             val config = configuration ?: return@launch
             val cadence = ScreenFrameCadence(config.sampleIntervalMillis.toLong())
+            val videoClock = if (config.mode == ScreenTranslationMode.VIDEO) ScreenVideoCadence(config.sampleIntervalMillis.toLong()).also { videoCadence = it } else null
             var baseline: ScreenGrayFrame? = null
             var baselineArea: PixelRect? = null
             var baselineButton: PixelRect? = null
@@ -636,7 +651,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                     }
                     awaitQueuePermission("recognition")
                 }
-                val wait = cadence.waitMillis(SystemClock.uptimeMillis())
+                val wait = videoClock?.waitMillis(SystemClock.uptimeMillis()) ?: cadence.waitMillis(SystemClock.uptimeMillis())
                 if (wait > 0) { withTimeoutOrNull(wait) { captureWakeups.receive() }; continue }
                 if (config.mode == ScreenTranslationMode.BROWSE && viewport != null) {
                     val knownAreas = translationAreas(config, viewport!!)
@@ -655,7 +670,8 @@ class ScreenTranslationController(private val container: AppContainer) {
                 try {
                     val captureStarted = SystemClock.uptimeMillis()
                     val beforeCapture = generation
-                    val captured = checkNotNull(frameBroker).capture(monitoring = config.mode == ScreenTranslationMode.MANUAL)
+                    val captured = checkNotNull(frameBroker).capture(monitoring = config.mode == ScreenTranslationMode.MANUAL,
+                        fresh = config.mode == ScreenTranslationMode.VIDEO)
                         .limited(config.maximumCaptureEdge).also { held = it }
                     reportWait("capture", null)
                     cadence.probed(SystemClock.uptimeMillis())
@@ -683,11 +699,8 @@ class ScreenTranslationController(private val container: AppContainer) {
                             continue
                         }
                         ScreenTranslationMode.VIDEO -> {
-                            val next = withContext(Dispatchers.Default) { CapturedMotion(captured.gray(), captured.bounds).restricted(selectedAreas).gray }
-                            if (grayArea != area) { gray = null; grayArea = area }
-                            if (gray?.difference(next)?.let { it < config.changeThresholdPercent } == true) continue
-                            // Only a successfully submitted frame becomes the comparison point.
-                            gray = next
+                            // Every admitted video frame reaches SEG. Reuse is decided for
+                            // corresponding detected regions, never by a whole-screen probe.
                         }
                         ScreenTranslationMode.BROWSE -> {
                             val next = CapturedMotion(withContext(Dispatchers.Default) { captured.gray(excluded = overlay?.systemExclusions().orEmpty() +
@@ -724,6 +737,11 @@ class ScreenTranslationController(private val container: AppContainer) {
                     val reserved = exposed.flatMap { r -> selectedAreas.mapNotNull { it.intersection(r) } }
                     if (reserved.isEmpty()) continue
                     val chapter = chapterWindow.admit(epoch, pose, reserved)
+                    if (videoClock != null) {
+                        videoFrames[chapter.number] = VideoFrame(chapter, processingAreas.size, captureStarted, latestVideoFrame?.regions.orEmpty())
+                        videoClock.captured()
+                        android.util.Log.d("ScreenVideo", "CAPTURE frame=${chapter.number} at=$captureStarted buffered=${chapterWindow.size}")
+                    }
                     cadence.submitted(SystemClock.uptimeMillis()); held = null
                     val job = scope.launch(start = CoroutineStart.LAZY) {
                         try { process(captured, processingAreas, epoch, chapter = chapter, startedAt = captureStarted,
@@ -750,10 +768,71 @@ class ScreenTranslationController(private val container: AppContainer) {
     }
     private fun finishChapter(chapter: ScreenChapterWindow.Chapter, job: Job) {
         if (chapterJobs[chapter.number] !== job) return
-        chapterJobs.remove(chapter.number); chapterWindow.complete(chapter); chapterRevision.update { it + 1 }
+        chapterJobs.remove(chapter.number)
+        chapterWindow.complete(chapter, inOrder = configuration?.mode == ScreenTranslationMode.VIDEO)
+        videoFrames.remove(chapter.number); pruneVideoTargets(); chapterRevision.update { it + 1 }
         waitReasons.remove("workflow-${chapter.number}"); waitReasons.remove("consumer-${chapter.number}")
         state.update { it.copy(busy = worker?.isActive == true || chapterWindow.size > 0, activeChapters = chapterWindow.size) }
         updateButton(); if (state.value.continuous) captureWakeups.trySend(Unit)
+    }
+    private fun clearVideoFrames() {
+        videoFrames.clear(); latestVideoFrame = null; videoTargets.clear()
+        videoRecognitionHistory.clear(); videoCadence?.reset()
+    }
+    private fun pruneVideoTargets() {
+        val keep = latestVideoFrame?.regions.orEmpty().mapTo(hashSetOf()) { it.id }
+        videoFrames.values.forEach { frame -> frame.regions.forEach { keep += it.id } }
+        keep += overlay?.positions(true)?.keys.orEmpty()
+        videoTargets.keys.retainAll(keep)
+    }
+    /** Main-thread SEG commit: all selected crops must be ready before another image can enter. */
+    private fun videoSegmented(chapter: ScreenChapterWindow.Chapter?, crop: Int, regions: List<ScreenVideoRegion>) {
+        if (chapter == null || chapter.epoch != generation) return
+        val frame = videoFrames[chapter.number] ?: return
+        frame.crops[crop] = regions
+        regions.forEach { region ->
+            if ((videoTargets[region.id]?.number ?: Long.MIN_VALUE) <= chapter.number)
+                videoTargets[region.id] = VideoTarget(chapter.number, region.bounds)
+        }
+        if (overlay?.promoteVideo(regions.associate { it.id to it.bounds }, chapter.number) == true)
+            publicationOrder.accept(chapter.epoch, chapter.number, generation)
+        if (!frame.segmented && frame.crops.size == frame.cropCount) {
+            frame.segmented = true
+            val now = SystemClock.uptimeMillis()
+            chapter.preprocessingFinished(); videoCadence?.segmented(now)
+            if ((latestVideoFrame?.chapter?.number ?: Long.MIN_VALUE) < chapter.number) latestVideoFrame = frame
+            val ids = frame.regions.map { it.id }.toSet()
+            val previous = frame.previous.map { it.id }.toSet()
+            if (videoRecognitionHistory.size >= 64) videoRecognitionHistory.removeFirst()
+            videoRecognitionHistory.addLast(VideoRecognition(chapter.number, frame.capturedAt, now, ids, ids.intersect(previous)))
+            android.util.Log.d("ScreenVideo", "SEG frame=${chapter.number} at=$now regions=${ids.size} reused=${ids.intersect(previous).size} buffered=${chapterWindow.size}")
+            pruneVideoTargets(); captureWakeups.trySend(Unit)
+        }
+    }
+    private fun renderVideo(renderer: ScreenOverlay, prepared: List<ScreenOverlay.PreparedBubble>, pageToScreen: ScreenTransform,
+        chapter: ScreenChapterWindow.Chapter?, epoch: Long, complete: Boolean, area: PixelRect) {
+        val number = chapter?.number ?: 0
+        var filled = false
+        var cleanupVersion = number
+        for (bubble in prepared.filterNot { it.placeholder }) {
+            val target = videoTargets[bubble.id]
+            val effective = maxOf(number, target?.number ?: number)
+            if (!publicationOrder.accept(epoch, effective, generation)) continue
+            val transform = if (target != null && target.number > number)
+                screenVideoRegionTransform(bubble.bounds, target.bounds) else pageToScreen
+            renderer.addVideo(listOf(bubble), transform, effective)
+            filled = true
+            cleanupVersion = maxOf(cleanupVersion, effective)
+        }
+        if ((filled || complete) && publicationOrder.accept(epoch, cleanupVersion, generation)) {
+            // Pending origin work may already belong to a newer frame. Keep its
+            // identity, drawing and future text instead of re-translating it.
+            val retained = videoTargets.filterValues { it.number >= cleanupVersion && it.bounds.intersects(area) }.keys
+            // A duplicate-only frame may finish before its origin's API. Its
+            // empty workflow is not evidence that the replacement text is ready.
+            if (retained.all { it in renderer.positions(false) }) renderer.finishVideoArea(area, cleanupVersion, retained)
+        }
+        pruneVideoTargets()
     }
     private suspend fun beginConsumer(chapter: ScreenChapterWindow.Chapter?) {
         if (chapter == null) return
@@ -808,9 +887,9 @@ class ScreenTranslationController(private val container: AppContainer) {
             val queueStarted = SystemClock.uptimeMillis()
             awaitQueuePermission("workflow-${chapter?.number ?: "manual"}")
             performance.record("QUEUE", SystemClock.uptimeMillis() - queueStarted)
-            for ((areaIndex, area) in areas.withIndex()) {
+            suspend fun processArea(areaIndex: Int, area: PixelRect) {
                 currentCoroutineContext().ensureActive()
-                if (epoch >= 0 && generation != epoch) break
+                if (epoch >= 0 && generation != epoch) return
                 val context = container.application
                 // Browse keeps this clean capture available while its planner
                 // detects new tiles, then restores only real text merge groups.
@@ -824,7 +903,10 @@ class ScreenTranslationController(private val container: AppContainer) {
                 val right = upper((expanded.right - frame.bounds.left) * frame.bitmap.width / frame.bounds.width).coerceIn(x, frame.bitmap.width)
                 val bottom = upper((expanded.bottom - frame.bounds.top) * frame.bitmap.height / frame.bounds.height).coerceIn(y, frame.bitmap.height)
                 val minimum = if (config.mode == ScreenTranslationMode.BROWSE) config.minimumNewAreaPixels else 2
-                if (right - x < minimum || bottom - y < minimum) continue
+                if (right - x < minimum || bottom - y < minimum) {
+                    if (config.mode == ScreenTranslationMode.VIDEO) videoSegmented(chapter, areaIndex, emptyList())
+                    return
+                }
                 val croppedArea = PixelRect(frame.bounds.left + x * frame.bounds.width / frame.bitmap.width,
                     frame.bounds.top + y * frame.bounds.height / frame.bitmap.height,
                     frame.bounds.left + right * frame.bounds.width / frame.bitmap.width,
@@ -835,7 +917,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                 val rawCrop = Bitmap.createBitmap(frame.bitmap, x, y, right - x, bottom - y)
                 val image = withContext(Dispatchers.Default) {
                     val masked = maskedScreenCrop(rawCrop, croppedArea, ownedAreas)
-                    if (config.mode == ScreenTranslationMode.BROWSE && masked === rawCrop) masked.copy(Bitmap.Config.ARGB_8888, true)!! else masked
+                    if (config.mode != ScreenTranslationMode.MANUAL && masked === rawCrop) masked.copy(Bitmap.Config.ARGB_8888, true)!! else masked
                 }
                 if (image !== rawCrop && rawCrop !== frame.bitmap) rawCrop.recycle()
                 val pageToCapture = ScreenTransform(frame.bounds.width / frame.bitmap.width,
@@ -854,6 +936,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                 var successful = false
                 var cropRegions = emptyList<ScreenSourceRegion>()
                 val renderedRegions = linkedMapOf<String, PageTranslatedRegion>()
+                var reusedVideoRegions = emptyList<ScreenVideoRegion>()
                 if (config.mode == ScreenTranslationMode.BROWSE) overlay?.protectReplacements(pageId, mergedCrop.replaces)
                 try {
                     val imageStarted = SystemClock.uptimeMillis()
@@ -881,6 +964,42 @@ class ScreenTranslationController(private val container: AppContainer) {
                         pageImages = mapOf(pageId to WorkflowPageImage(image, hash)),
                         screenPreparation = screenVisionPreparation(retry?.snapshot?.let { WorkflowProgramCodec.decode(org.json.JSONObject(it).getJSONObject("program").toString()) } ?: program!!, from.tag, to.tag)) {
                         override suspend fun segmentPage(pageId: String, bitmap: Bitmap, sha256: String, frame: WorkflowFrame): WorkflowPageSegmentation {
+                            if (config.mode == ScreenTranslationMode.VIDEO && chapter != null) {
+                                val detection = super.segmentPage(pageId, bitmap, sha256, frame)
+                                val previous = withContext(Dispatchers.Main.immediate) {
+                                    videoFrames[chapter?.number]?.previous.orEmpty()
+                                }
+                                val fresh = withContext(Dispatchers.Default) { screenVideoRegions(bitmap, detection.regions, pageToCapture) }
+                                val candidates = withContext(Dispatchers.Default) { screenVideoRegionMatches(previous, fresh, config.videoSimilarityPercent) }
+                                val matches = withContext(Dispatchers.Main.immediate) {
+                                    if (epoch >= 0 && generation != epoch) throw WorkflowPageStopped()
+                                    val video = videoFrames[chapter?.number]
+                                    candidates.filterValues { old -> video?.claimed?.get(old.id) == null || video.claimed[old.id] == areaIndex }
+                                        .also { accepted -> accepted.values.forEach { old -> video?.claimed?.set(old.id, areaIndex) } }
+                                }
+                                reusedVideoRegions = fresh.mapNotNull { region -> matches[region.id]?.let { region.copy(id = it.id) } }
+                                val remaining = detection.regions.filterNot { it.id in matches }
+                                // Whole-page OCR/vision nodes must also see only new source
+                                // text. Keep unmatched detections intact where boxes touch.
+                                var finalHash: String? = detection.sha256
+                                if (matches.isNotEmpty()) {
+                                    val excluded = detection.regions.filter { it.id in matches }.flatMap { region ->
+                                        screenExposedRegions(region.bounds, remaining.map { it.bounds })
+                                    }
+                                    val viewportPixels = PixelRect(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())
+                                    withContext(Dispatchers.Default) { maskedScreenCrop(bitmap, viewportPixels,
+                                        screenExposedRegions(viewportPixels, excluded), copy = false) }
+                                    finalHash = withContext(Dispatchers.IO) {
+                                        val digest = java.security.MessageDigest.getInstance("SHA-256")
+                                        pending.writeImage(pageId) { output ->
+                                            val hashed = java.security.DigestOutputStream(output, digest)
+                                            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, hashed)); hashed.flush()
+                                        }
+                                        digest.digest().joinToString("") { "%02x".format(it) }
+                                    }
+                                }
+                                return detection.copy(regions = remaining, sha256 = finalHash)
+                            }
                             if (config.mode != ScreenTranslationMode.BROWSE) return super.segmentPage(pageId, bitmap, sha256, frame)
                             val inverse = pageToCapture.inverse()
                             val old = browseSources.map { it.copy(bounds = inverse.bounds(it.bounds)) }
@@ -946,6 +1065,16 @@ class ScreenTranslationController(private val container: AppContainer) {
                         }
                         override fun timing(pageId: String?, stage: String, elapsedMillis: Long) { performance.record(stage, elapsedMillis) }
                         override suspend fun regionsDetected(pageId: String, regions: List<SegRegion>) {
+                            if (config.mode == ScreenTranslationMode.VIDEO) {
+                                val fresh = withContext(Dispatchers.Default) { screenVideoRegions(image, regions, pageToCapture) }
+                                withContext(Dispatchers.Main.immediate) {
+                                    if (generation == epoch) {
+                                        cropRegions = fresh.map { ScreenSourceRegion(it.id, it.bounds, chapter?.number ?: 0) }
+                                        videoSegmented(chapter, areaIndex, fresh + reusedVideoRegions)
+                                    }
+                                }
+                                return
+                            }
                             if (cleanBrowseFrame == null || generation != epoch) return
                             val sources = withContext(Dispatchers.Default) { regions.map { region ->
                                 val bounds = pageToCapture.bounds(region.bounds)
@@ -960,7 +1089,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                             }
                         }
                         override suspend fun visionPrepared(pageId: String) {
-                            if (areaIndex == areas.lastIndex) withContext(Dispatchers.Main.immediate) {
+                            if (config.mode != ScreenTranslationMode.VIDEO && areaIndex == areas.lastIndex) withContext(Dispatchers.Main.immediate) {
                                 chapter?.preprocessingFinished(); captureWakeups.trySend(Unit)
                             }
                         }
@@ -1019,14 +1148,10 @@ class ScreenTranslationController(private val container: AppContainer) {
                                 }
                                 withContext(Dispatchers.Main.immediate) {
                                     if (generation == epoch) {
-                                        if (config.mode == ScreenTranslationMode.VIDEO && chapter != null &&
-                                            !publicationOrder.allows(epoch, chapter.number, generation)) {
-                                            if (complete) renderer.discardEmpty(saved.regions.map { it.region.id }.toSet())
+                                        if (config.mode == ScreenTranslationMode.VIDEO && chapter != null) {
+                                            if (overlay === renderer) renderVideo(renderer, prepared, pageToScreen, chapter, epoch, complete, croppedArea)
+                                            changed.forEach { renderedRegions[it.region.id] = it }
                                             return@withContext
-                                        }
-                                        if (config.mode == ScreenTranslationMode.VIDEO && chapter != null &&
-                                            (prepared.any { !it.placeholder } || complete)) {
-                                            if (!publicationOrder.accept(epoch, chapter.number, generation)) return@withContext
                                         }
                                         if (config.mode == ScreenTranslationMode.BROWSE) {
                                             val currentRaw = browseTracker.rawPose
@@ -1044,9 +1169,11 @@ class ScreenTranslationController(private val container: AppContainer) {
                                             val transform = pageToScreen.then(originalTransform.inverse().then(cumulative))
                                             if (overlay === renderer) {
                                                 renderer.add(prepared, transform, chapter?.number ?: 0)
+                                                // Explicit retries run outside the continuous
+                                                // frame window and retain their own filled IDs.
                                                 if (config.mode == ScreenTranslationMode.VIDEO && complete)
-                                                    renderer.finishVideoArea(transform.bounds(PixelRect(0f, 0f, saved.width.toFloat(), saved.height.toFloat())),
-                                                        chapter?.number ?: 0, saved.regions.filter { it.translatedText.isNotBlank() }.map { it.region.id }.toSet())
+                                                    renderer.finishVideoArea(croppedArea, 0,
+                                                        saved.regions.filter { it.translatedText.isNotBlank() }.map { it.region.id }.toSet())
                                             }
                                         }
                                         if (overlay === renderer) {
@@ -1085,6 +1212,12 @@ class ScreenTranslationController(private val container: AppContainer) {
                 } finally {
                     host?.close()
                     withContext(NonCancellable + Dispatchers.Main.immediate) {
+                        if (config.mode == ScreenTranslationMode.VIDEO && generation == epoch) {
+                            // Invalid/failed workflows still release their SEG gate, while
+                            // the frame remains buffered until all its crop work has ended.
+                            if (videoFrames[chapter?.number]?.crops?.containsKey(areaIndex) != true)
+                                videoSegmented(chapter, areaIndex, emptyList())
+                        }
                         detectedBrowseRegions.remove(pageId); browseHosts.remove(pageId); overlay?.releaseReplacements(pageId)
                         if (!successful) {
                             if (config.mode == ScreenTranslationMode.BROWSE)
@@ -1102,6 +1235,9 @@ class ScreenTranslationController(private val container: AppContainer) {
                     coverage.removeContent(overlay?.fixedContentAreas().orEmpty())
                 }
             }
+            if (config.mode == ScreenTranslationMode.VIDEO) supervisorScope {
+                areas.mapIndexed { index, area -> async { processArea(index, area) } }.awaitAll()
+            } else areas.forEachIndexed { index, area -> processArea(index, area) }
             if (generation == epoch) {
                 state.update { it.copy(status = frameFailure ?: failedReason?.let { reason -> "当前画面失败，已跳过：$reason" } ?: "屏幕翻译完成", timing = performance.summary()) }
             }

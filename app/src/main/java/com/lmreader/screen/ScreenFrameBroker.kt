@@ -118,12 +118,12 @@ internal class ScreenFrameBroker(private val projection: ProjectionScreenCapture
                 }
                 if (overlay()?.containsOwnButton(raw) == true) {
                     raw.close(); cleanProjection = false; sourceEpoch++
-                    return window()
+                    return window(fresh)
                 }
                 return CapturedScreen(raw.bitmap, bounds, assist().applicationWindow()?.id ?: -1,
                     (sourceStamp shl 40) + raw.sequence, raw.capturedAt) { raw.close() }
             }
-            return window()
+            return window(fresh)
         }
         if (config.usesAccessibility && Build.VERSION.SDK_INT >= 34 && ScreenAccessibilityService.instance != null) return window(fresh)
         val source = checkNotNull(projection) { "屏幕截图授权已失效，请重新启动屏幕翻译" }

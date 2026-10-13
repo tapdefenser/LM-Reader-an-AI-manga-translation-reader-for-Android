@@ -240,7 +240,7 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             ScreenSlider("机翻资源预算", machine.memoryMegabytes.toFloat(), 128f..4096f, "MB") { value -> coroutine.launch { container.machineTranslationPreferences.update { it.copy(memoryMegabytes = value.toInt()) } } }
             Text("自动并行数结合 CPU、可用内存和中转路线模型大小计算。资源预算是估算值；单条路线过大时仍允许一个任务运行。", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider(); Text("响应与区域", style = MaterialTheme.typography.titleMedium)
-            ScreenSlider("屏幕检测间隔", config.sampleIntervalMillis.toFloat(), 100f..2000f, "ms") { value -> update { it.copy(sampleIntervalMillis = value.toInt()) } }
+            ScreenSlider(if (config.mode == ScreenTranslationMode.VIDEO) "截图延时" else "屏幕检测间隔", config.sampleIntervalMillis.toFloat(), 100f..2000f, "ms") { value -> update { it.copy(sampleIntervalMillis = value.toInt()) } }
             if (config.mode == ScreenTranslationMode.BROWSE) {
                 ScreenChoice("跟踪算法", if (config.trackingAlgorithm == ScreenTrackingAlgorithm.GLOBAL) "整屏" else "整屏＋逐气泡", listOf(
                     ScreenTrackingAlgorithm.GLOBAL.name to "整屏", ScreenTrackingAlgorithm.GLOBAL_AND_REGIONS.name to "整屏＋逐气泡")) {
@@ -257,10 +257,14 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
                 Text("平移和缩放持续跟随。画面稳定后仅检测新增区域，按该帧光流后的位置排除已有文字。新 SEG 气泡接近旧气泡时才合并重 SEG；新遮罩接管背景，旧译文保留到对应新译文完成。", style = MaterialTheme.typography.bodySmall)
             }
             if (config.mode == ScreenTranslationMode.MANUAL) ScreenSlider("手动遮罩消失延迟", config.manualClearMillis.toFloat(), 0f..1000f, "ms") { value -> update { it.copy(manualClearMillis = value.toInt()) } }
-            if (config.mode == ScreenTranslationMode.VIDEO) Text("视频默认识别全屏，不等待画面稳定；空位开放后取最新画面。新结果准备好之前，上一张译文保持显示。", style = MaterialTheme.typography.bodySmall)
+            if (config.mode == ScreenTranslationMode.VIDEO) {
+                Text("最多缓冲两张截图。SEG 完成后才允许下一张截图；延时从上一张 SEG 完成开始，与新一张 SEG 并行计时。缓冲区满时，等待最早一张完成回填再截图。新气泡填出前保留上一张译文。", style = MaterialTheme.typography.bodySmall)
+                ScreenSlider("视频 SEG 区域相似度", config.videoSimilarityPercent.toFloat(), 1f..100f, "%") { value -> update { it.copy(videoSimilarityPercent = value.toInt()) } }
+                Text("逐区域比较 SEG 形状和原文字纹理；相似度超过此值时复用旧气泡及仍在处理的译文，不重复识别或翻译。值越高越严格，100 时不复用。", style = MaterialTheme.typography.bodySmall)
+            }
             ScreenSlider("截图最长边", config.maximumCaptureEdge.toFloat(), 480f..2560f, "px") { value -> update { it.copy(maximumCaptureEdge = value.toInt()) } }
             if (config.mode != ScreenTranslationMode.BROWSE) ScreenSlider("新增区域上下文", config.overlapPixels.toFloat(), 0f..256f, "px") { value -> update { it.copy(overlapPixels = value.toInt()) } }
-            ScreenSlider("画面变化阈值", config.changeThresholdPercent.toFloat(), 1f..30f, "%") { value -> update { it.copy(changeThresholdPercent = value.toInt()) } }
+            if (config.mode != ScreenTranslationMode.VIDEO) ScreenSlider("画面变化阈值", config.changeThresholdPercent.toFloat(), 1f..30f, "%") { value -> update { it.copy(changeThresholdPercent = value.toInt()) } }
             if (config.mode == ScreenTranslationMode.VIDEO) {
                 ScreenSlider("视频识别区域上缘", config.videoTopPercent.toFloat(), 0f..(config.videoBottomPercent - 5).toFloat(), "%") { value -> update { it.copy(videoTopPercent = value.toInt()) } }
                 ScreenSlider("视频识别区域下缘", config.videoBottomPercent.toFloat(), (config.videoTopPercent + 5).toFloat()..100f, "%") { value -> update { it.copy(videoBottomPercent = value.toInt()) } }

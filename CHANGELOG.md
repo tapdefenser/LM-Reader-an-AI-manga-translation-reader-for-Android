@@ -1,5 +1,16 @@
 # Changelog / 更新记录
 
+## v0.1.9 - Continuous video translation / 视频连续翻译
+
+- 视频模式改为两张截图的有序缓冲，SEG 完成后接续截图，队首回填完成才释放容量，截图延时与后续 SEG 重叠计算。
+- 新增视频专用 SEG 区域相似度，默认 60%；相同字幕沿用原气泡、位置及待完成的翻译，避免重复 OCR 与翻译。
+- 新字幕逐泡回填前保留旧译文，多选区独立处理；手动与浏览模式保留原有调度。
+- Video uses a two-frame FIFO buffer, admits the next capture after SEG and frees capacity after the oldest frame finishes backfilling. Capture delay overlaps the next SEG pass.
+- Add an independent video SEG-region similarity setting, defaulting to 60%. Matching subtitles retain bubble identity, text and pending work instead of repeating OCR and translation.
+- Keep old text until replacement bubbles are filled and process selected areas independently, preserving manual and browse scheduling.
+
+详见 [v0.1.9 中英发行说明 / Bilingual release notes](docs/releases/v0.1.9.md)。
+
 ## v0.1.8 - Reader chapter order / 阅读器章节顺序
 
 - 阅读器沿用详情页保存的章节顺序，支持首字母、修改时间、自然数字正反向排序及手动拖动。

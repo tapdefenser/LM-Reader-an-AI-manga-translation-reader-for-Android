@@ -19,6 +19,8 @@ public class ScreenFixtureActivity extends Activity {
     private void configure(Intent intent) {
         if (intent.hasExtra("orientation")) setRequestedOrientation(intent.getIntExtra("orientation", android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED));
         view.video = intent.getBooleanExtra("video", false);
+        view.videoText = intent.getStringExtra("videoText");
+        view.subtitleShift = intent.getFloatExtra("subtitleShift", 0f);
         view.scale = intent.getFloatExtra("scale", 1f);
         view.shift = intent.getFloatExtra("shift", 0f);
         view.fixedControls = intent.getBooleanExtra("fixedControls", view.fixedControls);
@@ -44,7 +46,7 @@ public class ScreenFixtureActivity extends Activity {
     }
     private class Fixture extends View {
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        boolean video, dragged, held, fixedControls, inlinePopup; int variant; float scale = 1, shift, lastY; long start = android.os.SystemClock.uptimeMillis();
+        boolean video, dragged, held, fixedControls, inlinePopup; int variant; float scale = 1, shift, lastY, subtitleShift; String videoText; long start = android.os.SystemClock.uptimeMillis();
         float tintOpacity; int tintColor = Color.BLACK;
         final android.os.Handler gestures = new android.os.Handler(android.os.Looper.getMainLooper());
         final Runnable longClick = () -> { if (!dragged) { held = true; performLongClick(); } };
@@ -65,11 +67,11 @@ public class ScreenFixtureActivity extends Activity {
                 paint.setStyle(Paint.Style.FILL); paint.setColor(Color.rgb(80, 150, 200));
                 float x = (elapsed / 3f) % (getWidth() + 600) - 600;
                 canvas.drawRect(x, 0, x + 600, getHeight(), paint);
-                paint.setColor(Color.WHITE); canvas.drawRect(70, getHeight() * .7f, getWidth() - 70, getHeight() * .92f, paint);
+                paint.setColor(Color.WHITE); canvas.drawRect(70, getHeight() * .7f + subtitleShift, getWidth() - 70, getHeight() * .92f + subtitleShift, paint);
                 paint.setColor(Color.BLACK); paint.setTextSize(getWidth() / 18f); paint.setTextAlign(Paint.Align.CENTER);
                 boolean first = elapsed / 12000 % 2 == 0;
-                canvas.drawText(first ? "The rabbit is blue." : "The weather is nice today.", getWidth() / 2f, getHeight() * .79f, paint);
-                canvas.drawText("Let's meet at school tomorrow.", getWidth() / 2f, getHeight() * .86f, paint);
+                canvas.drawText(videoText != null ? videoText : first ? "The rabbit is blue." : "The weather is nice today.", getWidth() / 2f, getHeight() * .79f + subtitleShift, paint);
+                canvas.drawText("Let's meet at school tomorrow.", getWidth() / 2f, getHeight() * .86f + subtitleShift, paint);
                 postInvalidateOnAnimation(); return;
             }
             canvas.save(); canvas.translate(0, shift); canvas.scale(scale, scale);

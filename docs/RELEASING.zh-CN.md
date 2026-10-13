@@ -1,10 +1,10 @@
 # 发布与签名
 
-## 当前版本：v0.1.8
+## 当前版本：v0.1.9
 
-发布日期：2026-10-14。版本 `0.1.8`，代码 `10`，标签 `v0.1.8`，APK `LM-Reader-v0.1.8-64bit.apk`。参见[当前发行说明](releases/v0.1.8.md)与 [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.8)。
+发布日期：2026-10-14。版本 `0.1.9`，代码 `11`，标签 `v0.1.9`，APK `LM-Reader-v0.1.9-64bit.apk`。参见[当前发行说明](releases/v0.1.9.md)与 [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.9)。
 
-沿用下文的构建、签名、打包流程和原发布证书。`tools/package_release.py` 读取当前 `gradle/release.properties`，要求源码已提交，生成本版本说明和校验文件。本版验证详情页排序后的阅读、预载与恢复进度；验证范围详见当前发行说明。分发审查与 ARM 长时验证的已有待办仍保留。
+沿用下文的构建、签名、打包流程和原发布证书。`tools/package_release.py` 读取当前 `gradle/release.properties`，要求源码已提交，生成本版本说明和校验文件。本版验证视频模式双帧调度、SEG 区域复用、旧译文保留及模式回归；验证范围详见当前发行说明。分发审查与 ARM 长时验证的已有待办仍保留。
 
 ## v0.1.6 历史参考
 

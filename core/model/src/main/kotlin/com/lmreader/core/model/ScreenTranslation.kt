@@ -25,6 +25,7 @@ data class ScreenTranslationSettings(
     val videoRegions: ScreenRegionSelection = ScreenRegionSelection(),
     val regionPresets: List<ScreenRegionSelection> = emptyList(),
     val browseMergeDistancePixels: Int = 8,
+    val videoSimilarityPercent: Int = 60,
 ) {
     init {
         require(cacheMegabytes in 32..1024 && sampleIntervalMillis in 100..2000)
@@ -35,6 +36,7 @@ data class ScreenTranslationSettings(
         require(followFramesPerSecond in 5..60)
         require(minimumNewAreaPixels in 2..128)
         require(browseMergeDistancePixels in 0..128)
+        require(videoSimilarityPercent in 1..100)
     }
     val requiresAccessibility get() = mode != ScreenTranslationMode.MANUAL
     val usesAccessibility get() = requiresAccessibility || preferAccessibility
@@ -50,6 +52,7 @@ class ScreenChapterWindow {
         @Volatile var visionReady = false
             private set
         fun preprocessingFinished() { visionReady = true }
+        internal var completed = false
         val contentAreas = areas.map(capturedAt.inverse()::bounds)
     }
     private var nextNumber = 0L
@@ -62,7 +65,11 @@ class ScreenChapterWindow {
         check(entries.size < 2); require(areas.isNotEmpty())
         return Chapter(++nextNumber, epoch, capturedAt, areas).also { entries[it.number] = it }
     }
-    fun complete(chapter: Chapter) { entries.remove(chapter.number) }
+    fun complete(chapter: Chapter, inOrder: Boolean = false) {
+        if (!inOrder) { entries.remove(chapter.number); return }
+        entries[chapter.number]?.completed = true
+        while (entries.values.firstOrNull()?.completed == true) entries.remove(entries.keys.first())
+    }
     fun clear() { entries.clear() }
     fun reserved(epoch: Long, atCapture: ScreenTransform): List<PixelRect> = entries.values.filter { it.epoch == epoch }
         .flatMap { it.contentAreas.map(atCapture::bounds) }
