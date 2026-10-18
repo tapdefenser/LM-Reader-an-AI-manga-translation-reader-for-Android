@@ -1,5 +1,7 @@
 package com.lmreader.ui.reader
 
+import com.lmreader.core.workflow.translationEngines
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -235,7 +237,8 @@ fun ReaderScreen(
                 ?: runCatching { LocalTranslationLanguage.fromTag(mangaOptions.targetLanguage.orEmpty()) }.getOrDefault(translations.target),
             onDismiss={translatingItem=null},onTranslate={source,target ->
                 translatingItem=null;translationViewModel.translate(item,source,target,renderSettings)
-            }, requiresLocalModels = container.translationWorkflows.find(mangaOptions.workflowId)?.program?.uses(WorkflowKind.TRANSLATE) != false)}
+            }, requiresLocalModels = container.translationWorkflows.find(mangaOptions.workflowId)?.program?.uses(WorkflowKind.TRANSLATE) != false,
+            engines = container.translationWorkflows.find(mangaOptions.workflowId)?.program?.translationEngines().orEmpty())}
         translations.failure?.let {failure ->androidx.compose.material3.AlertDialog(onDismissRequest=translationViewModel::clearMessage,
             title={Text(stringResource(R.string.reader_mt_action))},text={Text(stringResource(R.string.reader_mt_failed,failure))},
             confirmButton={androidx.compose.material3.TextButton(onClick=translationViewModel::clearMessage) {Text(stringResource(R.string.local_mt_close))}})}

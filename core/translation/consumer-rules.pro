@@ -1,2 +1,2 @@
 -keep class com.lmreader.core.translation.BergamotNative { *; }
--keep class com.lmreader.core.translation.NllbTokenizerNative { *; }
+-keep class com.lmreader.core.translation.MarianTokenizerNative { *; }

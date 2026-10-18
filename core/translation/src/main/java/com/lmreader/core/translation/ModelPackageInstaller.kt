@@ -28,7 +28,7 @@ class ModelPackageInstaller(val root: File, private val client: OkHttpClient = O
     }
     fun installedDirectory(pack: TranslationModelPack) = directory(pack, "")
     private fun staging(pack: TranslationModelPack) = directory(pack, ".staging")
-    private fun marker(pack: TranslationModelPack) = pack.files.joinToString("\n") { "${it.name}:${it.size}:${it.sha256}" }
+    private fun marker(pack: TranslationModelPack) = pack.files.joinToString("\n") { "${it.name}:${it.size}:${it.gitBlobSha1 ?: it.sha256}" }
     fun isInstalled(pack: TranslationModelPack): Boolean {
         val dir = installedDirectory(pack)
         return runCatching { File(dir, "verified.txt").readText() == marker(pack) && pack.files.all { File(dir, it.name).length() == it.size } }.getOrDefault(false)
@@ -181,12 +181,15 @@ class ModelPackageInstaller(val root: File, private val client: OkHttpClient = O
         }
         internal fun verify(file: File, asset: TranslationModelFile) {
             require(file.isFile && file.length() == asset.size) { "模型文件大小不匹配：${asset.name}" }
-            val hash = MessageDigest.getInstance("SHA-256")
+            val hash = MessageDigest.getInstance(if (asset.gitBlobSha1 != null) "SHA-1" else "SHA-256")
+            if (asset.gitBlobSha1 != null) hash.update("blob ${asset.size}\u0000".toByteArray(Charsets.UTF_8))
+            val sha256 = asset.gitBlobSha1?.takeIf { asset.sha256.isNotEmpty() }?.let { MessageDigest.getInstance("SHA-256") }
             file.inputStream().buffered().use { input ->
                 val buffer = ByteArray(64 * 1024)
-                while (true) { val n = input.read(buffer); if (n < 0) break; hash.update(buffer, 0, n) }
+                while (true) { val n = input.read(buffer); if (n < 0) break; hash.update(buffer, 0, n); sha256?.update(buffer, 0, n) }
             }
-            require(hash.digest().joinToString("") { "%02x".format(it) } == asset.sha256) { "模型校验失败：${asset.name}" }
+            require(hash.digest().joinToString("") { "%02x".format(it) } == (asset.gitBlobSha1 ?: asset.sha256)) { "模型校验失败：${asset.name}" }
+            if (sha256 != null) require(sha256.digest().joinToString("") { "%02x".format(it) } == asset.sha256) { "模型校验失败：${asset.name}" }
         }
         private suspend fun writeVerified(input: InputStream, file: File, asset: TranslationModelFile) {
             var size = 0L

@@ -64,7 +64,16 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                         Text("气泡和游离文字统一输出为 <列表<气泡>>，每项都包含自己的裁图。每次成功执行都会替换本页旧气泡与翻译记录；输出到自定义变量也会同步本页。文字检测属于 SEG；OCR 步骤只负责转文字。", style = MaterialTheme.typography.bodySmall)
                     }
                     WorkflowKind.OCR -> { input("image", "<图片> · 气泡图片", WorkflowType.IMAGE); input("language", "<文本> · 原文语言", WorkflowType.TEXT) }
-                    WorkflowKind.TRANSLATE -> { input("text", "<文本> · 原文", WorkflowType.TEXT); input("source", "<文本> · 源语言", WorkflowType.TEXT); input("target", "<文本> · 目标语言", WorkflowType.TEXT) }
+                    WorkflowKind.TRANSLATE -> {
+                        input("text", "<文本> · 原文", WorkflowType.TEXT); input("source", "<文本> · 源语言", WorkflowType.TEXT); input("target", "<文本> · 目标语言", WorkflowType.TEXT)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TranslationModelEngine.entries.forEach { engine ->
+                                FilterChip(selected = (node.inputs["engine"] as? WorkflowExpression.Text)?.value.let { it == engine.name || it == null && engine == TranslationModelEngine.BERGAMOT },
+                                    onClick = { parameter("engine", WorkflowExpression.Text(engine.name)) }, enabled = enabled,
+                                    label = { Text(if (engine == TranslationModelEngine.OPUS_MT) "OPUS-MT" else "Bergamot") })
+                            }
+                        }
+                    }
                     WorkflowKind.API, WorkflowKind.API_STREAM -> {
                         input("context", "<上下文> · 请求上下文", WorkflowType.CONTEXT, optional = true)
                         TemplateEditor("<文本> · 请求提示词", node.inputs["prompt"], refs, enabled) { parameter("prompt", it) }

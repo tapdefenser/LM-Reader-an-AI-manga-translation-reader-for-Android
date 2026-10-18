@@ -90,7 +90,7 @@ object WorkflowTemplates {
         val chapter = WorkflowNode("chapters", WorkflowKind.CHAPTERS, children = listOf(page))
         return WorkflowProgram(rows = listOf(WorkflowNode("manga", WorkflowKind.MANGA, children = listOf(chapter))))
     }
-    fun localMachine(): WorkflowProgram {
+    fun localMachine(engine: TranslationModelEngine = TranslationModelEngine.BERGAMOT): WorkflowProgram {
         val bubble = WorkflowVariable(WorkflowSystem.BUBBLE, "气泡", WorkflowType.BUBBLE)
         val steps = listOf(
             WorkflowNode("seg", WorkflowKind.SEG, target = WorkflowRef(WorkflowSystem.PAGE, listOf("bubbles")),
@@ -101,7 +101,8 @@ object WorkflowTemplates {
                         inputs = mapOf("image" to WorkflowSystem.ref(bubble.id, "image"), "language" to WorkflowSystem.ref(WorkflowSystem.SOURCE))),
                     WorkflowNode("translate", WorkflowKind.TRANSLATE, target = WorkflowRef(bubble.id, listOf("translation")), inputs = mapOf(
                         "text" to WorkflowSystem.ref(bubble.id, "source"), "source" to WorkflowSystem.ref(WorkflowSystem.SOURCE),
-                        "target" to WorkflowSystem.ref(WorkflowSystem.TARGET))))))
+                        "target" to WorkflowSystem.ref(WorkflowSystem.TARGET)) +
+                        if (engine == TranslationModelEngine.BERGAMOT) emptyMap() else mapOf("engine" to WorkflowExpression.Text(engine.name))))))
         return blank().copy(rows = listOf(blank().rows.single().copy(children = listOf(
             blank().rows.single().children.single().copy(children = listOf(WorkflowNode("pages", WorkflowKind.PAGES, children = steps)))))))
     }

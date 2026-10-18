@@ -16,9 +16,9 @@ Open **⋮ → Translation Management** on the comic details page to manage that
 
 ## Translation, workflows and edits
 
-Set the comic's source/target languages and workflow first. The local chain uses Seg, OCR and offline translation packs installed by direction; English-pivot routes need every required direction. For APIs, add/test the URL, model, key and protocol in **Settings → API and translation engines**. Workflow API identifiers bind to local profiles; review bindings after importing another workflow.
+Set the comic's source/target languages and workflow first. The local chain uses Seg, OCR and offline translation packs installed by direction. Choose **Local translation** for Bergamot or **OPUS-MT local translation** for OPUS-MT. Routes prefer direct packages, then the shortest installed path through any language (at most three stages); every direction in the path must be installed. For APIs, add/test the URL, model, key and protocol in **Settings → API and translation engines**. Workflow API identifiers bind to local profiles; review bindings after importing another workflow.
 
-The details menu places **Translation options** last and glossary management third from last. API workflows offer **API (for this manga)**: follow the workflow bindings or override all API steps for this manga with one profile. Language lists place installed complete routes, including English pivots, first without choosing a language automatically. Local translation options link directly to offline pack downloads.
+The details menu places **Translation options** last and glossary management third from last. API workflows offer **API (for this manga)**: follow the workflow bindings or override all API steps for this manga with one profile. Language lists place installed complete routes, including pivots, first without choosing a language automatically. Local translation options link directly to offline pack downloads. The OPUS-MT model page automatically discovers compatible packages on first visit or when its cache is over a day old, with manual refresh and an offline fallback. Each complete direction package is capped at 350 MB and downloaded on demand. The model-page tab manages/tests packages; tasks retain the engine bound in their workflow.
 
 Long-press a manga description to select and copy its text. Expand long descriptions with **Show more** before selecting the full text. Descriptions retain their original content.
 
@@ -51,8 +51,6 @@ Android 13+ requests notification permission once when the first task starts. De
 Translation pause stops scheduling and retains the completed current-page result; a whole-comic API response can take time to finish. Export pause stops further writing and retains its snapshot. Cancel does not remove saved translations. Service termination/time limits pause tasks. Process death marks running tasks interrupted; saved results remain and need manual retry. Arbitrary workflow intermediate state is not checkpointed. Vendor power policies can still affect execution.
 
 ## Screen translation (development build)
-
-Hold the external floating ball to open the screen translation settings dialog with one system long-press haptic, following the device haptic settings. This also works before the engine is ready and during translation. Dragging cancels the hold, and releasing after a long press does not trigger translation.
 
 The following describes the current development implementation and controls, which have not been released as a stable update.
 

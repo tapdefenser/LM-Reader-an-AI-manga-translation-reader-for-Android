@@ -6,14 +6,6 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TranslationChoicesTest {
-    @Test fun multilingualInstallExposesEverySupportedSourceAndTargetWithoutAnEnglishPivot() {
-        val catalog=com.lmreader.core.translation.TranslationModelCatalog.fromPacks(listOf(
-            com.lmreader.core.translation.NllbModelCatalog.pack("https://huggingface.co")))
-        assertEquals(202,catalog.availableSources().size)
-        assertEquals(201,catalog.availableTargets(LocalTranslationLanguage.JAPANESE).size)
-        assertEquals(LocalTranslationLanguage.JAPANESE,matchEngineLanguage("ja",catalog.availableSources()))
-        assertTrue(catalog.availableTargets(LocalTranslationLanguage.fromTag("fr")).contains(LocalTranslationLanguage.fromTag("ar")))
-    }
     @Test fun platformLanguageChoicesIgnoreUndefinedTagsAndKeepValidLanguages() {
         val choices = translationLanguageChoices(listOf("und", "", "en", "zh-Hans", "bad/tag", "ja", "en", "fil"))
         assertEquals(listOf("en", "zh-Hans", "ja", "fil", "zh-Hant"), choices.map { it.tag })

@@ -1,5 +1,7 @@
 package com.lmreader.ui.detail
 
+import com.lmreader.core.workflow.localTranslationRoutes
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -450,7 +452,7 @@ class MangaDetailViewModel(
             val targetLanguage = com.lmreader.ui.translation.matchEngineLanguage(configuredTarget, catalog.languages)
             if (workflow.program.uses(com.lmreader.core.model.WorkflowKind.TRANSLATE) &&
                 (sourceLanguage == null || targetLanguage == null || sourceLanguage == targetLanguage ||
-                runCatching { catalog.route(sourceLanguage, targetLanguage) }.isFailure)) {
+                runCatching { workflow.program.localTranslationRoutes(sourceLanguage, targetLanguage).forEach { catalog.route(it.source, it.target, it.engine) } }.isFailure)) {
                 _state.update { it.copy(openTranslationOptions = true) }
                 return@launch
             }

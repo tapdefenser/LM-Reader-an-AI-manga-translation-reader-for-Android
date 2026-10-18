@@ -79,7 +79,9 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     val published = ConcurrentHashMap<String, ReaderPageTranslation>()
     init { inputs.keys.forEach { images["page:$it"] = ImageRef(it) } }
     override fun parallelism(node: WorkflowNode): Int = WorkflowResourceCapacities(
-        vision.segConcurrency, vision.ocrConcurrency, if (settings.source == settings.target) 1 else runCatching { container.localTranslator.parallelism(settings.source, settings.target) }.getOrDefault(1),
+        vision.segConcurrency, vision.ocrConcurrency, if (settings.source == settings.target) 1 else
+            WorkflowProgram(rows = kotlin.collections.listOf(node)).translationEngines().ifEmpty { setOf(TranslationModelEngine.BERGAMOT) }
+                .minOf { engine -> runCatching { container.localTranslator.parallelism(settings.source, settings.target, engine) }.getOrDefault(1) },
         settings.apiProfiles.associate { it.id to it.parallelLimit },
         (container.translationCachePreferences.megabytes.value / 16 /
             container.translationQueue.activeMangas.value.size.coerceAtLeast(1)).coerceAtLeast(1)).parallelism(node)
@@ -236,7 +238,8 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 val input = value("text")
                 if (input.isBlank()) text("") else {
                     val source = LocalTranslationLanguage.fromTag(value("source")); val target = LocalTranslationLanguage.fromTag(value("target"))
-                    val result = container.localTranslator.translate(source, target, kotlin.collections.listOf(LocalTranslationText("workflow", input))) { completed, total -> progress(frame, PageTranslationProgress(PageTranslationStage.TRANSLATING, completed, total)) }
+                    val engine = (inputs["engine"] as? WorkflowValue.Text)?.value?.let(TranslationModelEngine::valueOf) ?: TranslationModelEngine.BERGAMOT
+                    val result = container.localTranslator.translate(engine, source, target, kotlin.collections.listOf(LocalTranslationText("workflow", input))) { completed, total -> progress(frame, PageTranslationProgress(PageTranslationStage.TRANSLATING, completed, total)) }
                     text(result.items.single().translatedText)
                 }
             }

@@ -40,8 +40,8 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
     val workflows by container.translationWorkflows.workflows.collectAsStateWithLifecycle()
     val installed by container.translationModels.installedPacks.collectAsStateWithLifecycle()
     val apiProfiles by container.apiProfiles.profiles.collectAsStateWithLifecycle(initialValue = emptyList())
-    val catalog = remember(installed) { TranslationModelCatalog.fromPacks(installed.values.toList()) }
     val workflow = workflows.firstOrNull { it.id == (state.settings.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
+    val catalog = remember(installed, workflow?.program) { TranslationModelCatalog.fromPacks(installed.values.toList()).forWorkflow(workflow?.program) }
     val usesLocal = workflow?.program?.uses(WorkflowKind.TRANSLATE) != false
     val apiLanguages = remember { translationLanguageChoices(java.util.Locale.getISOLanguages().asIterable()) }
     val sources = remember(catalog, usesLocal, locale) { if(usesLocal) catalog.availableSources() else
@@ -96,8 +96,8 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis); Icon(Icons.Default.ArrowDropDown, null)
                     }
                     DropdownMenu(workflowMenu, { workflowMenu = false }) {
-                        workflows.filter { !it.builtIn || it.id == TranslationWorkflow.LOCAL_MACHINE_ID }.forEach { item -> DropdownMenuItem(text = { Text(item.name) }, onClick = {
-                            viewModel.setWorkflow(if (item.builtIn) null else item.id); workflowMenu = false
+                        workflows.filter { !it.builtIn || it.id in setOf(TranslationWorkflow.LOCAL_MACHINE_ID, TranslationWorkflow.OPUS_MACHINE_ID) }.forEach { item -> DropdownMenuItem(text = { Text(item.name) }, onClick = {
+                            viewModel.setWorkflow(if (item.id == TranslationWorkflow.LOCAL_MACHINE_ID) null else item.id); workflowMenu = false
                         }) }
                     }
                 }
@@ -132,7 +132,12 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
                         }
                     }
                     Text(if(!usesLocal) "使用系统语言列表；实际支持的语言由所选 API 模型决定。" else if (sources.isEmpty()) "请先在 API 与翻译引擎中下载语言包" else
-                        "语言来自已下载模型；目标列表随原文变化，支持通过英语中转。", style = MaterialTheme.typography.bodySmall)
+                        "语言来自已下载模型；优先直译，也可经其他已安装语言中转。", style = MaterialTheme.typography.bodySmall)
+                    if(usesLocal && source!=null && target!=null) {
+                        runCatching {catalog.route(source,target)}.getOrNull()?.takeIf {it.isNotEmpty()}?.let {route ->
+                            Text((listOf(route.first().source)+route.map {it.target}).map {languageLabel(it)}.joinToString(" → "),style=MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     if (usesLocal) OutlinedButton(onClick = onDownloadOfflinePacks,
                         modifier = Modifier.testTag("translation-download-offline")) { Text("下载离线翻译包") }
                     if (source == null || target == null) Text("原文与目标语言必选", color = MaterialTheme.colorScheme.error)

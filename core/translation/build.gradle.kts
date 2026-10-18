@@ -14,9 +14,9 @@ android {
 dependencies {
     api(project(":core:model"))
     implementation(libs.okhttp)
-    implementation(libs.onnxruntime.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.onnxruntime.android)
     testImplementation(libs.mockwebserver)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.junit)

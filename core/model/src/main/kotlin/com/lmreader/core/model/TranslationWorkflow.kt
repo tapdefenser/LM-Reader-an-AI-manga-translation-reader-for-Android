@@ -40,7 +40,11 @@ data class TranslationWorkflow(
         val FULL_MANGA_API = TranslationWorkflow("builtin.reference.full-manga-api", 1, "参考：全文速译", "整漫画 SEG/OCR → 所有气泡原文一次 API → 分页回填；无译名提取。需要足够的输入上下文与输出长度。先复制并选择 API。", TranslationPageMode.BUBBLE, 8, 1, true, WorkflowReferenceTemplates.fullManga())
         val VISION_API = TranslationWorkflow("builtin.reference.vision-api", 1, "参考：VL 直接翻译", "SEG → 气泡图片 API → 原文／译文回填 → 可编辑的章末译名提取。不调用本地 OCR 或机翻。先复制并选择视觉 API。", TranslationPageMode.BUBBLE, 8, 1, true, WorkflowReferenceTemplates.vision())
         val VISION_PAGE_API = TranslationWorkflow("builtin.reference.vision-page-api", 1, "参考：VL 整页直接翻译", "SEG → 按顺序收集本页裁图 → 一次视觉 API 流式翻译 → 逐项回填；严格校验图片与译文项数，不调用本地 OCR 或机翻。先复制并选择视觉 API。", TranslationPageMode.BUBBLE, 8, 2, true, WorkflowReferenceTemplates.visionPage())
-        val BUILT_INS = listOf(LOCAL_MACHINE, STANDARD_API, VISION_API, VISION_PAGE_API)
+        const val OPUS_MACHINE_ID = "builtin.opus-machine"
+        val OPUS_MACHINE = LOCAL_MACHINE.copy(id = OPUS_MACHINE_ID, name = "OPUS-MT 本地机翻",
+            description = "本地 OCR 与 OPUS-MT，优先直译，缺少直接模型时寻找已安装的短中转路径。",
+            program = WorkflowTemplates.localMachine(TranslationModelEngine.OPUS_MT))
+        val BUILT_INS = listOf(LOCAL_MACHINE, OPUS_MACHINE, STANDARD_API, VISION_API, VISION_PAGE_API)
     }
 }
 

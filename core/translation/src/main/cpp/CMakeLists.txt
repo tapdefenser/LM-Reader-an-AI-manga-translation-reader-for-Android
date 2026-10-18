@@ -48,7 +48,7 @@ if(ANDROID_ABI STREQUAL "x86_64")
   target_compile_options(faiss PRIVATE -include immintrin.h -msse3)
 endif()
 
-add_library(lmreader_translation SHARED translation_jni.cpp nllb_tokenizer_jni.cpp)
+add_library(lmreader_translation SHARED translation_jni.cpp marian_tokenizer_jni.cpp)
 target_include_directories(lmreader_translation PRIVATE third_party/bergamot/3rd_party/marian-dev/src/3rd_party/sentencepiece/src)
 target_link_libraries(lmreader_translation PRIVATE bergamot-translator)
 target_link_options(lmreader_translation PRIVATE "-Wl,-z,max-page-size=16384")

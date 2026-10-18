@@ -152,7 +152,7 @@ class ScreenTranslationController(private val container: AppContainer) {
         if (inside != wasInside && state.value.started) resetScene()
         state.update { it.copy(inside = inside) }; updateButton()
     }
-    fun openSettings(context: android.content.Context) { context.startActivity(Intent(context, ScreenTranslationSettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)) }
+    fun openSettings(context: android.content.Context) { context.startActivity(ScreenTranslationSettingsActivity.intent(context)) }
     fun start(context: android.content.Context) { context.startActivity(Intent(context, ScreenTranslationPermissionActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     internal fun attach(service: ScreenTranslationService, projection: ProjectionScreenCapture?) {
         this.service = service; this.projection = projection
@@ -328,23 +328,20 @@ class ScreenTranslationController(private val container: AppContainer) {
                 val languages = nodes.filter { it.kind == WorkflowKind.OCR }.mapNotNull { node ->
                     language(node.inputs["language"])?.let(LocalPageTranslator::ocrLanguage)
                 }.toSet()
-                val routes = nodes.filter { it.kind == WorkflowKind.TRANSLATE }.mapNotNull { node ->
-                    val from = language(node.inputs["source"]); val to = language(node.inputs["target"])
-                    if (from != null && to != null) from to to else null
-                }.toSet()
+                val routes = execution.localTranslationRoutes(source, target)
                 vision.setPreprocessingCacheLimit(config.cacheMegabytes.toLong() * 1_048_576)
                 cacheBudget.setLimit(config.cacheMegabytes.toLong() * 1_048_576)
                 sessionGlossary.clear(); textCache.clear()
                 // Swap pins before warming: retain shared routes, release removed screen routes,
                 // and avoid charging both old and new model routes against the memory budget.
-                container.localTranslator.pinModels(pinOwner, routes)
+                container.localTranslator.pinEngineModels(pinOwner, routes)
                 preparedOwner?.let(container.localTranslator::unpin); preparedOwner = null
                 container.translationQueue.retainScreenTranslationModels(routes)
                 visionSettings = config.vision
                 coroutineScope {
                     val segmentation = async(Dispatchers.IO) { vision.reconfigure(nodes.any { it.kind == WorkflowKind.SEG } && config.translation.segTextScope != SegTextScope.FREE_TEXT,
                         languages, needTextDetection = nodes.any { it.kind == WorkflowKind.SEG } || languages.isNotEmpty()) }
-                    val translation = async(Dispatchers.IO) { container.localTranslator.prepare(pinOwner, routes) }
+                    val translation = async(Dispatchers.IO) { container.localTranslator.prepareEngineModels(pinOwner, routes) }
                     segmentation.await(); translation.await()
                 }
                 currentCoroutineContext().ensureActive()
@@ -1109,7 +1106,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                         }
                         override suspend fun request(kind: WorkflowKind, inputs: Map<String, WorkflowValue>, frame: WorkflowFrame): WorkflowValue {
                             if (kind != WorkflowKind.TRANSLATE) return super.request(kind, inputs, frame)
-                            val key = listOf("source", "target", "text").map { (inputs.getValue(it) as WorkflowValue.Text).value }
+                            val key = listOf((inputs["engine"] as? WorkflowValue.Text)?.value ?: TranslationModelEngine.BERGAMOT.name) + listOf("source", "target", "text").map { (inputs.getValue(it) as WorkflowValue.Text).value }
                             textCache[key]?.let { return it }
                             beginConsumer(chapter)
                             return try { super.request(kind, inputs, frame).also { textCache[key] = it; if (textCache.size > 512) textCache.keys.firstOrNull()?.let(textCache::remove) } }

@@ -11,16 +11,18 @@ class TranslationSourceStore(context: Context) {
         File(context.applicationContext.noBackupFilesDir, "translation_sources.preferences_pb")
     })
     val settings = store.data.map { prefs -> TranslationSourceSettings(
-        prefs[SOURCE]?.let { TranslationDownloadSource.valueOf(it) } ?: TranslationDownloadSource.MOZILLA,
+        TranslationDownloadSource.fromStoredValue(prefs[SOURCE]),
         prefs[BASE] ?: "", prefs[WIFI] ?: true,
+        prefs[ENGINE]?.let { runCatching { TranslationModelEngine.valueOf(it) }.getOrNull() } ?: TranslationModelEngine.BERGAMOT,
     ) }
     suspend fun save(settings: TranslationSourceSettings) {
         val base = if (settings.source == TranslationDownloadSource.CUSTOM) TranslationModelCatalog.validateCustomBase(settings.customBaseUrl) else settings.customBaseUrl.trim()
-        store.edit { it[SOURCE] = settings.source.name; it[BASE] = base; it[WIFI] = settings.wifiOnly }
+        store.edit { it[SOURCE] = settings.source.name; it[BASE] = base; it[WIFI] = settings.wifiOnly; it[ENGINE] = settings.engine.name }
     }
     private companion object {
         val SOURCE = stringPreferencesKey("source")
         val BASE = stringPreferencesKey("base")
         val WIFI = booleanPreferencesKey("wifi_only")
+        val ENGINE = stringPreferencesKey("engine")
     }
 }

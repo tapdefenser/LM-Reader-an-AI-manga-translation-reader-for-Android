@@ -1,10 +1,10 @@
 # 发布与签名
 
-## 当前版本：v0.1.10
+## 当前版本：v0.1.11
 
-发布日期：2026-10-18。版本 `0.1.10`，代码 `12`，标签 `v0.1.10`，APK `LM-Reader-v0.1.10-64bit.apk`。参见[当前发行说明](releases/v0.1.10.md)与 [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.10)。
+发布日期：2026-10-19。版本 `0.1.11`，代码 `13`，标签 `v0.1.11`，APK `LM-Reader-v0.1.11-64bit.apk`。参见[当前发行说明](releases/v0.1.11.md)与 [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.11)。
 
-沿用下文的构建、签名、打包流程和原发布证书。`tools/package_release.py` 读取当前 `gradle/release.properties`，要求源码已提交，生成本版本说明和校验文件。本版新增 NLLB-200 专用离线机翻、翻译球长按设置与震动，并改善页码显示及横屏菜单；验证范围详见当前发行说明。分发审查与 ARM 长时验证的已有待办仍保留。
+沿用下文的构建、签名、打包流程和原发布证书。`tools/package_release.py` 读取当前 `gradle/release.properties`，要求源码已提交，生成本版本说明和校验文件。本版新增 OPUS-MT 与自动语言包目录，并修复应用外翻译设置入口；验证范围详见当前发行说明。分发审查与 ARM 长时验证的已有待办仍保留。
 
 ## v0.1.6 历史参考
 

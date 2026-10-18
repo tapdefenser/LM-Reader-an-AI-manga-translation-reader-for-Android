@@ -12,19 +12,25 @@ Seg weights come from the pinned upstream v3.5.5 APK. Independent training-origi
 
 ## Offline translation / 离线机翻
 
-NLLB-200 distilled 600M INT8 is available from the **NLLB-200 multilingual** Hugging Face and HF-Mirror sources. Fetch the model list, then download its single shared package (about 900 MB). It exposes 202 language/script choices and directly translates between supported pairs, without an English pivot or repeated per-pair downloads. Installed NLLB models take priority for supported pairs; Bergamot packs remain installed and serve other available directions. The CPU session is shared across directions and runs one translation at a time to avoid duplicating the large model. Downloads and ZIP imports use the same atomic installation and SHA-256 verification as existing packs. Weights are not bundled in the APK and retain CC-BY-NC-4.0 terms.
-
-新增 NLLB-200 专用多语种机翻引擎：在下载源中选择 NLLB-200 的 Hugging Face 或 HF-Mirror，获取列表后下载约 900 MB 的共享模型，即可在受支持的语言／书写形式之间直译。安装后优先使用 NLLB，无需经英语中转；旧 Bergamot 包继续保留。较大的模型更占内存，CPU 速度可能较慢；多个翻译方向共用一个推理会话。正在运行的屏幕翻译会重新协调模型，主动停止的引擎保持停止。
-
-The Bergamot/Marian JNI engine runs on CPU and accepts typed text batches. Same-language pairs preserve the original text; a missing direct direction can route through English when both packs are installed. Packs are downloaded/imported at runtime and are not bundled in the APK.
+Two dedicated translation options run on CPU: Bergamot/Marian and OPUS-MT. OPUS-MT reuses the app's existing ONNX Runtime and the SentencePiece library linked into the native translation engine. No additional Python or LLM runtime is bundled. Same-language pairs preserve the original text. Routing prefers a direct installed package, then the shortest installed path through any language, with at most three model stages and no cross-engine mixing. Packs are downloaded/imported at runtime and are not bundled in the APK.
 
 Use **Settings → API and translation engines → Local translation engine**. Sources include Mozilla, a Hugging Face community copy, HF-Mirror and a user-configured catalog. Fetching a catalog downloads metadata only. Availability and model quality depend on the selected source/direction; a mirror may redirect to an overseas host.
 
-离线包按方向安装。直接方向不可用时可经英语中转，需要安装两段语言包。获取列表只下载元数据；语言名称、代码与包名均可搜索，已安装包置顶。
+离线包按方向安装，优先直达，其次选择同一引擎已安装包构成的最短路径，不限定英语中转，最多三段。获取列表只下载元数据；语言名称、代码与包名均可搜索，已安装包置顶。OPUS-MT 每个完整方向包限制为 350 MB，权重按需下载。翻译设置中选择“OPUS-MT 本地机翻”工作流；模型管理页的引擎页签只切换包列表和文本测试，不改变已排队任务。
+
+### OPUS-MT discovery and execution / OPUS-MT 目录与执行
+
+Opening the OPUS-MT model page automatically fetches a missing or day-old catalog. Manual refresh remains available. The app discovers ready ONNX repositories under `Xenova/opus-mt-*` on Hugging Face or HF-Mirror; it does not rely solely on an app-maintained language list. The initial adapter accepts explicit two-letter bilingual repositories, complete quantized encoder/merged-decoder packages below the size limit, and Apache-2.0/CC-BY-4.0 model-card licenses. Group-language aliases, missing files, oversized models and unknown licenses are excluded. This filter deliberately describes the supported export format, rather than promising every OPUS model is compatible.
+
+Repository commits pin every download. LFS weights use SHA-256; small Git files use the Git blob SHA-1 digest (including the `blob <length>\0` header) advertised by the API, exact sizes and pinned URLs. A bundled pinned snapshot is an offline fallback, not the only discovery source. Failed refreshes keep the usable catalog and installed package descriptors. `tools/fetch_opus_catalog.py` refreshes the bundled fallback without downloading ONNX weights.
+
+OPUS-MT uses greedy cached decoding, CPU threads bounded per session, and the shared translation resource pool. Cancellation is checked between generated tokens and route stages. This is an optional alternative: model size alone does not establish better speed or quality than Bergamot. QNN/NNAPI acceleration is not enabled for these exports. Their dynamic sequence/cache shapes, merged-decoder `If` branch and integer matrix operations require separate compatible exports and actual-device profiling before a hardware backend can be advertised. QNN HTP is NPU, distinct from QNN GPU; NNAPI is deprecated starting with Android 15.
+
+Sources: [OPUS-MT models](https://github.com/Helsinki-NLP/OPUS-MT-train), [ready French–German export](https://huggingface.co/Xenova/opus-mt-fr-de), [QNN provider requirements](https://onnxruntime.ai/docs/execution-providers/QNN-ExecutionProvider.html), [NNAPI](https://developer.android.com/ndk/guides/neuralnetworks).
 
 ## Catalog and installation / 目录与安装规则
 
-- Custom catalogs use `catalog.json`: legacy schema 1/2 uses `bergamot-v1`; schema 3 also supports `local-nmt-v1` with a per-pack `engine` (`BERGAMOT` or `NLLB`). Each pack declares identity, version, source/target languages, file roles, original sizes/SHA-256 and compression/download paths. NLLB declares `encoder`, `decoder` and `tokenizer` roles and derives its multilingual coverage from the fixed FLORES token map.
+- Custom catalogs use `catalog.json`: schema 1/2 `bergamot-v1` or schema 3 `local-nmt-v1`. Per-pack engine is `BERGAMOT` (legacy default) or `OPUS_MT`; unsupported engines are rejected. Each pack declares identity, version, source/target languages, file roles, original sizes/digests and compression/download paths. OPUS-MT roles are `encoder`, `decoder`, `srcVocab`, `trgVocab`, `vocab`, `config`; its Marian vocabulary IDs are mapped from SentencePiece pieces, not assumed to equal SentencePiece IDs.
 - Models use int8 Marian `.bin`, shortlist `.bin` and SentencePiece `.spm` files. Transfers may use gzip or uncompressed files; installation validates original, decompressed hashes and sizes.
 - Relative paths cannot escape the package. Catalog limits constrain response size, file roles, file/pack sizes and counts. Remote scripts and user-supplied YAML are not executed.
 - Installed descriptors remain independent of refreshed catalogs. Source-specific caches are saved atomically; a late response from a previously selected source cannot replace the current source's catalog.
@@ -37,7 +43,7 @@ Use **Settings → API and translation engines → Local translation engine**. S
 
 Run `python tools/fetch_translation_sources.py` before building. Commits/archive hashes and compatibility patches are public in `tools/translation_sources.lock.json` and the preparation script. CMake uses those pinned sources, rather than cloning dependencies during compilation.
 
-Use NDK `28.2.13676358` and CMake `3.22.1`. The two native ABIs use 16 KB LOAD alignment. Native translation calls are serialized; cancellation is checked at model/text/intermediate-route boundaries, and a currently executing native call must finish before its result is discarded.
+Use NDK `28.2.13676358` and CMake `3.22.1`. The two native ABIs use 16 KB LOAD alignment. Translation calls lease bounded sessions from the shared resource pool. Bergamot checks cancellation at model/text/route boundaries; a running native call finishes before its result is discarded. OPUS-MT also checks cancellation between generated tokens.
 
 `tools/export_translation_mirror.py` can prepare an explicitly selected pack set, catalog, ZIP files and licenses in a local folder. It does not start a server or publish a mirror. Keep each pack's original provenance and license texts; community declarations do not remove upstream terms.
 

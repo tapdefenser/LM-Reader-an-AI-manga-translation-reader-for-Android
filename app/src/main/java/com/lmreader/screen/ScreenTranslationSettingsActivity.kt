@@ -1,8 +1,11 @@
 package com.lmreader.screen
 
+import com.lmreader.ui.translation.forWorkflow
+
 import android.content.Context
 import android.content.Intent
 import android.content.ActivityNotFoundException
+import android.app.PendingIntent
 import android.os.Bundle
 import android.os.LocaleList
 import android.os.Build
@@ -48,6 +51,16 @@ import org.json.JSONObject
 import kotlin.math.roundToInt
 
 class ScreenTranslationSettingsActivity : ComponentActivity() {
+    companion object {
+        /** Keep external entry points in the dialog's own task, without raising MainActivity. */
+        internal fun intent(context: Context) = Intent(context, ScreenTranslationSettingsActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        internal fun pendingIntent(context: Context): PendingIntent = PendingIntent.getActivity(
+            context, 3103, intent(context), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
     private val container by lazy { AppContainer.from(this) }
     override fun attachBaseContext(newBase: Context) {
         super.attachBaseContext(newBase.createConfigurationContext(android.content.res.Configuration(newBase.resources.configuration).apply {
@@ -134,7 +147,7 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
     }
     val workflow = workflows.firstOrNull { it.id == (t.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
     val local = workflow?.program?.uses(WorkflowKind.TRANSLATE) != false
-    val catalog = remember(installed) { TranslationModelCatalog.fromPacks(installed.values.toList()) }
+    val catalog = remember(installed, workflow?.program) { TranslationModelCatalog.fromPacks(installed.values.toList()).forWorkflow(workflow?.program) }
     val locale = androidx.compose.ui.platform.LocalConfiguration.current.locales[0]
     val languages = remember(locale) { translationLanguageChoices(java.util.Locale.getISOLanguages().asIterable())
         .sortedBy { it.localizedName(locale) } }

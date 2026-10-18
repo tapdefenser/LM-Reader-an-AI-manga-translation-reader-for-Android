@@ -81,8 +81,10 @@ class AppContainer(val application: Application) {
     val visionExecutionPreferences by lazy { com.lmreader.core.storage.settings.VisionExecutionPreferences(application) }
     val localVision by lazy { com.lmreader.core.vision.LocalVisionEngine(application) { visionExecutionPreferences.settings.value } }
     val translationSources by lazy { com.lmreader.core.translation.TranslationSourceStore(application) }
+    val opusTranslationCatalog by lazy { com.lmreader.core.translation.TranslationModelCatalog(
+        application.assets.open("translation/opus_catalog.json").bufferedReader().use { it.readText() }) }
     val translationCatalog by lazy { com.lmreader.core.translation.TranslationModelCatalog(
-        application.assets.open("translation/catalog.json").bufferedReader().use { it.readText() }) }
+        application.assets.open("translation/catalog.json").bufferedReader().use { it.readText() }).withAdditionalPacks(opusTranslationCatalog.packs) }
     val translationInstaller by lazy { com.lmreader.core.translation.ModelPackageInstaller(
         java.io.File(application.noBackupFilesDir, "translation-models")) }
     val translationCatalogs by lazy { com.lmreader.core.translation.TranslationCatalogStore(

@@ -1,10 +1,10 @@
 # Release And Signing
 
-## Current Release: v0.1.10
+## Current Release: v0.1.11
 
-Release date: 2026-10-18. Version `0.1.10`, code `12`, tag `v0.1.10`, APK `LM-Reader-v0.1.10-64bit.apk`. See the [current notes](releases/v0.1.10.md) and [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.10).
+Release date: 2026-10-19. Version `0.1.11`, code `13`, tag `v0.1.11`, APK `LM-Reader-v0.1.11-64bit.apk`. See the [current notes](releases/v0.1.11.md) and [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.11).
 
-Use the same build/sign/package workflow and certificate below. `tools/package_release.py` reads the current `gradle/release.properties`, requires committed sources and packages this version's notes and checksums. This release adds dedicated NLLB-200 offline translation, ball long-press settings with haptics, a text-only page counter and a scrollable landscape menu; see the current notes for verification scope. Open distribution and long-running ARM checks remain as documented below.
+Use the same build/sign/package workflow and certificate below. `tools/package_release.py` reads the current `gradle/release.properties`, requires committed sources and packages this version's notes and checksums. This release adds OPUS-MT with automatic package discovery and fixes external screen-translation settings entry points; see the current notes for verification scope. Open distribution and long-running ARM checks remain as documented below.
 
 ## v0.1.6 Reference
 

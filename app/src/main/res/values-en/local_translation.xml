@@ -2,7 +2,7 @@
 <resources>
     <string name="local_mt_title">Local translation engine</string>
     <string name="local_mt_sources">Download source</string>
-    <string name="local_mt_backend">NLLB-200 / Bergamot · Offline machine translation</string>
+    <string name="local_mt_backend">Bergamot machine translation · Offline CPU</string>
     <string name="local_mt_current_source">Download language packs as needed. Source: %1$s.</string>
     <string name="local_mt_loading">Loading</string>
     <string name="local_mt_download_lifetime">Downloads continue while the app is running. Resume manually after the process ends.</string>
@@ -12,7 +12,7 @@
     <string name="local_mt_target_language">Target</string>
     <string name="local_mt_no_route">This direction is unavailable. Fetch the catalog or select another language.</string>
     <string name="local_mt_identity">Same language; keep the original text</string>
-    <string name="local_mt_pivot"> (via English)</string>
+    <string name="local_mt_pivot"> (pivot)</string>
     <string name="local_mt_missing">Missing %1$s. Choose packs to download below.</string>
     <string name="local_mt_sample_ja">Japanese sample</string>
     <string name="local_mt_sample_ko">Korean sample</string>
@@ -29,7 +29,7 @@
     <string name="local_mt_catalog_fallback">Source catalog not fetched yet. Showing bundled metadata and installed packs.</string>
     <string name="local_mt_search">Search language names, codes or packs</string>
     <string name="local_mt_clear">Clear</string>
-    <string name="local_mt_other_directions">Multilingual and direct models</string>
+    <string name="local_mt_other_directions">Other direct directions</string>
     <string name="local_mt_no_packages">No matching language packs</string>
     <string name="local_mt_result">Offline translation</string>
     <string name="local_mt_close">Close</string>
@@ -64,16 +64,13 @@
     <string name="local_mt_source_mirror">HF-Mirror community mirror</string>
     <string name="local_mt_source_custom">Custom source</string>
     <string name="local_mt_source_title">Model download source</string>
-    <string name="local_mt_source_nllb_hf">NLLB-200 multilingual · Hugging Face</string>
-    <string name="local_mt_source_nllb_mirror">NLLB-200 multilingual · HF-Mirror</string>
-    <string name="local_mt_nllb_package">NLLB-200 · Multilingual direct translation</string>
-    <string name="local_mt_nllb_catalog_summary">One shared model covers %1$d language/script choices with direct translation between them.</string>
-    <string name="local_mt_nllb_help">Download about 900 MB once for all supported language pairs. After installation, supported pairs prefer NLLB without an English pivot. CPU translation uses more memory and may be slower; existing Bergamot packs remain available. NLLB weights use CC-BY-NC-4.0.</string>
     <string name="local_mt_custom_base">HTTP(S) directory URL</string>
     <string name="local_mt_source_help">Fetch the catalog after saving. Custom sources must provide catalog.json. Community sources may redirect to overseas CDNs. Changing source restarts unfinished files.</string>
     <string name="local_mt_wifi_only">Download over Wi-Fi only</string>
     <string name="local_mt_save">Save</string>
-    <string name="local_mt_license_summary">NLLB weights: CC-BY-NC-4.0. Mozilla models: MPL-2.0. The Bergamot community model card also declares CC-BY-4.0. Original sources and licenses are retained.</string>
+    <string name="local_mt_license_summary">Mozilla models: MPL-2.0; the community copy also declares CC-BY-4.0. OPUS-MT retains each model card’s Apache-2.0/CC-BY-4.0 declaration, original repository and revision.</string>
     <string name="local_mt_license_file">License file: %1$s</string>
     <string name="local_mt_cannot_open">Unable to open the import file</string>
+    <string name="local_mt_opus_backend">OPUS-MT machine translation · Offline CPU</string>
+    <string name="local_mt_opus_help">Fetches the list automatically on first visit or when over a day old; manual refresh is available. Direct translation first; otherwise use a short route through any installed language. Packs are downloaded on demand and capped at 350 MB. CPU is used; QNN/NNAPI acceleration is not yet validated for these models. This selection manages and tests models; tasks select their engine in the workflow.</string>
 </resources>

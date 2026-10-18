@@ -20,14 +20,14 @@ data class TranslationCatalogState(val catalog: TranslationModelCatalog, val fet
 class TranslationCatalogStore(private val fallback: TranslationModelCatalog, private val root: File,
     private val fetch: suspend(TranslationSourceSettings)->TranslationModelCatalog = RemoteTranslationCatalog()::fetch) {
     private val mutex=Mutex()
-    private val mutable=MutableStateFlow(TranslationCatalogState(fallback))
+    private val mutable=MutableStateFlow(TranslationCatalogState(fallback.forEngine(com.lmreader.core.model.TranslationModelEngine.BERGAMOT)))
     val state=mutable.asStateFlow()
     suspend fun select(settings: TranslationSourceSettings)=withContext(Dispatchers.IO) {mutex.withLock {
         val key=TranslationModelCatalog.sourceKey(settings)
         if(mutable.value.selectedSourceKey==key) return@withLock
         val cached=runCatching {val file=cache(key);require(file.length() in 1..4_194_304)
             TranslationModelCatalog(file.readText()).also {require(it.sourceKey==key)} }.getOrNull()
-        mutable.value=TranslationCatalogState(cached ?: fallback,selectedSourceKey=key)
+        mutable.value=TranslationCatalogState(cached ?: fallback.forEngine(settings.engine),selectedSourceKey=key)
     } }
     suspend fun refresh(settings: TranslationSourceSettings) {
         select(settings);val key=TranslationModelCatalog.sourceKey(settings)

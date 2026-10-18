@@ -110,10 +110,9 @@ class ScreenRegionEditorActivity : ComponentActivity() {
         val selection = if (apply) draft else initialDraft
         ScreenRegionEditorResults.latest.value = ScreenRegionEditorResult(token, selection, mode)
         requestedOrientation = originalOrientation
-        startActivity(Intent(this, ScreenTranslationSettingsActivity::class.java)
+        startActivity(ScreenTranslationSettingsActivity.intent(this)
             .putExtra("region-return-token", token).putExtra("region-return-mode", mode.name)
-            .putExtra("region-return-selection", ScreenTranslationPreferences.encodeRegions(selection).toString())
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+            .putExtra("region-return-selection", ScreenTranslationPreferences.encodeRegions(selection).toString()))
         finishAndRemoveTask()
     }
     private inner class RegionView : View(this@ScreenRegionEditorActivity) {

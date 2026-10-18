@@ -12,10 +12,9 @@ internal fun translationPackageColumns(available:List<TranslationModelPack>,reta
     val packs=(available+retained).distinctBy {it.id}.filter {pack -> search.isEmpty() || listOf(
         pack.id,pack.source.tag,pack.target.tag,pack.source.nativeName,pack.target.nativeName,
         pack.source.localizedName(locale),pack.target.localizedName(locale),pack.version,installed[pack.id]?.version.orEmpty()
-    ).plus(pack.languages.flatMap { listOf(it.tag,it.nativeName,it.localizedName(locale))+extraNames(it) })
-        .any {it.contains(search,ignoreCase=true)} }
+    ).plus(extraNames(pack.source)).plus(extraNames(pack.target)).any {it.contains(search,ignoreCase=true)} }
     val order=compareByDescending<TranslationModelPack> {installed.containsKey(it.id)}.thenBy {if(it.source==LocalTranslationLanguage.ENGLISH) it.target.tag else it.source.tag}
-    return TranslationPackageColumns(packs.filter {it.engine==TranslationModelEngine.BERGAMOT && it.target==LocalTranslationLanguage.ENGLISH}.sortedWith(order),
-        packs.filter {it.engine==TranslationModelEngine.BERGAMOT && it.source==LocalTranslationLanguage.ENGLISH}.sortedWith(order),
-        packs.filter {it.engine==TranslationModelEngine.NLLB || it.source!=LocalTranslationLanguage.ENGLISH && it.target!=LocalTranslationLanguage.ENGLISH}.sortedWith(order))
+    return TranslationPackageColumns(packs.filter {it.target==LocalTranslationLanguage.ENGLISH}.sortedWith(order),
+        packs.filter {it.source==LocalTranslationLanguage.ENGLISH}.sortedWith(order),
+        packs.filter {it.source!=LocalTranslationLanguage.ENGLISH && it.target!=LocalTranslationLanguage.ENGLISH}.sortedWith(order))
 }

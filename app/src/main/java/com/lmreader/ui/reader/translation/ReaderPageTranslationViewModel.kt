@@ -104,8 +104,8 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
                 val installed = container.translationModels.installedCatalog().languages
                 val configuredSource = com.lmreader.ui.translation.matchEngineLanguage(options.sourceLanguage, installed) ?: LocalTranslationLanguage.fromTag(requireNotNull(options.sourceLanguage))
                 val configuredTarget = com.lmreader.ui.translation.matchEngineLanguage(options.targetLanguage, installed) ?: LocalTranslationLanguage.fromTag(requireNotNull(options.targetLanguage))
-                val routes = if(workflow.program.uses(WorkflowKind.TRANSLATE)) setOf(configuredSource to configuredTarget) else emptySet()
-                routes.forEach { container.translationModels.installedCatalog().route(it.first, it.second) }
+                val routes = program.localTranslationRoutes(configuredSource, configuredTarget)
+                routes.forEach { container.translationModels.installedCatalog().route(it.source, it.target, it.engine) }
                 container.shelfRepository.ensureOnShelf(mangaId)
                 queue.prepareMangaResources(routes, workflow.program.uses(WorkflowKind.SEG), if(workflow.program.uses(WorkflowKind.OCR)) setOf(configuredSource) else emptySet())
                 val categoryId = container.shelfRepository.categoryIdOf(mangaId)

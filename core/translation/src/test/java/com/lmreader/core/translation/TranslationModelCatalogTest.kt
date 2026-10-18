@@ -1,6 +1,7 @@
 package com.lmreader.core.translation
 
 import com.lmreader.core.model.*
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.File
@@ -9,6 +10,27 @@ import java.util.Locale
 class TranslationModelCatalogTest {
     private val json get() = File("src/main/assets/translation/catalog.json").readText()
     private val catalog get() = TranslationModelCatalog(json)
+    @Test fun removedDownloadSourcesFallBackToMozilla() {
+        assertEquals(TranslationDownloadSource.MOZILLA, TranslationDownloadSource.fromStoredValue("OBSOLETE_SOURCE"))
+        assertEquals(TranslationDownloadSource.MOZILLA, TranslationDownloadSource.fromStoredValue(null))
+        TranslationDownloadSource.entries.forEach {
+            assertEquals(it, TranslationDownloadSource.fromStoredValue(it.name))
+        }
+    }
+    @Test fun previousDirectionalSnapshotsAndDescriptorsRemainUsable() {
+        val pack = catalog.pack("ja-en")
+        val descriptor = JsonObject(TranslationModelCatalog.packJson(pack) + ("engine" to JsonPrimitive("BERGAMOT")))
+        assertEquals(pack, TranslationModelCatalog.parsePack(descriptor))
+        val previous = buildJsonObject {
+            put("schema", 3); put("engine", "local-nmt-v1")
+            putJsonArray("packages") { add(descriptor) }
+        }
+        assertEquals(listOf(pack), TranslationModelCatalog(previous.toString()).route(pack.source, pack.target))
+        val unsupported = JsonObject(descriptor + ("engine" to JsonPrimitive("OBSOLETE_BACKEND")))
+        assertThrows(IllegalArgumentException::class.java) { TranslationModelCatalog.parsePack(unsupported) }
+        val invalid = JsonObject(previous + ("packages" to JsonArray(listOf(unsupported))))
+        assertThrows(IllegalArgumentException::class.java) { TranslationModelCatalog(invalid.toString()) }
+    }
     @Test fun allSupportedRoutesHaveCorrectDirectionAndSharedEnglishPivot() {
         val c = catalog
         c.languages.forEach { source -> c.languages.forEach { target ->

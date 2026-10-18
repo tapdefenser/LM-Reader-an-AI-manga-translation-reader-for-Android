@@ -65,18 +65,19 @@ fun ReaderTranslationProgress(state: ReaderTranslationUiState,onCancel: ()->Unit
 
 @Composable
 fun PageTranslationDialog(container: AppContainer,initialSource: LocalTranslationLanguage?,initialTarget: LocalTranslationLanguage,
-    onDismiss: ()->Unit,onTranslate: (LocalTranslationLanguage,LocalTranslationLanguage)->Unit, requiresLocalModels: Boolean = true) {
+    onDismiss: ()->Unit,onTranslate: (LocalTranslationLanguage,LocalTranslationLanguage)->Unit, requiresLocalModels: Boolean = true,
+    engines: Set<TranslationModelEngine> = setOf(TranslationModelEngine.BERGAMOT)) {
     val installed by container.translationModels.installedPacks.collectAsStateWithLifecycle()
     val catalog = remember(installed) { TranslationModelCatalog.fromPacks(installed.values.toList()) }
-    val route = initialSource?.let { runCatching { catalog.route(it, initialTarget) }.getOrNull() }
+    val routesReady = initialSource != null && engines.all { engine -> runCatching { catalog.route(initialSource, initialTarget, engine) }.isSuccess }
     AlertDialog(onDismissRequest = onDismiss, title = { Text(stringResource(R.string.reader_mt_action)) }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("使用这部漫画的翻译选项，重译当前页。")
             Text("原文：" + (initialSource?.let { languageLabel(it) } ?: "未选"))
             Text("目标：" + languageLabel(initialTarget))
-            if (requiresLocalModels && route == null) Text("请在翻译选项中选择已下载模型支持的语言", color = MaterialTheme.colorScheme.error)
+            if (requiresLocalModels && !routesReady) Text("请在翻译选项中选择已下载模型支持的语言", color = MaterialTheme.colorScheme.error)
         }
-    }, confirmButton = { TextButton(enabled = initialSource != null && (!requiresLocalModels || route != null), onClick = {
+    }, confirmButton = { TextButton(enabled = initialSource != null && (!requiresLocalModels || routesReady), onClick = {
         onTranslate(initialSource!!, initialTarget)
     }) { Text(stringResource(R.string.reader_mt_action)) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.local_mt_cancel)) } })

@@ -1,6 +1,7 @@
 package com.lmreader.core.translation
 
 import com.lmreader.core.model.*
+import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import okio.Buffer
 import kotlinx.coroutines.*
@@ -44,6 +45,16 @@ class ModelPackageInstallerTest {
     }
     @After fun close() {server.shutdown()}
     private fun installer()=ModelPackageInstaller(root)
+    @Test fun obsoleteDescriptorsAreIgnoredWithoutHidingUsablePackages() {
+        val current = TranslationModelCatalog(File("src/main/assets/translation/catalog.json").readText()).packs.first()
+        val descriptor = TranslationModelCatalog.packJson(current)
+        File(installer().installedDirectory(current).apply { mkdirs() }, "package.json").writeText(
+            JsonObject(descriptor + ("engine" to JsonPrimitive("BERGAMOT"))).toString())
+        val obsolete = current.copy(id = "obsolete-package")
+        File(installer().installedDirectory(obsolete).apply { mkdirs() }, "package.json").writeText(
+            JsonObject(TranslationModelCatalog.packJson(obsolete) + ("engine" to JsonPrimitive("OBSOLETE_BACKEND"))).toString())
+        assertEquals(listOf(current), installer().knownPackages())
+    }
     private suspend fun download(installer: ModelPackageInstaller=installer())=installer.download(pack,{url},{})
     private suspend fun partial() {
         try {installer().download(pack,{url},{if(it.completedBytes>65536 && it.status==TranslationPackStatus.DOWNLOADING) throw CancellationException("pause")})}

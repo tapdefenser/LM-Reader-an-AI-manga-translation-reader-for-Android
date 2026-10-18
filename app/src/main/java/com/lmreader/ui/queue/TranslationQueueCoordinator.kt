@@ -305,30 +305,21 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
     }
     fun includePage(chapterId: String, pageId: String) { container.queueOrder.includePage(chapterId, pageId) }
     /** Screen hot reload must preserve routes belonging to queued manga and an active reader page. */
-    suspend fun retainScreenTranslationModels(routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) = resourceMutex.withLock {
+    suspend fun retainScreenTranslationModels(routes: Set<LocalTranslationRoute>) = resourceMutex.withLock {
         if (priorityPage.value != null) return@withLock
         val queuedRoutes = dao.queueSnapshot().filter(::runnable).flatMap { task -> runCatching {
             val json = JSONObject(requireNotNull(task.configSnapshot))
             val program = json.optJSONObject("program")?.let { WorkflowProgramCodec.decode(it.toString()) } ?: WorkflowTemplates.localMachine()
             val source = LocalTranslationLanguage.fromTag(json.getString("sourceLanguage"))
             val target = LocalTranslationLanguage.fromTag(json.getString("targetLanguage"))
-            fun language(expression: WorkflowExpression?) = when (expression) {
-                is WorkflowExpression.Text -> LocalTranslationLanguage.fromTag(expression.value)
-                WorkflowSystem.ref(WorkflowSystem.SOURCE) -> source
-                WorkflowSystem.ref(WorkflowSystem.TARGET) -> target
-                else -> null
-            }
-            program.allNodes().filter { it.kind == WorkflowKind.TRANSLATE }.mapNotNull {
-                val from = language(it.inputs["source"]); val to = language(it.inputs["target"])
-                if (from != null && to != null) from to to else null
-            }
+            program.localTranslationRoutes(source, target).toList()
         }.getOrDefault(emptyList()) }.toSet()
         val catalog = container.translationModels.installedCatalog()
-        val installedQueuedRoutes = queuedRoutes.filter { (source, target) -> runCatching { catalog.route(source, target) }.isSuccess }
-        container.localTranslator.retainModels(routes + installedQueuedRoutes)
+        val installedQueuedRoutes = queuedRoutes.filter { runCatching { catalog.route(it.source, it.target, it.engine) }.isSuccess }
+        container.localTranslator.retainEngineModels(routes + installedQueuedRoutes)
     }
-    suspend fun prepareMangaResources(routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>,
-        needsSeg: Boolean = true, ocrSources: Set<LocalTranslationLanguage> = routes.map { it.first }.toSet(),
+    suspend fun prepareMangaResources(routes: Set<LocalTranslationRoute>,
+        needsSeg: Boolean = true, ocrSources: Set<LocalTranslationLanguage> = routes.map { it.source }.toSet(),
         needTextDetection: Boolean = needsSeg || ocrSources.isNotEmpty()) = resourceMutex.withLock {
         resourcesOwned = true
         android.util.Log.i("TranslationQueue", "Reconciling engines routes=${routes.size} SEG=$needsSeg OCR=${ocrSources.map { it.tag }}")
@@ -339,15 +330,15 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             val target = LocalTranslationLanguage.fromTag(json.getString("targetLanguage"))
             Triple(program, source, target) to SegTextScope.fromValue(json.optString("segTextScope").takeIf { it.isNotBlank() })
         }.getOrNull() }
-        val allRoutes = routes + queued.filter { it.first.first.uses(WorkflowKind.TRANSLATE) }.map { it.first.second to it.first.third }
+        val allRoutes = routes + queued.flatMap { it.first.first.localTranslationRoutes(it.first.second, it.first.third) }
         val allOcr = ocrSources + queued.filter { it.first.first.uses(WorkflowKind.OCR) }.map { it.first.second }
         container.localVision.reconfigure(needsSeg || queued.any { it.first.first.uses(WorkflowKind.SEG) && it.second != SegTextScope.FREE_TEXT },
             allOcr.map { com.lmreader.ui.reader.translation.LocalPageTranslator.ocrLanguage(it) }.toSet(),
             needTextDetection || queued.any { it.first.first.uses(WorkflowKind.SEG) || it.first.first.uses(WorkflowKind.OCR) }, warm = false)
         container.localVision.prepare(needsSeg, ocrSources.map { com.lmreader.ui.reader.translation.LocalPageTranslator.ocrLanguage(it) }.toSet(), needTextDetection)
-        container.localTranslator.retainModels(allRoutes)
+        container.localTranslator.retainEngineModels(allRoutes)
         val preparationOwner = "queue-prepare:${java.util.UUID.randomUUID()}"
-        try { container.localTranslator.prepare(preparationOwner, routes) }
+        try { container.localTranslator.prepareEngineModels(preparationOwner, routes) }
         finally { container.localTranslator.unpin(preparationOwner) }
         android.util.Log.i("TranslationQueue", "Engines ready")
     }
@@ -421,8 +412,8 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                 }
             }
             if (chapters.isEmpty()) return@coroutineScope
-            val routes = if (program.uses(WorkflowKind.TRANSLATE)) setOf(source to target) else emptySet()
-            routes.forEach { container.translationModels.installedCatalog().route(it.first, it.second) }
+            val routes = program.localTranslationRoutes(source, target)
+            routes.forEach { container.translationModels.installedCatalog().route(it.source, it.target, it.engine) }
             prepareMangaResources(routes, program.uses(WorkflowKind.SEG) && SegTextScope.fromValue(json.optString("segTextScope")) != SegTextScope.FREE_TEXT,
                 if (program.uses(WorkflowKind.OCR)) setOf(source) else emptySet(), program.uses(WorkflowKind.SEG))
             val active = ConcurrentHashMap<String, Job>()
@@ -682,7 +673,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             }
         }
         if (works.isEmpty()) return@coroutineScope
-        prepareMangaResources(works.map { it.sourceLanguage to it.targetLanguage }.toSet(), works.any { it.segTextScope != SegTextScope.FREE_TEXT }, needTextDetection = true)
+        prepareMangaResources(works.map { LocalTranslationRoute(it.sourceLanguage, it.targetLanguage) }.toSet(), works.any { it.segTextScope != SegTextScope.FREE_TEXT }, needTextDetection = true)
         val consumed = mutableSetOf<String>()
         val pipeline = MangaPagePipeline(this, works, container.localPageTranslator, budget,
             container.localVision.segConcurrency, container.localVision.ocrConcurrency)

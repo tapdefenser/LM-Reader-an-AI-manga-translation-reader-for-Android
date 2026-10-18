@@ -91,7 +91,7 @@
         </service>
         <activity android:name=".screen.ScreenTranslationSettingsActivity" android:exported="false"
             android:theme="@style/Theme.LmReader.ScreenTranslationDialog" android:excludeFromRecents="true"
-            android:launchMode="singleTop" />
+            android:taskAffinity="${applicationId}.screenTranslationSettings" android:launchMode="singleTask" />
         <activity android:name=".screen.ScreenTranslationPermissionActivity" android:exported="false" android:excludeFromRecents="true" />
         <activity android:name=".screen.ScreenRegionEditorActivity" android:exported="false" android:excludeFromRecents="true"
             android:theme="@style/Theme.LmReader.ScreenRegionEditor" android:taskAffinity="${applicationId}.screenRegionEditor"

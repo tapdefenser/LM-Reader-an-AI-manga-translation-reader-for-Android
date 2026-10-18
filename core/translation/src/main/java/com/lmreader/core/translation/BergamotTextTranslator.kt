@@ -25,7 +25,7 @@ internal object TranslationRuntime {
     val dispatcher = Executors.newFixedThreadPool(8) { task -> Thread(task, "local-translation") }.asCoroutineDispatcher()
     val resources = MutableStateFlow<List<LoadedEngineResource>>(emptyList())
     val pool = PrioritySessionPool()
-    class Slot { val mutex = Mutex(); val keys = mutableSetOf<String>(); val nllb = mutableMapOf<String, NllbSession>() }
+    class Slot { val mutex = Mutex(); val keys = mutableSetOf<String>(); val opus = mutableMapOf<String, OpusMtSession>() }
     val slots = List(8) { Slot() }
     val pins = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
     val costs = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -40,16 +40,14 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
     constructor(catalog: TranslationModelCatalog, installer: ModelPackageInstaller): this({catalog},installer)
     private fun signature(pack: TranslationModelPack) = "${pack.id}-${pack.version}:${installer.installedDirectory(pack).absolutePath}"
     private fun unload(slot: TranslationRuntime.Slot, key: String) {
-        val nllb = slot.nllb.remove(key)
-        if (nllb != null) nllb.close() else BergamotNative.unload(key.toByteArray(Charsets.UTF_8))
+        val opus = slot.opus.remove(key)
+        if (opus != null) opus.close() else BergamotNative.unload(key.toByteArray(Charsets.UTF_8))
         slot.keys.remove(key)
         TranslationRuntime.resources.update { it.filterNot { resource -> resource.id == key } }
     }
-    fun parallelism(source: LocalTranslationLanguage, target: LocalTranslationLanguage): Int = capacity(catalog().route(source, target))
+    fun parallelism(source: LocalTranslationLanguage, target: LocalTranslationLanguage,
+        engine: TranslationModelEngine = TranslationModelEngine.BERGAMOT): Int = capacity(catalog().route(source, target, engine))
     private fun capacity(route: List<TranslationModelPack>): Int {
-        // The multilingual weights are shared by all language pairs. One cached
-        // decoder avoids cloning a roughly 900 MB model for concurrent bubbles.
-        if (route.any { it.engine == TranslationModelEngine.NLLB }) return 1
         val routeBytes = route.sumOf { it.installedBytes + 160L * 1_048_576 }.coerceAtLeast(1)
         val settings = resources()
         val automatic = machineTranslationParallelism(settings, Runtime.getRuntime().availableProcessors(), availableMemory(), routeBytes)
@@ -90,14 +88,14 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
                         installer.verifyInstalled(pack)
                         ensureActive()
                         try {
-                            if (pack.engine == TranslationModelEngine.NLLB) slot.nllb[key] = NllbSession.create(pack, installer.installedDirectory(pack))
+                            if (pack.engine == TranslationModelEngine.OPUS_MT) slot.opus[key] = OpusMtSession.create(pack, installer.installedDirectory(pack))
                             else BergamotNative.load(key.toByteArray(Charsets.UTF_8), configuration(pack, installer.installedDirectory(pack)).toByteArray(Charsets.UTF_8))
                         }
                         catch (failure: LinkageError) { throw IllegalStateException("当前设备无法加载机翻运行库；需要 arm64-v8a 或 x86_64", failure) }
                         slot.keys += key
                         TranslationRuntime.costs[signature(pack)] = pack.installedBytes + 160L * 1_048_576
                         TranslationRuntime.resources.update { it + LoadedEngineResource(key,
-                            InferenceEngineKind.TRANSLATION, "${pack.label} · ${pack.version}", if (pack.engine == TranslationModelEngine.NLLB) "NLLB-200 · ONNX CPU" else "Bergamot CPU") }
+                            InferenceEngineKind.TRANSLATION, "${pack.label} · ${pack.version}", if (pack.engine == TranslationModelEngine.OPUS_MT) "OPUS-MT · ONNX CPU" else "Bergamot CPU") }
                     }
                     key
                 }
@@ -109,14 +107,18 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
             } }
         }
     /** Pin a prepared screen session so queue completion cannot unload its engines. */
-    suspend fun pinModels(owner: String, routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) {
-        val packs = routes.flatMap { (from, to) -> catalog().route(from, to) }.distinctBy(::signature)
+    suspend fun pinModels(owner: String, routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) =
+        pinEngineModels(owner, routes.map { LocalTranslationRoute(it.first, it.second) }.toSet())
+    suspend fun pinEngineModels(owner: String, routes: Set<LocalTranslationRoute>) {
+        val packs = routes.flatMap { catalog().route(it.source, it.target, it.engine) }.distinctBy(::signature)
         packs.forEach { TranslationRuntime.costs[signature(it)] = it.installedBytes + 160L * 1_048_576 }
         TranslationRuntime.pins[owner] = packs.map(::signature).toSet()
     }
-    suspend fun prepare(owner: String, routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) {
-        pinModels(owner, routes)
-        val packs = routes.flatMap { (from, to) -> catalog().route(from, to) }.distinctBy(::signature)
+    suspend fun prepare(owner: String, routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) =
+        prepareEngineModels(owner, routes.map { LocalTranslationRoute(it.first, it.second) }.toSet())
+    suspend fun prepareEngineModels(owner: String, routes: Set<LocalTranslationRoute>) {
+        pinEngineModels(owner, routes)
+        val packs = routes.flatMap { catalog().route(it.source, it.target, it.engine) }.distinctBy(::signature)
         if (packs.isEmpty()) return
         try {
             val count = capacity(packs)
@@ -138,14 +140,18 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
     }
     fun unpin(owner: String) { TranslationRuntime.pins.remove(owner) }
     override suspend fun translate(source: LocalTranslationLanguage, target: LocalTranslationLanguage,
-        items: List<LocalTranslationText>, onProgress: (Int, Int) -> Unit): LocalTranslationResult {
+        items: List<LocalTranslationText>, onProgress: (Int, Int) -> Unit): LocalTranslationResult =
+        translate(TranslationModelEngine.BERGAMOT, source, target, items, onProgress)
+    suspend fun translate(engine: TranslationModelEngine, source: LocalTranslationLanguage, target: LocalTranslationLanguage,
+        items: List<LocalTranslationText>, onProgress: (Int, Int) -> Unit = { _, _ -> }): LocalTranslationResult {
         require(items.size <= 256) { "一次最多翻译 256 段文本" }
         require(items.all { it.id.isNotBlank() && it.sourceText.length <= 4096 && '\u0000' !in it.sourceText }) { "文本 ID 不能为空；单段最多 4096 字符且不可含 NUL" }
         require(items.map { it.id }.distinct().size == items.size) { "文本 ID 重复" }
-        val route = catalog().route(source, target)
+        val route = catalog().route(source, target, engine)
         val started = System.nanoTime()
         if (items.all { it.sourceText.isBlank() } || route.isEmpty()) return LocalTranslationResult(
-            items.map { LocalTranslatedText(it.id, it.sourceText, it.sourceText) }, emptyList(), 0)
+            items.map { LocalTranslatedText(it.id, it.sourceText, it.sourceText) }, emptyList(), 0,
+            if (engine == TranslationModelEngine.OPUS_MT) "OPUS-MT · ONNX CPU" else "Bergamot · CPU")
         val result = items.mapIndexed { index, item ->
             currentCoroutineContext().ensureActive()
             val text = if (item.sourceText.isBlank()) item.sourceText else session(route) { keys ->
@@ -154,7 +160,7 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
                     currentCoroutineContext().ensureActive()
                     try {
                         val slot = TranslationRuntime.slots[key.substringAfterLast(":session:").toInt()]
-                        text = slot.nllb[key]?.translate(source, target, text)
+                        text = slot.opus[key]?.translate(text)
                             ?: BergamotNative.translate(key.toByteArray(Charsets.UTF_8), text.toByteArray(Charsets.UTF_8)).toString(Charsets.UTF_8)
                     } catch (failure: Throwable) {
                         // An aborted native request may leave decoder state behind.
@@ -173,15 +179,17 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
             LocalTranslatedText(item.id, item.sourceText, text)
         }
         return LocalTranslationResult(result, route.map { it.id }, (System.nanoTime() - started) / 1_000_000,
-            if (route.any { it.engine == TranslationModelEngine.NLLB }) "NLLB-200 · ONNX CPU" else "Bergamot · CPU")
+            if (engine == TranslationModelEngine.OPUS_MT) "OPUS-MT · ONNX CPU" else "Bergamot · CPU")
     }
 
     override suspend fun releaseModels() = retainModels(emptySet())
 
     /** Reconcile resident packs without waiting for or unloading occupied shared slots. */
-    suspend fun retainModels(routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) = TranslationRuntime.mutex.withLock {
+    suspend fun retainModels(routes: Set<Pair<LocalTranslationLanguage, LocalTranslationLanguage>>) =
+        retainEngineModels(routes.map { LocalTranslationRoute(it.first, it.second) }.toSet())
+    suspend fun retainEngineModels(routes: Set<LocalTranslationRoute>) = TranslationRuntime.mutex.withLock {
         withContext(TranslationRuntime.dispatcher) {
-            val required = routes.flatMap { (source, target) -> catalog().route(source, target) }.map(::signature).toSet() + TranslationRuntime.pins.values.flatten()
+            val required = routes.flatMap { catalog().route(it.source, it.target, it.engine) }.map(::signature).toSet() + TranslationRuntime.pins.values.flatten()
             TranslationRuntime.slots.forEach { slot ->
                 if (!slot.mutex.tryLock()) return@forEach
                 try {

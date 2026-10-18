@@ -22,22 +22,30 @@ data class TranslationCatalogEndpoints(
     val repository: String = "TiberiuCristianLeon/Bergamot",
 )
 
-/** Fetches metadata, never model payloads; each published snapshot pins every file by SHA-256. */
+internal class CatalogHttpException(val status: Int) : IllegalArgumentException("获取目录失败：HTTP $status")
+
+/** Fetches metadata, never model payloads; each published snapshot pins files by commit and digest. */
 class RemoteTranslationCatalog(private val client: OkHttpClient = OkHttpClient.Builder()
     .connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(),
     private val endpoints: TranslationCatalogEndpoints = TranslationCatalogEndpoints()) {
     suspend fun fetch(settings: TranslationSourceSettings): TranslationModelCatalog = withContext(Dispatchers.IO) {
         withTimeout(120_000) {
-            val packs = when(settings.source) {
+            val packs = if (settings.engine == TranslationModelEngine.OPUS_MT && settings.source != TranslationDownloadSource.CUSTOM)
+                opus(settings) else when(settings.source) {
                 TranslationDownloadSource.MOZILLA -> mozilla()
                 TranslationDownloadSource.HUGGING_FACE -> huggingFace(endpoints.huggingFace)
                 TranslationDownloadSource.HF_MIRROR -> huggingFace(endpoints.hfMirror)
-                TranslationDownloadSource.NLLB_HUGGING_FACE -> listOf(NllbModelCatalog.pack(endpoints.huggingFace))
-                TranslationDownloadSource.NLLB_HF_MIRROR -> listOf(NllbModelCatalog.pack(endpoints.hfMirror))
                 TranslationDownloadSource.CUSTOM -> custom(settings)
             }
             TranslationModelCatalog.fromPacks(packs,settings,System.currentTimeMillis())
         }
+    }
+
+    private suspend fun opus(settings: TranslationSourceSettings): List<TranslationModelPack> {
+        require(settings.source in setOf(TranslationDownloadSource.HUGGING_FACE, TranslationDownloadSource.HF_MIRROR))
+        val host = if (settings.source == TranslationDownloadSource.HF_MIRROR) endpoints.hfMirror else endpoints.huggingFace
+        val base = TranslationModelCatalog.validateCustomBase(host)
+        return RemoteOpusCatalog(base) { json(it).first }.fetch()
     }
 
     private suspend fun mozilla(): List<TranslationModelPack> = coroutineScope {
@@ -116,7 +124,9 @@ class RemoteTranslationCatalog(private val client: OkHttpClient = OkHttpClient.B
     private suspend fun custom(settings: TranslationSourceSettings): List<TranslationModelPack> {
         val base=TranslationModelCatalog.validateCustomBase(settings.customBaseUrl)
         val catalog=TranslationModelCatalog(json("$base/catalog.json").first.toString())
-        return catalog.packs.map { pack -> pack.copy(files=pack.files.map { file ->
+        val packs = catalog.packs.filter { it.engine == settings.engine }
+        require(packs.isNotEmpty()) { "源目录未提供兼容的完整语言包" }
+        return packs.map { pack -> pack.copy(files=pack.files.map { file ->
             val path=file.downloadPath ?: "${pack.id}/${file.name}${if(file.compression==TranslationFileCompression.GZIP) ".gz" else ""}"
             require(TranslationModelCatalog.safeRelativePath(path))
             file.copy(url="$base/$path")
@@ -127,7 +137,7 @@ class RemoteTranslationCatalog(private val client: OkHttpClient = OkHttpClient.B
         val call=client.newCall(Request.Builder().url(url).build());val context=currentCoroutineContext()
         val watcher=CoroutineScope(context).launch(start=CoroutineStart.UNDISPATCHED) {try {awaitCancellation()} finally {call.cancel()} }
         try { return call.execute().use { response ->
-            require(response.isSuccessful) { "获取目录失败：HTTP ${response.code}" }
+            if (!response.isSuccessful) throw CatalogHttpException(response.code)
             val body=requireNotNull(response.body);require(body.contentLength()<=4_194_304) { "源目录过大" }
             val bytes=ByteArrayOutputStream()
             body.byteStream().use {stream -> val buffer=ByteArray(16*1024)

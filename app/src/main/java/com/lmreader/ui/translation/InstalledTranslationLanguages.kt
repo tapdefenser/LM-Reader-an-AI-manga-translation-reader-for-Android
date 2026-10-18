@@ -1,8 +1,16 @@
 package com.lmreader.ui.translation
 
+import com.lmreader.core.model.WorkflowProgram
+import com.lmreader.core.workflow.translationEngines
+
 import com.lmreader.core.model.LocalTranslationLanguage
 import com.lmreader.core.translation.TranslationModelCatalog
 import java.util.Locale
+
+fun TranslationModelCatalog.forWorkflow(program: WorkflowProgram?): TranslationModelCatalog {
+    val engines = program?.translationEngines().orEmpty()
+    return if (engines.isEmpty()) this else TranslationModelCatalog.fromPacks(packs.filter { it.engine in engines })
+}
 
 /** Platform lists can include undefined or malformed tags on some Android versions. */
 fun translationLanguageChoices(tags: Iterable<String>): List<LocalTranslationLanguage> =

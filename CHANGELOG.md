@@ -1,10 +1,17 @@
 # Changelog / 更新记录
 
-## v0.1.10 - Multilingual offline translation and reader UI / 多语言离线机翻与阅读界面
+## v0.1.11 - OPUS-MT and external translation settings / OPUS-MT 与应用外翻译设置
 
-- 新增 NLLB-200 专用离线机翻，支持 202 个语言及文字选项，共用模型并提供 Hugging Face 和镜像下载源。
+- 新增可选 OPUS-MT 本地机翻工作流，自动获取兼容语言包目录；优先直达，可经其他已安装语言中转，每个完整方向包不超过 350 MB。
+- Add an optional OPUS-MT local workflow with automatic compatible-package discovery, direct-first routing through any installed language when needed, and a 350 MB cap per complete direction package.
+- 修复应用外的通知入口及翻译球长按设置弹窗，不再拉起阅读器主界面；清理停用的本地翻译后端与资源。
+- Keep screen-translation settings outside the reader task when opened from a notification or a ball long press; remove the retired local translation backend and its resources.
+
+详见 [v0.1.11 中英发行说明 / Bilingual release notes](docs/releases/v0.1.11.md)。
+
+## v0.1.10 - Screen translation and reader UI / 屏幕翻译与阅读界面
+
 - 屏幕翻译球长按打开设置并震动反馈，阅读器页码移除背景底片，横屏主菜单支持上下滑动。
-- Add dedicated NLLB-200 offline translation with 202 language/script choices, a shared model and Hugging Face/mirror downloads.
 - Long-press the screen-translation ball for settings and haptic feedback, remove the reader page-counter background and allow vertical scrolling of the landscape main menu.
 
 详见 [v0.1.10 中英发行说明 / Bilingual release notes](docs/releases/v0.1.10.md)。

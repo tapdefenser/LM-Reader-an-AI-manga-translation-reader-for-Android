@@ -301,11 +301,11 @@ class QueueSchedulingIntegrationTest {
         assumeTrue(runCatching { container.translationModels.installedCatalog().route(japanese.first, japanese.second) }.isSuccess)
         assumeTrue(runCatching { container.translationModels.installedCatalog().route(korean.first, korean.second) }.isSuccess)
         val engine = container.localTranslator
-        container.translationQueue.prepareMangaResources(setOf(japanese))
+        container.translationQueue.prepareMangaResources(setOf(LocalTranslationRoute(japanese.first, japanese.second)))
         engine.translate(japanese.first, japanese.second, listOf(LocalTranslationText("synthetic-ja", "今日はいい天気です。")))
         assertEquals(2, engine.loadedResources.value.map { it.id.substringBeforeLast(":session:") }.distinct().size)
         val shared = engine.loadedResources.value.first { it.id.startsWith("en-zh-Hans-") }.id
-        container.translationQueue.prepareMangaResources(setOf(korean))
+        container.translationQueue.prepareMangaResources(setOf(LocalTranslationRoute(korean.first, korean.second)))
         assertTrue(engine.loadedResources.value.any { it.id == shared })
         assertTrue(engine.loadedResources.value.any { it.id.startsWith("ko-en-") })
         engine.translate(korean.first, korean.second, listOf(LocalTranslationText("synthetic-ko", "오늘 날씨가 좋네요.")))

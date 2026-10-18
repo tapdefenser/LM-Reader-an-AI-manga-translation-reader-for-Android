@@ -165,7 +165,10 @@ object WorkflowValidator {
                         if(scope.any { it.iterator && it.variable.type == WorkflowType.BUBBLE }) issue(n, "SEG 重建本页气泡，请放在气泡循环之外")
                     }
                     WorkflowKind.OCR -> { input("image", WorkflowType.IMAGE); input("language", WorkflowType.TEXT); output(WorkflowType.TEXT) }
-                    WorkflowKind.TRANSLATE -> { input("text", WorkflowType.TEXT); input("source", WorkflowType.TEXT); input("target", WorkflowType.TEXT); output(WorkflowType.TEXT) }
+                    WorkflowKind.TRANSLATE -> {
+                        input("text", WorkflowType.TEXT); input("source", WorkflowType.TEXT); input("target", WorkflowType.TEXT); output(WorkflowType.TEXT)
+                        if (runCatching { n.translationEngine() }.isFailure) issue(n, "机翻引擎必须明确选择")
+                    }
                     WorkflowKind.API, WorkflowKind.API_STREAM -> {
                         input("profile", WorkflowType.TEXT); input("prompt", WorkflowType.TEXT)
                         if ((n.inputs["profile"] as? WorkflowExpression.Text)?.value?.isBlank() == true) issue(n, "请选择 API 配置")

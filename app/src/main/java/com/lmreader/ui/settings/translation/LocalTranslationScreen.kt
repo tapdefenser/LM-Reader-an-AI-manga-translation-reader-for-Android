@@ -44,9 +44,12 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
     val catalogState by container.translationCatalogs.state.collectAsStateWithLifecycle()
     val catalog=catalogState.catalog
     val settings by container.translationSources.settings.collectAsStateWithLifecycle(initialValue=null)
-    val languages=(catalog.languages+installed.values.flatMap {it.languages}).distinct().sortedBy {it.tag}
-    val route=runCatching {TranslationModelCatalog.fromPacks(installed.values.toList()).route(test.source,test.target)}
-        .recoverCatching {TranslationModelCatalog.fromPacks((installed.values+catalog.packs).distinctBy {it.id}).route(test.source,test.target)}.getOrNull()
+    val engine = settings?.engine ?: TranslationModelEngine.BERGAMOT
+    val installedForEngine = installed.filterValues { it.engine == engine }
+    val available = catalog.packs.filter { it.engine == engine }
+    val languages=(available.flatMap {listOf(it.source,it.target)}+installedForEngine.values.flatMap {listOf(it.source,it.target)}).distinct().sortedBy {it.tag}
+    val route=runCatching {TranslationModelCatalog.fromPacks(installedForEngine.values.toList()).route(test.source,test.target,engine)}
+        .recoverCatching {TranslationModelCatalog.fromPacks((installedForEngine.values+available).distinctBy {it.id}).route(test.source,test.target,engine)}.getOrNull()
     val missing=route.orEmpty().filterNot {installed.containsKey(it.id)}
     var sourcesOpen by remember {mutableStateOf(false)}
     var licenseOpen by remember {mutableStateOf(false)}
@@ -58,9 +61,7 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
     val cannotOpenMessage=stringResource(R.string.local_mt_cannot_open)
     val locale=LocalConfiguration.current.locales[0]
     val names=remember(languages,locale) {languages.associateWith {platformLanguageNames(it,locale)}}
-    val columns=translationPackageColumns(catalog.packs,retained,installed,query,locale) {language ->names[language]?.let {listOf(it.first,it.second)} ?: emptyList()}
-    val multilingual=columns.other.filter {it.engine==TranslationModelEngine.NLLB}
-    val direct=columns.other.filter {it.engine==TranslationModelEngine.BERGAMOT}
+    val columns=translationPackageColumns(available,retained.filter {it.engine==engine},installedForEngine,query,locale) {language ->names[language]?.let {listOf(it.first,it.second)} ?: emptyList()}
     val launcher=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {uri ->
         importing?.let {pack ->if(uri!=null) models.importZip(pack) {
             context.contentResolver.openInputStream(uri) ?: error(cannotOpenMessage)
@@ -72,11 +73,14 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
     }}) {padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding),contentPadding=PaddingValues(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             item {
-                Text(stringResource(R.string.local_mt_backend),style=MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    TranslationModelEngine.entries.forEach { option -> FilterChip(selected=engine==option,onClick={vm.engine(option)},
+                        enabled=settings!=null && !test.running,label={Text(if(option==TranslationModelEngine.OPUS_MT) "OPUS-MT" else "Bergamot")}) }
+                }
+                Text(stringResource(if(engine==TranslationModelEngine.OPUS_MT) R.string.local_mt_opus_backend else R.string.local_mt_backend),style=MaterialTheme.typography.titleMedium)
+                if(engine==TranslationModelEngine.OPUS_MT) Text(stringResource(R.string.local_mt_opus_help),style=MaterialTheme.typography.bodySmall)
                 Text(stringResource(R.string.local_mt_current_source,settings?.let {sourceLabel(it.source)} ?: stringResource(R.string.local_mt_loading)),style=MaterialTheme.typography.bodySmall)
                 Text(stringResource(R.string.local_mt_download_lifetime),style=MaterialTheme.typography.bodySmall)
-                if (catalog.packs.any { it.engine == TranslationModelEngine.NLLB })
-                    Text(stringResource(R.string.local_mt_nllb_help),style=MaterialTheme.typography.bodySmall)
                 TextButton(onClick={licenseOpen=true}) {Text(stringResource(R.string.local_mt_licenses))}
             }
             item {
@@ -87,7 +91,7 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
                     Text(when {
                         route==null -> stringResource(R.string.local_mt_no_route)
                         route.isEmpty() -> stringResource(R.string.local_mt_identity)
-                        else -> route.joinToString(" + ") {it.id}+if(route.size==2) stringResource(R.string.local_mt_pivot) else ""
+                        else -> (listOf(route.first().source)+route.map {it.target}).map {languageLabel(it)}.joinToString(" → ")+if(route.size>1) stringResource(R.string.local_mt_pivot) else ""
                     },style=MaterialTheme.typography.bodySmall)
                     if(missing.isNotEmpty()) Text(stringResource(R.string.local_mt_missing,missing.joinToString {it.id}),style=MaterialTheme.typography.bodySmall)
                     Row {
@@ -112,19 +116,12 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
                     else TextButton(onClick=vm::refreshCatalog,enabled=settings!=null) {Text(stringResource(R.string.local_mt_fetch))}
                 }
                 if(catalogState.fetching) LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text(if(catalogState.fetched && catalog.packs.any {it.engine==TranslationModelEngine.NLLB}) stringResource(R.string.local_mt_nllb_catalog_summary,NllbLanguages.languages.size)
-                    else if(catalogState.fetched) stringResource(R.string.local_mt_catalog_summary,catalog.packs.size,catalog.languages.size) else stringResource(R.string.local_mt_catalog_fallback),style=MaterialTheme.typography.bodySmall)
+                Text(if(catalogState.fetched) stringResource(R.string.local_mt_catalog_summary,available.size,languages.size) else stringResource(R.string.local_mt_catalog_fallback),style=MaterialTheme.typography.bodySmall)
                 catalogState.error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
                 OutlinedTextField(query,{query=it},Modifier.fillMaxWidth().padding(top=8.dp),label={Text(stringResource(R.string.local_mt_search))},singleLine=true,
                     trailingIcon={if(query.isNotEmpty()) TextButton(onClick={query=""}) {Text(stringResource(R.string.local_mt_clear))}})
             }
-            items(multilingual,key={it.id}) {pack ->
-                PackageCard(pack,installed[pack.id],states[pack.id] ?: TranslationPackState(),catalogState.fetched,
-                    catalog.packs.any {it.id==pack.id},settings!=null,!test.running,Modifier.fillMaxWidth(),
-                    onDownload={models.download(pack)},onPause={models.pause(pack)},onDiscard={models.discard(pack)},
-                    onImport={importing=pack;launcher.launch(arrayOf("application/zip","application/octet-stream"))},onDelete={deleting=installed[pack.id]})
-            }
-            if(columns.incoming.isNotEmpty() || columns.outgoing.isNotEmpty()) item {Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+            item {Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                 Text("→ ${languageLabel(LocalTranslationLanguage.ENGLISH)}",Modifier.weight(1f),style=MaterialTheme.typography.titleSmall)
                 Text("${languageLabel(LocalTranslationLanguage.ENGLISH)} →",Modifier.weight(1f),style=MaterialTheme.typography.titleSmall)
             }}
@@ -138,9 +135,9 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
                     }
                 }
             }
-            if(direct.isNotEmpty()) {
+            if(columns.other.isNotEmpty()) {
                 item {Text(stringResource(R.string.local_mt_other_directions),style=MaterialTheme.typography.titleSmall)}
-                items(direct.chunked(2)) {pair ->Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                items(columns.other.chunked(2)) {pair ->Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(12.dp)) {
                     pair.forEach {pack ->PackageCard(pack,installed[pack.id],states[pack.id] ?: TranslationPackState(),catalogState.fetched,catalog.packs.any {it.id==pack.id},settings!=null,!test.running,Modifier.weight(1f),
                         {models.download(pack)},{models.pause(pack)},{models.discard(pack)},{importing=pack;launcher.launch(arrayOf("application/zip","application/octet-stream"))},{deleting=installed[pack.id]})}
                     if(pair.size==1) Spacer(Modifier.weight(1f))
@@ -167,8 +164,9 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
 private fun PackageCard(pack:TranslationModelPack,installed:TranslationModelPack?,state:TranslationPackState,fetched:Boolean,available:Boolean,
     configured:Boolean,canDelete:Boolean,modifier:Modifier,onDownload:()->Unit,onPause:()->Unit,onDiscard:()->Unit,onImport:()->Unit,onDelete:()->Unit) {
     OutlinedCard(modifier) {Column(Modifier.padding(12.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
-        Text(if(pack.engine==TranslationModelEngine.NLLB) stringResource(R.string.local_mt_nllb_package) else "${languageLabel(pack.source)} → ${languageLabel(pack.target)}",style=MaterialTheme.typography.titleSmall)
+        Text("${languageLabel(pack.source)} → ${languageLabel(pack.target)}",style=MaterialTheme.typography.titleSmall)
         Text(pack.id,style=MaterialTheme.typography.labelSmall)
+        if(pack.repository.isNotBlank()) Text("${pack.repository} · ${pack.license}",style=MaterialTheme.typography.labelSmall,localize=false)
         Text(stringResource(R.string.local_mt_installed_version,installed?.version ?: stringResource(R.string.local_mt_not_installed)),style=MaterialTheme.typography.bodySmall)
         Text(stringResource(R.string.local_mt_latest_version,if(!fetched) stringResource(R.string.local_mt_not_fetched) else if(available) pack.version else stringResource(R.string.local_mt_not_in_source)),style=MaterialTheme.typography.bodySmall)
         Text(stringResource(R.string.local_mt_sizes,megabytes(pack.downloadBytes),megabytes((installed ?: pack).installedBytes)),style=MaterialTheme.typography.bodySmall)
@@ -221,8 +219,6 @@ private fun LanguagePicker(label:String,value:LocalTranslationLanguage,options:L
 
 @Composable
 private fun sourceLabel(source:TranslationDownloadSource)=stringResource(when(source) {
-    TranslationDownloadSource.NLLB_HUGGING_FACE->R.string.local_mt_source_nllb_hf
-    TranslationDownloadSource.NLLB_HF_MIRROR->R.string.local_mt_source_nllb_mirror
     TranslationDownloadSource.MOZILLA->R.string.local_mt_source_mozilla
     TranslationDownloadSource.HUGGING_FACE->R.string.local_mt_source_hf
     TranslationDownloadSource.HF_MIRROR->R.string.local_mt_source_mirror
@@ -235,18 +231,16 @@ private fun SourceDialog(initial:TranslationSourceSettings,container:AppContaine
     var wifi by remember {mutableStateOf(initial.wifiOnly)};var error by remember {mutableStateOf<String?>(null)};var saving by remember {mutableStateOf(false)}
     val scope=rememberCoroutineScope()
     AlertDialog(onDismissRequest={if(!saving) onDismiss()},title={Text(stringResource(R.string.local_mt_source_title))},text={Column(Modifier.verticalScroll(rememberScrollState())) {
-        TranslationDownloadSource.entries.forEach {option ->Row(Modifier.fillMaxWidth().clickable(enabled=!saving) {source=option}) {
+        TranslationDownloadSource.entries.filter {initial.engine!=TranslationModelEngine.OPUS_MT || it!=TranslationDownloadSource.MOZILLA}.forEach {option ->Row(Modifier.fillMaxWidth().clickable(enabled=!saving) {source=option}) {
             RadioButton(source==option,{source=option},enabled=!saving);Text(sourceLabel(option),Modifier.padding(top=12.dp))
         }}
         if(source==TranslationDownloadSource.CUSTOM) OutlinedTextField(base,{base=it},Modifier.fillMaxWidth(),label={Text(stringResource(R.string.local_mt_custom_base))},singleLine=true,enabled=!saving)
         Text(stringResource(R.string.local_mt_source_help),style=MaterialTheme.typography.bodySmall)
-        if(source in setOf(TranslationDownloadSource.NLLB_HUGGING_FACE,TranslationDownloadSource.NLLB_HF_MIRROR))
-            Text(stringResource(R.string.local_mt_nllb_help),style=MaterialTheme.typography.bodySmall)
         Row(Modifier.clickable(enabled=!saving) {wifi=!wifi}) {Checkbox(wifi,{wifi=it},enabled=!saving);Text(stringResource(R.string.local_mt_wifi_only),Modifier.padding(top=12.dp))}
         error?.let {Text(it,color=MaterialTheme.colorScheme.error)}
     }},confirmButton={TextButton(enabled=!saving,onClick={try {
         if(source==TranslationDownloadSource.CUSTOM) TranslationModelCatalog.validateCustomBase(base)
-        saving=true;scope.launch {try {container.translationSources.save(TranslationSourceSettings(source,base,wifi));onDismiss()} catch(failure:Exception) {error=failure.message;saving=false}}
+        saving=true;scope.launch {try {container.translationSources.save(initial.copy(source=source,customBaseUrl=base,wifiOnly=wifi));onDismiss()} catch(failure:Exception) {error=failure.message;saving=false}}
     } catch(failure:Exception) {error=failure.message}}) {Text(stringResource(R.string.local_mt_save))}},
         dismissButton={TextButton(onClick=onDismiss,enabled=!saving) {Text(stringResource(R.string.local_mt_cancel))}})
 }

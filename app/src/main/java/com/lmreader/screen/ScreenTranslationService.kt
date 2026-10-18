@@ -104,7 +104,7 @@ class ScreenTranslationService : Service() {
             resources.map { "${translated(it.name)} (${it.backend})" }.distinct().joinToString("\n"), controller.apiResources.value.joinToString("\n"),
             translated("屏幕预处理缓存：$cache MB"), translated(controller.state.value.status)).filter { it.isNotBlank() }.joinToString("\n")
         fun serviceAction(action: String, request: Int) = PendingIntent.getService(this, request, Intent(this, ScreenTranslationService::class.java).setAction(action), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val settings = PendingIntent.getActivity(this, 3103, Intent(this, ScreenTranslationSettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val settings = ScreenTranslationSettingsActivity.pendingIntent(this)
         val stopEngine = controller.state.value.engine in setOf(ScreenEngineState.LOADING, ScreenEngineState.READY, ScreenEngineState.STOPPING)
         return NotificationCompat.Builder(this, CHANNEL).setSmallIcon(R.drawable.lmreader_ic_task)
             .setContentTitle(label(R.string.screen_translation_notification_title)).setContentText(counts)
