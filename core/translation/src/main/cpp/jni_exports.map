@@ -1,4 +1,5 @@
 {
   global: Java_com_lmreader_core_translation_BergamotNative_*;
+          Java_com_lmreader_core_translation_NllbTokenizerNative_*;
   local: *;
 };

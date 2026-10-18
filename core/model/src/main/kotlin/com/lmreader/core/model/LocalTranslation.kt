@@ -23,6 +23,8 @@ data class LocalTranslationLanguage private constructor(val tag: String) {
 }
 
 enum class TranslationDownloadSource(val label: String) {
+    NLLB_HUGGING_FACE("NLLB-200 多语言直译 · Hugging Face"),
+    NLLB_HF_MIRROR("NLLB-200 多语言直译 · HF-Mirror"),
     MOZILLA("Mozilla 官方源"), HUGGING_FACE("Hugging Face 社区副本"),
     HF_MIRROR("HF-Mirror 社区镜像"), CUSTOM("自定义源");
 }
@@ -44,16 +46,20 @@ data class TranslationModelFile(
 
 enum class TranslationFileCompression { GZIP, NONE }
 
+enum class TranslationModelEngine { BERGAMOT, NLLB }
+
 data class TranslationModelPack(
     val id: String, val version: String,
     val source: LocalTranslationLanguage, val target: LocalTranslationLanguage,
     val files: List<TranslationModelFile>,
+    val engine: TranslationModelEngine = TranslationModelEngine.BERGAMOT,
 ) {
-    val label get() = "${source.label} → ${target.label}"
+    val languages get() = if (engine == TranslationModelEngine.NLLB) NllbLanguages.languages else listOf(source, target)
+    val label get() = if (engine == TranslationModelEngine.NLLB) "NLLB-200" else "${source.label} → ${target.label}"
     val downloadBytes get() = files.sumOf { it.downloadSize }
     val installedBytes get() = files.sumOf { it.size }
     val identity get() = "$id@$version"
-    fun sameContents(other: TranslationModelPack) = id==other.id && version==other.version &&
+    fun sameContents(other: TranslationModelPack) = id==other.id && version==other.version && engine==other.engine &&
         files.map { listOf(it.role,it.name,it.size.toString(),it.sha256) }.sortedBy {it[0]} == other.files.map { listOf(it.role,it.name,it.size.toString(),it.sha256) }.sortedBy {it[0]}
 }
 

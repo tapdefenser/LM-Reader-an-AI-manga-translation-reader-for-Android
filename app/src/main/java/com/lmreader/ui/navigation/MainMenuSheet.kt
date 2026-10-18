@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -27,49 +29,51 @@ fun MainMenuSheet(
     activeExportTasks: Int = 0,
 ) {
     ModalDrawerSheet {
-        Text(
-            text = "LM-Reader",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(16.dp),
-        )
-        HorizontalDivider()
-        Spacer(Modifier.height(8.dp))
+        Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text(
+                text = "LM-Reader",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(16.dp),
+            )
+            HorizontalDivider()
+            Spacer(Modifier.height(8.dp))
 
-        MainDestination.entries
-            .filter { it != MainDestination.MENU }
-            .forEach { destination ->
-                val badge = when (destination) {
-                    MainDestination.TRANSLATION_QUEUE -> activeTranslationTasks
-                    MainDestination.EXPORT_QUEUE -> activeExportTasks
-                    else -> 0
+            MainDestination.entries
+                .filter { it != MainDestination.MENU }
+                .forEach { destination ->
+                    val badge = when (destination) {
+                        MainDestination.TRANSLATION_QUEUE -> activeTranslationTasks
+                        MainDestination.EXPORT_QUEUE -> activeExportTasks
+                        else -> 0
+                    }
+                    NavigationDrawerItem(
+                        label = {
+                            Text(
+                                text = if (badge > 0) {
+                                    "${destination.label}（$badge）"
+                                } else {
+                                    destination.label
+                                },
+                            )
+                        },
+                        selected = false,
+                        onClick = {
+                            onNavigate(destination)
+                            onDismiss()
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                    )
                 }
-                NavigationDrawerItem(
-                    label = {
-                        Text(
-                            text = if (badge > 0) {
-                                "${destination.label}（$badge）"
-                            } else {
-                                destination.label
-                            },
-                        )
-                    },
-                    selected = false,
-                    onClick = {
-                        onNavigate(destination)
-                        onDismiss()
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
-                )
-            }
 
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider()
-        Text(
-            text = "本地图库 · 单/多章节 · 译文遮罩阅读",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-        )
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider()
+            Text(
+                text = "本地图库 · 单/多章节 · 译文遮罩阅读",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+            )
+        }
     }
 }
 

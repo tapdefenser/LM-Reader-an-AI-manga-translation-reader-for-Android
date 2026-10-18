@@ -188,6 +188,7 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
                 ScreenTranslationMode.BROWSE -> "点一下应用外悬浮球开启连续翻译，再点一下停止。根据画面跟随平移和缩放，只识别新露出的区域。"
                 ScreenTranslationMode.VIDEO -> "点一下应用外悬浮球开启连续翻译，再点一下停止。检测所选区域的画面变化，关闭时清除遮罩。"
             }, style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.screen_translation_long_press_hint), style = MaterialTheme.typography.bodySmall)
             if (config.mode == ScreenTranslationMode.BROWSE) {
                 ScreenChoice("跟随目标帧率", "${config.followFramesPerSecond} FPS", listOf(15, 30, 60).map { it.toString() to "$it FPS" }) { value -> update { it.copy(followFramesPerSecond = value.toInt()) } }
                 Text("根据干净画面同时估计平移和缩放。匹配完成后再取下一帧；实际速度受设备性能与截图来源限制，已有译文的跟随独立于翻译。", style = MaterialTheme.typography.bodySmall)

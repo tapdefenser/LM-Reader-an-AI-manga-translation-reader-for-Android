@@ -32,6 +32,8 @@ class RemoteTranslationCatalog(private val client: OkHttpClient = OkHttpClient.B
                 TranslationDownloadSource.MOZILLA -> mozilla()
                 TranslationDownloadSource.HUGGING_FACE -> huggingFace(endpoints.huggingFace)
                 TranslationDownloadSource.HF_MIRROR -> huggingFace(endpoints.hfMirror)
+                TranslationDownloadSource.NLLB_HUGGING_FACE -> listOf(NllbModelCatalog.pack(endpoints.huggingFace))
+                TranslationDownloadSource.NLLB_HF_MIRROR -> listOf(NllbModelCatalog.pack(endpoints.hfMirror))
                 TranslationDownloadSource.CUSTOM -> custom(settings)
             }
             TranslationModelCatalog.fromPacks(packs,settings,System.currentTimeMillis())

@@ -30,4 +30,12 @@ class TranslationPackageListTest {
         val direct=pack("de","id")
         assertEquals(listOf(direct),translationPackageColumns(listOf(direct),emptyList(),emptyMap(),"",Locale.ENGLISH).other)
     }
+    @Test fun multilingualPackageIsListedOnceAndCanBeFoundByAnySupportedLanguage() {
+        val multilingual=pack("en","zh-Hans").copy(id="nllb-200",engine=TranslationModelEngine.NLLB)
+        for(query in listOf("", "Japanese", "French", "ar", "zh-Hant")) {
+            val columns=translationPackageColumns(listOf(multilingual),emptyList(),emptyMap(),query,Locale.ENGLISH)
+            assertTrue(columns.incoming.isEmpty());assertTrue(columns.outgoing.isEmpty())
+            assertEquals(listOf(multilingual),columns.other)
+        }
+    }
 }

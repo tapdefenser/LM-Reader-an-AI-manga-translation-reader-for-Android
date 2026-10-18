@@ -582,5 +582,15 @@
   "截图延时": "Capture delay",
   "视频 SEG 区域相似度": "Video SEG region similarity",
   "最多缓冲两张截图。SEG 完成后才允许下一张截图；延时从上一张 SEG 完成开始，与新一张 SEG 并行计时。缓冲区满时，等待最早一张完成回填再截图。新气泡填出前保留上一张译文。": "Buffer at most two screenshots. Capture the next frame only after SEG finishes. The delay starts at the preceding SEG completion and overlaps the new frame’s SEG. When the buffer is full, wait for the oldest frame to finish backfilling. Keep the preceding translation until the next bubbles are filled.",
-  "逐区域比较 SEG 形状和原文字纹理；相似度超过此值时复用旧气泡及仍在处理的译文，不重复识别或翻译。值越高越严格，100 时不复用。": "Compare SEG shapes and source-text texture per region. Reuse matching bubbles and their pending translations above this threshold, without repeating OCR or translation. Higher values are stricter; 100 disables reuse."
+  "逐区域比较 SEG 形状和原文字纹理；相似度超过此值时复用旧气泡及仍在处理的译文，不重复识别或翻译。值越高越严格，100 时不复用。": "Compare SEG shapes and source-text texture per region. Reuse matching bubbles and their pending translations above this threshold, without repeating OCR or translation. Higher values are stricter; 100 disables reuse.",
+  "NLLB 模型文件缺少下载地址": "An NLLB model file has no download URL",
+  "NLLB 缺少注意力缓存": "NLLB attention cache is missing",
+  "NLLB 缺少译文分数": "NLLB translation scores are missing",
+  "NLLB 译文词表不兼容": "The NLLB output vocabulary is incompatible",
+  "NLLB 译文超过长度限制，请拆分文本后重试": "NLLB output exceeds the length limit. Split the text and try again.",
+  "NLLB 返回无效译文分数": "NLLB returned invalid translation scores",
+  "NLLB-200 不支持语言：__VAR0__": "NLLB-200 does not support this language: __VAR0__",
+  "NLLB-200 多语言直译 · HF-Mirror": "NLLB-200 multilingual translation · HF-Mirror",
+  "NLLB-200 多语言直译 · Hugging Face": "NLLB-200 multilingual translation · Hugging Face",
+  "请先获取 NLLB-200 模型列表": "Fetch the NLLB-200 model list first"
 }

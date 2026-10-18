@@ -52,6 +52,8 @@ Translation pause stops scheduling and retains the completed current-page result
 
 ## Screen translation (development build)
 
+Hold the external floating ball to open the screen translation settings dialog with one system long-press haptic, following the device haptic settings. This also works before the engine is ready and during translation. Dragging cancels the hold, and releasing after a long press does not trigger translation.
+
 The following describes the current development implementation and controls, which have not been released as a stable update.
 
 The draggable translation icon on the shelf/library opens start/stop and settings. Startup warms only resources required by the selected workflow. **Text only** is the screen default: detect all text inside and outside bubbles and render text boxes, using DET without loading bubble SEG. OCR loads only recognition languages used by OCR rows, and offline translation loads only required model routes. Bubble SEG loads when bubble contours are needed. Library comic workflows use the same resource rules.

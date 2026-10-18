@@ -14,6 +14,7 @@
     <string name="screen_translation_accessibility_required">浏览和视频模式需要开启 LM-Reader 屏幕翻译辅助</string>
     <string name="screen_translation_accessibility_settings_unavailable">此设备无法打开无障碍设置</string>
     <string name="screen_translation_button">翻译屏幕</string>
+    <string name="screen_translation_long_press_hint">长按悬浮球打开翻译设置，并提供震动反馈。</string>
     <string name="screen_translation_notification_title">屏幕翻译资源</string>
     <string name="screen_translation_accessibility_label">LM-Reader 屏幕翻译辅助</string>
     <string name="screen_translation_accessibility_description">获取干净应用画面并检测窗口变化。浏览和视频模式需要开启；正常触摸操作继续传递给原应用。</string>

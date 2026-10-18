@@ -12,6 +12,10 @@ Seg weights come from the pinned upstream v3.5.5 APK. Independent training-origi
 
 ## Offline translation / 离线机翻
 
+NLLB-200 distilled 600M INT8 is available from the **NLLB-200 multilingual** Hugging Face and HF-Mirror sources. Fetch the model list, then download its single shared package (about 900 MB). It exposes 202 language/script choices and directly translates between supported pairs, without an English pivot or repeated per-pair downloads. Installed NLLB models take priority for supported pairs; Bergamot packs remain installed and serve other available directions. The CPU session is shared across directions and runs one translation at a time to avoid duplicating the large model. Downloads and ZIP imports use the same atomic installation and SHA-256 verification as existing packs. Weights are not bundled in the APK and retain CC-BY-NC-4.0 terms.
+
+新增 NLLB-200 专用多语种机翻引擎：在下载源中选择 NLLB-200 的 Hugging Face 或 HF-Mirror，获取列表后下载约 900 MB 的共享模型，即可在受支持的语言／书写形式之间直译。安装后优先使用 NLLB，无需经英语中转；旧 Bergamot 包继续保留。较大的模型更占内存，CPU 速度可能较慢；多个翻译方向共用一个推理会话。正在运行的屏幕翻译会重新协调模型，主动停止的引擎保持停止。
+
 The Bergamot/Marian JNI engine runs on CPU and accepts typed text batches. Same-language pairs preserve the original text; a missing direct direction can route through English when both packs are installed. Packs are downloaded/imported at runtime and are not bundled in the APK.
 
 Use **Settings → API and translation engines → Local translation engine**. Sources include Mozilla, a Hugging Face community copy, HF-Mirror and a user-configured catalog. Fetching a catalog downloads metadata only. Availability and model quality depend on the selected source/direction; a mirror may redirect to an overseas host.
@@ -20,7 +24,7 @@ Use **Settings → API and translation engines → Local translation engine**. S
 
 ## Catalog and installation / 目录与安装规则
 
-- Custom catalogs use `catalog.json`, schema 1/2 and engine `bergamot-v1`. Each pack declares identity, version, source/target languages, file roles, original sizes/SHA-256 and compression/download paths.
+- Custom catalogs use `catalog.json`: legacy schema 1/2 uses `bergamot-v1`; schema 3 also supports `local-nmt-v1` with a per-pack `engine` (`BERGAMOT` or `NLLB`). Each pack declares identity, version, source/target languages, file roles, original sizes/SHA-256 and compression/download paths. NLLB declares `encoder`, `decoder` and `tokenizer` roles and derives its multilingual coverage from the fixed FLORES token map.
 - Models use int8 Marian `.bin`, shortlist `.bin` and SentencePiece `.spm` files. Transfers may use gzip or uncompressed files; installation validates original, decompressed hashes and sizes.
 - Relative paths cannot escape the package. Catalog limits constrain response size, file roles, file/pack sizes and counts. Remote scripts and user-supplied YAML are not executed.
 - Installed descriptors remain independent of refreshed catalogs. Source-specific caches are saved atomically; a late response from a previously selected source cannot replace the current source's catalog.

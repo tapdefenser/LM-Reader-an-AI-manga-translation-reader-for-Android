@@ -16,7 +16,8 @@ import com.lmreader.core.model.*
 import com.lmreader.core.vision.BubbleMaskRenderer
 import com.lmreader.core.vision.BubbleOverlay
 
-internal class ScreenOverlay(private val context: Context, trusted: Boolean, private val tap: () -> Unit) : AutoCloseable {
+internal class ScreenOverlay(private val context: Context, trusted: Boolean,
+    private val openSettings: (() -> Unit)? = null, private val tap: () -> Unit) : AutoCloseable {
     private val manager = context.getSystemService(WindowManager::class.java)
     private val type = if (trusted) WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY else WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
     private val opacity = if (trusted || Build.VERSION.SDK_INT < 31) 1f else context.getSystemService(InputManager::class.java).maximumObscuringOpacityForTouch
@@ -127,6 +128,14 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
     private var ballPosition = ScreenBallPosition(position.getFloat("x", .9f).coerceIn(0f, 1f),
         position.getFloat("y", .7f).coerceIn(0f, 1f), position.getBoolean("tucked", false))
     private var clickAllowed = true
+    private var gestureDownX = 0f
+    private var gestureDownY = 0f
+    private var gestureStart = ballPosition
+    private var gestureDragging = false
+    private var gestureGeometry = geometryRevision
+    private var longPressConsumed = false
+    private var longPressRunnable: Runnable? = null
+    private var longPressToken = 0
     private val button = FrameLayout(context).apply {
         contentDescription = context.getString(R.string.screen_translation_button)
         addView(icon, FrameLayout.LayoutParams(size, size))
@@ -136,6 +145,9 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
                 ballPosition = ballPosition.copy(tucked = false); placeButton(); savePosition()
             } else if (clickAllowed) tap()
         }
+        // performLongClick supplies the standard LONG_PRESS haptic and lets
+        // accessibility services invoke the same action.
+        openSettings?.let { callback -> setOnLongClickListener { callback(); true } }
     }
     private val buttonParams = params(size, size, flags).apply {
         // Positions below already include the safe insets, in display coordinates.
@@ -172,6 +184,7 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
         if (next == previous) return
         geometry = next
         geometryRevision++
+        cancelPendingLongPress()
         if (previous != null && (next.rotation != previous.rotation || next.width != previous.width || next.height != previous.height)) dockAfterResize = true
         // Keep the hit target inside immediately, then dock after rotation/insets settle.
         placeButton(next)
@@ -191,40 +204,79 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
     private fun savePosition() {
         position.edit().putFloat("x", ballPosition.x).putFloat("y", ballPosition.y).putBoolean("tucked", ballPosition.tucked).apply()
     }
+    private fun cancelPendingLongPress() {
+        longPressToken++
+        longPressRunnable?.let { geometryHandler.removeCallbacks(it) }
+        longPressRunnable = null
+    }
+    private fun scheduleLongPress() {
+        if (closed || openSettings == null) return
+        val token = ++longPressToken
+        val runnable = Runnable {
+            if (token != longPressToken) return@Runnable
+            longPressRunnable = null
+            if (closed || longPressConsumed || gestureDragging || gestureGeometry != geometryRevision ||
+                !button.isAttachedToWindow || button.visibility != View.VISIBLE) return@Runnable
+            longPressConsumed = true
+            // The listener in init opens settings. performLongClick emits the
+            // single standard LONG_PRESS haptic and its accessibility event.
+            button.performLongClick()
+        }
+        longPressRunnable = runnable
+        geometryHandler.postDelayed(runnable, ViewConfiguration.getLongPressTimeout().toLong())
+    }
     init {
         geometry = displayGeometry()
         placeButton()
         manager.addView(layer, layerParams); manager.addView(button, buttonParams)
         displays.registerDisplayListener(displayListener, geometryHandler)
-        var downX = 0f; var downY = 0f; var start = ballPosition; var dragging = false
-        var gestureGeometry = geometryRevision
         val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
         button.setOnTouchListener { _, event ->
             // A gesture started in the old orientation must not undo the repair.
-            if (event.actionMasked != MotionEvent.ACTION_DOWN && gestureGeometry != geometryRevision) return@setOnTouchListener true
+            if (event.actionMasked != MotionEvent.ACTION_DOWN && gestureGeometry != geometryRevision) {
+                cancelPendingLongPress()
+                return@setOnTouchListener true
+            }
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     geometryHandler.removeCallbacks(settleButton); dockAfterResize = false
-                    downX = event.rawX; downY = event.rawY; start = ballPosition; dragging = false; gestureGeometry = geometryRevision; true
+                    cancelPendingLongPress(); longPressConsumed = false
+                    gestureDownX = event.rawX; gestureDownY = event.rawY; gestureStart = ballPosition
+                    gestureDragging = false; gestureGeometry = geometryRevision
+                    scheduleLongPress(); true
                 }
+                MotionEvent.ACTION_POINTER_DOWN -> { cancelPendingLongPress(); true }
                 MotionEvent.ACTION_MOVE -> {
-                    if (kotlin.math.hypot(event.rawX - downX, event.rawY - downY) > touchSlop) dragging = true
-                    if (dragging) {
+                    if (event.pointerCount > 1) cancelPendingLongPress()
+                    if (longPressConsumed) return@setOnTouchListener true
+                    if (kotlin.math.hypot(event.rawX - gestureDownX, event.rawY - gestureDownY) > touchSlop) {
+                        gestureDragging = true
+                        cancelPendingLongPress()
+                    }
+                    if (gestureDragging) {
                         val viewport = displayGeometry().viewport
-                        ballPosition = start.drag(event.rawX - downX, event.rawY - downY,
+                        ballPosition = gestureStart.drag(event.rawX - gestureDownX, event.rawY - gestureDownY,
                             (viewport.width - size).coerceAtLeast(0).toFloat(), (viewport.height - size).coerceAtLeast(0).toFloat(), touchSlop)
                         placeButton()
                     }; true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (!dragging) button.performClick() else {
+                    cancelPendingLongPress()
+                    if (longPressConsumed) return@setOnTouchListener true
+                    if (!gestureDragging) button.performClick() else {
                         val viewport = displayGeometry().viewport
-                        ballPosition = start.drag(event.rawX - downX, event.rawY - downY,
+                        ballPosition = gestureStart.drag(event.rawX - gestureDownX, event.rawY - gestureDownY,
                             (viewport.width - size).coerceAtLeast(0).toFloat(), (viewport.height - size).coerceAtLeast(0).toFloat(), touchSlop, released = true)
                         placeButton(); savePosition()
                     }; true
                 }
-                MotionEvent.ACTION_CANCEL -> { ballPosition = ballPosition.copy(tucked = false); placeButton(); savePosition(); true }
+                MotionEvent.ACTION_CANCEL -> {
+                    cancelPendingLongPress()
+                    if (!longPressConsumed) {
+                        ballPosition = ballPosition.copy(tucked = false); placeButton(); savePosition()
+                    }
+                    true
+                }
                 else -> true
             }
         }
@@ -238,6 +290,7 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
     }
     private fun refreshVisibility() {
         val visibility = if (inside || temporarilyHidden) View.INVISIBLE else View.VISIBLE
+        if (visibility != View.VISIBLE) cancelPendingLongPress()
         layer.visibility = visibility; button.visibility = visibility
     }
     fun visible(visible: Boolean) { temporarilyHidden = !visible; refreshVisibility() }
@@ -537,6 +590,7 @@ internal class ScreenOverlay(private val context: Context, trusted: Boolean, pri
     override fun close() {
         if (closed) return
         closed = true
+        cancelPendingLongPress()
         geometryHandler.removeCallbacks(settleButton)
         displays.unregisterDisplayListener(displayListener)
         bubbles.clear(); runCatching { manager.removeViewImmediate(button) }; runCatching { manager.removeViewImmediate(layer) }

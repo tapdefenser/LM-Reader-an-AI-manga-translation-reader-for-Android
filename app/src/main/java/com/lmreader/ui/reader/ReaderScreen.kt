@@ -456,27 +456,20 @@ private fun ReaderContent(
  * 文案格式照搬 Mihon：`当前页 / 总页数`，不含百分比——百分比在章节滑杆上。
  * 页码是**章内**页码，与滑杆同一套换算（[displayPageNumber]），否则两处会显示不同的数。
  *
- * 与 Mihon 的实现差异：它用"描边文字叠实心文字"保证任何背景上都可读；这里用半透明
- * 深色圆角底片。效果等价（都保证可读）而少一次文本测量与绘制，并且顺带避免了在纯白
- * 页面上白字看不见。
+ * 只绘制页码文字，不添加底片或阴影。
  */
 @Composable
 private fun PageIndicator(current: Int, total: Int, modifier: Modifier) {
     if (current <= 0 || total <= 0) return
-    Surface(
-        color = Color.Black.copy(alpha = 0.55f),
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+    Text(
+        text = "$current / $total",
+        color = Color(0xEB, 0xEB, 0xEB),
+        style = MaterialTheme.typography.bodyMedium,
         modifier = modifier
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(bottom = 16.dp),
-    ) {
-        Text(
-            text = "$current / $total",
-            color = Color(0xEB, 0xEB, 0xEB),
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-        )
-    }
+            .padding(bottom = 16.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

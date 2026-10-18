@@ -13,7 +13,7 @@ fun TranslationModelCatalog.availableTargets(source: LocalTranslationLanguage): 
     languages.filter { it != source && runCatching { route(source, it) }.isSuccess }
 
 fun TranslationModelCatalog.availableSources(): List<LocalTranslationLanguage> =
-    languages.filter { availableTargets(it).isNotEmpty() }
+    languages.filter { source -> languages.any { it != source && runCatching { route(source, it) }.isSuccess } }
 
 /** Stable partition: downloaded direct and pivot routes move first; no labels or automatic selection. */
 fun prioritizeInstalledLanguages(languages: List<LocalTranslationLanguage>, installed: List<LocalTranslationLanguage>) =
@@ -21,8 +21,9 @@ fun prioritizeInstalledLanguages(languages: List<LocalTranslationLanguage>, inst
 
 /** Accept old display-name preferences; new choices persist canonical language tags. */
 fun matchEngineLanguage(value: String?, languages: List<LocalTranslationLanguage>): LocalTranslationLanguage? =
+    languages.firstOrNull { value.equals(it.tag, true) } ?:
     languages.firstOrNull { candidate ->
-        value.equals(candidate.tag, true) || value.equals(candidate.nativeName, true) ||
+        value.equals(candidate.nativeName, true) ||
             listOf(Locale.SIMPLIFIED_CHINESE, Locale.ENGLISH, Locale.getDefault()).any { locale ->
                 platformLanguageNames(candidate, locale).toList().any { value.equals(it, true) }
             }

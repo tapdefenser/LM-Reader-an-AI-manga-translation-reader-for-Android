@@ -124,19 +124,22 @@ class ScreenTranslationController(private val container: AppContainer) {
     private val textCache = java.util.concurrent.ConcurrentHashMap<List<String>, WorkflowValue>()
     private val owner = "screen-translation"
     private data class EngineRequest(val wanted: Boolean = false, val revision: Long = 0)
-    private data class EngineInput(val settings: ScreenTranslationSettings, val workflow: TranslationWorkflow?, val profiles: List<ApiProfile>)
+    private data class EngineInput(val settings: ScreenTranslationSettings, val workflow: TranslationWorkflow?, val profiles: List<ApiProfile>,
+        val installedModels: List<String>)
     private val engineRequest = MutableStateFlow(EngineRequest())
     private var resumeContinuous = false
     internal fun appliedEngineSettings() = configuration
     internal fun appliedEngineWorkflow() = workflow
     init {
         scope.launch {
-            combine(preferences.settings, container.translationWorkflows.workflows, container.apiProfiles.profiles, engineRequest) { config, workflows, profiles, request ->
+            combine(preferences.settings, container.translationWorkflows.workflows, container.apiProfiles.profiles, engineRequest,
+                container.translationModels.installedPacks) { config, workflows, profiles, request, installed ->
                 val selected = workflows.firstOrNull { it.id == (config.translation.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
                 val ids = selected?.program?.withApiOverride(config.translation.apiProfileId)?.allNodes()
                     ?.filter { it.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM) }
                     ?.mapNotNull { (it.inputs["profile"] as? WorkflowExpression.Text)?.value }?.toSet().orEmpty()
-                request to EngineInput(config, selected, profiles.filter { it.id in ids })
+                request to EngineInput(config, selected, profiles.filter { it.id in ids },
+                    if (selected?.program?.uses(WorkflowKind.TRANSLATE) == true) installed.values.map { it.identity }.sorted() else emptyList())
             }.distinctUntilChanged().collect { (request, input) ->
                 if (request.wanted && state.value.started) refreshEngine(input)
             }
@@ -154,7 +157,8 @@ class ScreenTranslationController(private val container: AppContainer) {
     internal fun attach(service: ScreenTranslationService, projection: ProjectionScreenCapture?) {
         this.service = service; this.projection = projection
         val assist = ScreenAccessibilityService.instance.takeIf { preferences.settings.value.usesAccessibility }
-        overlay?.close(); overlay = ScreenOverlay(assist ?: service, assist != null, ::tap)
+        val host = assist ?: service
+        overlay?.close(); overlay = ScreenOverlay(host, assist != null, { openSettings(host) }, ::tap)
         frameBroker?.close(); frameBroker = ScreenFrameBroker(projection, { configuration ?: preferences.settings.value }, { overlay })
         projection?.onContentChanged = {
             frameBroker?.invalidate()
@@ -169,7 +173,7 @@ class ScreenTranslationController(private val container: AppContainer) {
         if (state.value.started && preferences.settings.value.usesAccessibility) {
             val assist = ScreenAccessibilityService.instance ?: return
             resumeContinuous = resumeContinuous || state.value.continuous
-            stopContinuous(preserveResume = true); overlay?.close(); overlay = ScreenOverlay(assist, true, ::tap); updateButton()
+            stopContinuous(preserveResume = true); overlay?.close(); overlay = ScreenOverlay(assist, true, { openSettings(assist) }, ::tap); updateButton()
             if (engineRequest.value.wanted) engineRequest.update { it.copy(revision = it.revision + 1) }
         }
     }
@@ -350,7 +354,8 @@ class ScreenTranslationController(private val container: AppContainer) {
                 frameBroker?.invalidate()
                 if (captureChanged) {
                     val assist = ScreenAccessibilityService.instance.takeIf { config.usesAccessibility }
-                    overlay?.close(); overlay = ScreenOverlay(assist ?: checkNotNull(service), assist != null, ::tap)
+                    val host = assist ?: checkNotNull(service)
+                    overlay?.close(); overlay = ScreenOverlay(host, assist != null, { openSettings(host) }, ::tap)
                 }
                 preparedOwner = pinOwner; ready = true
                 state.update { it.copy(engine = ScreenEngineState.READY, status = message(R.string.screen_translation_engine_loaded)) }; updateButton()

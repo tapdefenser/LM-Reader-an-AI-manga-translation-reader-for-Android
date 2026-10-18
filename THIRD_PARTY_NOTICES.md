@@ -8,6 +8,7 @@ This is a source/notice index, not a replacement for the original license texts 
 | Seg weights | Extracted from upstream v3.5.5 APK. Independent training origin/redistribution terms remain unverified; no MIT inference from the code. [Model notice](core/vision/src/main/assets/vision/notices/Models.txt) |
 | Paddle OCR weights/dictionaries | Official pinned PaddlePaddle model repositories, model-card Apache-2.0 declarations. [Notice](core/vision/src/main/assets/vision/notices/PaddleOCR-Apache-2.0.txt); hashes/URLs in [preparation script](tools/fetch_vision_models.py) |
 | Bergamot translator | MPL-2.0; pinned Android source and dependencies in [source lock](tools/translation_sources.lock.json). [Original license](core/translation/src/main/assets/translation/licenses/bergamot-LICENSE) |
+| NLLB-200 distilled 600M weights | Meta AI model, Xenova ONNX INT8 export; separately downloaded with a pinned revision and SHA-256 checks. CC-BY-NC-4.0. [Model attribution and license links](core/translation/src/main/assets/translation/licenses/NLLB-model-NOTICE.txt) |
 | Marian and ssplit | MIT, original dependency notices retained in [translation/licenses](core/translation/src/main/assets/translation/licenses) |
 | SentencePiece, Ruy, onnxjs, fmt, PCRE2 and other native dependencies | Individual Apache/MIT/BSD licenses, retained in the same directory; inspect the corresponding file |
 | Offline language packs | Downloaded/imported separately. Mozilla MPL-2.0 and community model-card declarations are preserved independently; see [pack protocol](docs/MODEL_PACKS.md) |

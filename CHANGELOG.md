@@ -1,5 +1,14 @@
 # Changelog / 更新记录
 
+## v0.1.10 - Multilingual offline translation and reader UI / 多语言离线机翻与阅读界面
+
+- 新增 NLLB-200 专用离线机翻，支持 202 个语言及文字选项，共用模型并提供 Hugging Face 和镜像下载源。
+- 屏幕翻译球长按打开设置并震动反馈，阅读器页码移除背景底片，横屏主菜单支持上下滑动。
+- Add dedicated NLLB-200 offline translation with 202 language/script choices, a shared model and Hugging Face/mirror downloads.
+- Long-press the screen-translation ball for settings and haptic feedback, remove the reader page-counter background and allow vertical scrolling of the landscape main menu.
+
+详见 [v0.1.10 中英发行说明 / Bilingual release notes](docs/releases/v0.1.10.md)。
+
 ## v0.1.9 - Continuous video translation / 视频连续翻译
 
 - 视频模式改为两张截图的有序缓冲，SEG 完成后接续截图，队首回填完成才释放容量，截图延时与后续 SEG 重叠计算。

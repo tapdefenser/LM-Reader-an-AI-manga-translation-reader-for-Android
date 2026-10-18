@@ -2,7 +2,7 @@
 <resources>
     <string name="local_mt_title">本地翻译引擎</string>
     <string name="local_mt_sources">下载源</string>
-    <string name="local_mt_backend">Bergamot 专用机翻 · 离线 CPU</string>
+    <string name="local_mt_backend">NLLB-200 / Bergamot · 离线专用机翻</string>
     <string name="local_mt_current_source">语言包按需下载。当前源：%1$s。</string>
     <string name="local_mt_loading">读取中</string>
     <string name="local_mt_download_lifetime">离开此页后下载可继续；系统结束进程后需手动继续。</string>
@@ -29,7 +29,7 @@
     <string name="local_mt_catalog_fallback">尚未获取当前源目录，正在显示内置目录和已安装包。</string>
     <string name="local_mt_search">搜索语言名称、语言代码或包名</string>
     <string name="local_mt_clear">清除</string>
-    <string name="local_mt_other_directions">其他直译方向</string>
+    <string name="local_mt_other_directions">多语言与直译模型</string>
     <string name="local_mt_no_packages">没有匹配的语言包</string>
     <string name="local_mt_result">离线译文</string>
     <string name="local_mt_close">关闭</string>
@@ -64,11 +64,16 @@
     <string name="local_mt_source_mirror">HF-Mirror 社区镜像</string>
     <string name="local_mt_source_custom">自定义源</string>
     <string name="local_mt_source_title">模型下载源</string>
+    <string name="local_mt_source_nllb_hf">NLLB-200 多语言直译 · Hugging Face</string>
+    <string name="local_mt_source_nllb_mirror">NLLB-200 多语言直译 · HF-Mirror</string>
+    <string name="local_mt_nllb_package">NLLB-200 · 多语言直译</string>
+    <string name="local_mt_nllb_catalog_summary">一个共享模型覆盖 %1$d 种语言／书写形式，支持彼此直接互译。</string>
+    <string name="local_mt_nllb_help">一次下载约 900 MB，供全部受支持的语言对共用。安装后优先使用 NLLB 直译，无需经英语中转；CPU 翻译更占内存，速度可能较慢。原有 Bergamot 包继续保留。NLLB 权重采用 CC-BY-NC-4.0 许可。</string>
     <string name="local_mt_custom_base">HTTP(S) 目录地址</string>
     <string name="local_mt_source_help">保存后可获取当前源的语言包列表。自定义源需提供 catalog.json。社区源可能转到海外 CDN；换源继续下载时会重取未完成文件。</string>
     <string name="local_mt_wifi_only">仅 Wi-Fi 下载</string>
     <string name="local_mt_save">保存</string>
-    <string name="local_mt_license_summary">Mozilla 模型：MPL-2.0；社区模型卡另标 CC-BY-4.0。保留原始来源与许可。</string>
+    <string name="local_mt_license_summary">NLLB 权重：CC-BY-NC-4.0；Mozilla 模型：MPL-2.0；Bergamot 社区模型卡另标 CC-BY-4.0。保留原始来源与许可。</string>
     <string name="local_mt_license_file">选择许可文件：%1$s</string>
     <string name="local_mt_cannot_open">无法打开导入文件</string>
 </resources>
