@@ -6,7 +6,7 @@ import org.json.JSONObject
 import java.io.File
 
 /** Independent positions for manga groups and chapter rows; a sort writes one order then drag can refine it. */
-class QueueOrderStore(private val file: File) {
+class QueueOrderStore(private val file: File, startPaused: Boolean = true) {
     private val atomic = AtomicFile(file)
     private var manga = mutableListOf<String>()
     private var translationGroups = mutableListOf<String>()
@@ -18,6 +18,9 @@ class QueueOrderStore(private val file: File) {
 
     init {
         reload()
+        // 每次进程启动都默认暂停翻译队列。进程可能被系统杀死或崩溃，重启后自动接着跑
+        // 会重复消耗资源，也让人以为任务一直在动；继续必须由用户显式发起。
+        if (startPaused) paused = true
     }
     @Synchronized fun reload() {
         manga.clear(); translationGroups.clear(); chapters.clear(); excluded.clear(); paused = false; scheduling = TranslationSchedulingPriority.RESOURCES

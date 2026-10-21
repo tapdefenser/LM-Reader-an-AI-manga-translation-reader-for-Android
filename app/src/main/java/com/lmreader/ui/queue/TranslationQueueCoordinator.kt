@@ -172,7 +172,8 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
                         failure = rows.firstOrNull { it.state == "FAILED" }?.failure))
                 }
             }
-            container.queueOrder.setPaused(false); _paused.value = false
+            // 启动时默认暂停：旧队列的暂停意图转成逐卡暂停后，不要把这次默认暂停清掉。
+            if(!inheritedPause) { container.queueOrder.setPaused(false); _paused.value = false }
             container.taskScheduler.poke()
             legacyReady.complete(Unit)
             dao.observeQueue().collect { _items.value = it; start() }
