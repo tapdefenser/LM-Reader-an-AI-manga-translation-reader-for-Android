@@ -10,8 +10,8 @@ import kotlinx.coroutines.sync.withLock
 /** Priority is inherited by workflow branches and HTTP retry attempts. */
 class InferencePriority(val rank: Int) : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<InferencePriority> {
-        val SCREEN = InferencePriority(2)
-        val READER = InferencePriority(1)
+        val SCREEN = InferencePriority(ResourceGovernor.SCREEN)
+        val READER = InferencePriority(ResourceGovernor.INTERACTIVE)
     }
 }
 

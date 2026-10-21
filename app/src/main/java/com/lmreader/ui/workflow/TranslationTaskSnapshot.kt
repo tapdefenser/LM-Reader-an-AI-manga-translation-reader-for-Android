@@ -37,15 +37,17 @@ fun translationTaskSnapshot(
     style: String,
     legacyRender: BubbleRenderSettings,
     apiProfiles: List<ApiProfile> = emptyList(),
+    allowMissingCapabilities: Boolean = false,
 ): String {
+    require(workflow.program.inputScenario == com.lmreader.core.model.WorkflowInputScenario.IMAGE) { "此入口需要图像工作流" }
     require(source.isNotBlank() && target.isNotBlank() && !settings.autoDetectSource)
     val program = workflow.program.withApiOverride(settings.apiProfileId)
     val validation = WorkflowValidator.validate(program)
     require(validation.valid) { validation.issues.joinToString("；") { it.message } }
-    if (program.usesApi()) require(apiProfiles.isNotEmpty()) { "工作流需要 API 配置" }
+    if (program.usesApi() && !allowMissingCapabilities) require(apiProfiles.isNotEmpty()) { "工作流需要 API 配置" }
     val usedIds = program.allNodes().filter { it.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM) }.map { node ->
         val id = (node.inputs["profile"] as? WorkflowExpression.Text)?.value ?: error("API 配置必须明确选择")
-        ApiProtocol.validate(apiProfiles.firstOrNull { it.id == id } ?: error("API 配置不存在，请重新选择"))
+        if(!allowMissingCapabilities) ApiProtocol.validate(apiProfiles.firstOrNull { it.id == id } ?: error("API 配置不存在，请重新选择"))
         id
     }.toSet()
     val render = settings.effectiveBubbleRender(legacyRender)

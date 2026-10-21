@@ -3,7 +3,7 @@ package com.lmreader.core.model
 /** Stable identities, lexical scopes and typed data: persisted programs contain no executable source. */
 enum class WorkflowKind { MANGA, CHAPTERS, PAGES, PREPARE_MANGA, EACH, IF, DECLARE, SET, SEG, OCR, TRANSLATE, API, API_STREAM, APPLY_TRANSLATIONS, APPLY_ORDER, APPEND, MERGE_LIST, REPLACE, MESSAGE, MERGE_GLOSSARY, RETURN }
 enum class WorkflowMode { SYNC, ASYNC }
-enum class WorkflowDataKind { TEXT, NUMBER, BOOLEAN, IMAGE, BUBBLE, CONTEXT, LIST, RECORD, DICTIONARY }
+enum class WorkflowDataKind { TEXT, NUMBER, BOOLEAN, IMAGE, AUDIO, BUBBLE, CONTEXT, LIST, RECORD, DICTIONARY }
 
 data class WorkflowType(val kind: WorkflowDataKind, val element: WorkflowType? = null,
     val fields: Map<String, WorkflowType> = emptyMap()) {
@@ -12,6 +12,7 @@ data class WorkflowType(val kind: WorkflowDataKind, val element: WorkflowType? =
         val NUMBER = WorkflowType(WorkflowDataKind.NUMBER)
         val BOOLEAN = WorkflowType(WorkflowDataKind.BOOLEAN)
         val IMAGE = WorkflowType(WorkflowDataKind.IMAGE)
+        val AUDIO = WorkflowType(WorkflowDataKind.AUDIO)
         val CONTEXT = WorkflowType(WorkflowDataKind.CONTEXT)
         val DICTIONARY = WorkflowType(WorkflowDataKind.DICTIONARY)
         val BUBBLE = WorkflowType(WorkflowDataKind.BUBBLE, fields = linkedMapOf(
@@ -55,13 +56,20 @@ data class WorkflowNode(
     }
     companion object { const val MAX_PARALLEL = 8 }
 }
-data class WorkflowProgram(val version: Int = 1, val rows: List<WorkflowNode>) {
+enum class WorkflowInputScenario { IMAGE, TIMED_TEXT }
+data class WorkflowProgram(val version: Int = 1, val rows: List<WorkflowNode>,
+    val inputScenario: WorkflowInputScenario = WorkflowInputScenario.IMAGE) {
     fun allNodes(): List<WorkflowNode> = rows.flatMap { node -> listOf(node) + WorkflowProgram(rows = node.children).allNodes() + WorkflowProgram(rows = node.otherwise).allNodes() }
     fun uses(kind: WorkflowKind) = allNodes().any { it.kind == kind }
     fun usesApi() = uses(WorkflowKind.API) || uses(WorkflowKind.API_STREAM)
 }
 
 object WorkflowSystem {
+    const val TEXT_ENTRIES = "builtin.textEntries"
+    val subtitleType = WorkflowType(WorkflowDataKind.RECORD, fields = linkedMapOf("id" to WorkflowType.TEXT,
+        "source" to WorkflowType.TEXT, "translation" to WorkflowType.TEXT, "startMs" to WorkflowType.NUMBER, "endMs" to WorkflowType.NUMBER))
+    const val CURRENT_AUDIO = "builtin.currentAudio"
+    const val CURRENT_IMAGE = "builtin.currentSentenceImage"
     const val SOURCE = "builtin.sourceLanguage"
     const val TARGET = "builtin.targetLanguage"
     const val STYLE = "builtin.style"
@@ -90,7 +98,7 @@ object WorkflowTemplates {
         val chapter = WorkflowNode("chapters", WorkflowKind.CHAPTERS, children = listOf(page))
         return WorkflowProgram(rows = listOf(WorkflowNode("manga", WorkflowKind.MANGA, children = listOf(chapter))))
     }
-    fun localMachine(engine: TranslationModelEngine = TranslationModelEngine.BERGAMOT): WorkflowProgram {
+    fun localMachine(): WorkflowProgram {
         val bubble = WorkflowVariable(WorkflowSystem.BUBBLE, "气泡", WorkflowType.BUBBLE)
         val steps = listOf(
             WorkflowNode("seg", WorkflowKind.SEG, target = WorkflowRef(WorkflowSystem.PAGE, listOf("bubbles")),
@@ -101,8 +109,7 @@ object WorkflowTemplates {
                         inputs = mapOf("image" to WorkflowSystem.ref(bubble.id, "image"), "language" to WorkflowSystem.ref(WorkflowSystem.SOURCE))),
                     WorkflowNode("translate", WorkflowKind.TRANSLATE, target = WorkflowRef(bubble.id, listOf("translation")), inputs = mapOf(
                         "text" to WorkflowSystem.ref(bubble.id, "source"), "source" to WorkflowSystem.ref(WorkflowSystem.SOURCE),
-                        "target" to WorkflowSystem.ref(WorkflowSystem.TARGET)) +
-                        if (engine == TranslationModelEngine.BERGAMOT) emptyMap() else mapOf("engine" to WorkflowExpression.Text(engine.name))))))
+                        "target" to WorkflowSystem.ref(WorkflowSystem.TARGET))))))
         return blank().copy(rows = listOf(blank().rows.single().copy(children = listOf(
             blank().rows.single().children.single().copy(children = listOf(WorkflowNode("pages", WorkflowKind.PAGES, children = steps)))))))
     }

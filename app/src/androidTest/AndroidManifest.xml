@@ -2,6 +2,7 @@
     <application>
         <activity android:name="com.lmreader.screen.ScreenFixtureActivity" android:exported="true" android:label="Screen translation fixture" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
         <activity android:name="com.lmreader.reliability.FaultGrantActivity" android:exported="true" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity android:name="com.lmreader.ui.video.SubtitleReceiverActivity" android:exported="true" android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <provider android:name="com.lmreader.reliability.FaultDocumentsProvider"
             android:authorities="com.lmreader.test.reliability.documents" android:exported="true"
             android:permission="android.permission.MANAGE_DOCUMENTS"

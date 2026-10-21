@@ -38,57 +38,24 @@ class TaskNotifications(private val container: AppContainer) {
         else Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
     fun start() {
         if(observing) return
-        observing = true; renderer.ensureChannel()
-        val queue = container.translationQueue
-        val translations = combine(queue.items, queue.paused, queue.priorityPage, queue.orderRevision) { rows, paused, priority, _ ->
-            TranslationInput(queue.ordered(rows), paused, priority)
-        }
-        val exports = combine(container.exportQueue.tasks, container.exportQueue.paused, ::ExportInput)
-        val engines = combine(queue.activeSeg, queue.activeOcr, queue.activeApi, container.taskService.leases, container.taskService.failure, ::Engines)
+        observing=true;renderer.ensureChannel()
+        container.translationQueue; container.exportQueue; container.readerPageTasks; container.videoTasks
         container.backgroundScope.launch(Dispatchers.Main.immediate) {
-            combine(translations, exports, engines) { t, e, a -> Triple(t, e, a) }.collect { (t, e, a) ->
-                try {
-                    val raw = previousTranslations
-                    previousTranslations = t.rows
-                    val removed = raw.filter { old -> t.rows.none { it.chapterId == old.chapterId && it.targetLanguage == old.targetLanguage } }
-                    val terminal = if(removed.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
-                        container.database.translationDao().byChapters(removed.map { it.chapterId }.distinct()).filter { item ->
-                            removed.any { it.chapterId == item.chapterId && it.targetLanguage == item.targetLanguage }
-                        }
-                    }
-                    val rows = t.rows + terminal
-                    val primary = rows.firstOrNull { it.state == "RUNNING" } ?: rows.firstOrNull { it.state == "PENDING" }
-                        ?: rows.firstOrNull { it.state == "PAUSED" } ?: rows.firstOrNull { it.state in setOf("FAILED", "INTERRUPTED") } ?: terminal.lastOrNull()
-                    val metadataRows = rows.filter { it.state == "RUNNING" } + listOfNotNull(primary).filter { it.state != "RUNNING" }
-                    for(row in metadataRows) {
-                        if(metadataRevision[row.chapterId] != row.updatedAt) withContext(Dispatchers.IO) {
-                            val chapter = container.database.chapterDao().getById(row.chapterId)
-                            val manga = mangaNames[row.mangaId] ?: container.mangaRepository.getCards(listOf(row.mangaId)).firstOrNull()?.displayName.orEmpty()
-                            mangaNames[row.mangaId] = manga
-                            chapterMetadata[row.chapterId] = TaskNoticeItem(row.chapterId, row.state, manga, chapter?.title.orEmpty(), total = chapter?.pageCount ?: 0)
-                            metadataRevision[row.chapterId] = row.updatedAt
-                        }
-                    }
-                    val translated = rows.map { row -> (chapterMetadata[row.chapterId] ?: TaskNoticeItem(row.chapterId, row.state)).copy(
-                        id = row.chapterId + ":" + row.targetLanguage, state = row.state, completed = row.translatedCount, error = row.failure) }
-                    val exported = e.rows.map { TaskNoticeItem(it.id, it.state, it.mangaTitle, it.chapterTitle, it.completedPages, it.totalPages, it.failure) }
-                    val tNotice = translation.update(translated, t.paused, t.priority)?.let { state -> state.copy(seg = if(state.working) a.seg else 0, ocr = if(state.working) a.ocr else 0, api = if(state.working) a.api else 0,
-                        item = if(a.failure != null && state.phase in setOf(TaskNoticePhase.PAUSED, TaskNoticePhase.PAUSING)) state.item.copy(error = a.failure) else state.item) }
-                    val eNotice = export.update(exported, e.paused)
-                    val next = listOfNotNull(tNotice, eNotice).associateBy { it.queue }
-                    val important = next.mapValues { it.value.phase } != _notices.value.mapValues { it.value.phase } ||
-                        summaryKey?.second != (a.leases > 0)
-                    _notices.value = next
-                    delayedPublish?.cancel()
-                    val remaining = (1000L - (SystemClock.elapsedRealtime() - lastPublish)).coerceAtLeast(0)
-                    if(important || remaining == 0L) publish()
-                    else delayedPublish = launch { delay(remaining); publish() }
-                    val retained = (t.rows + terminal).map { it.chapterId }.toSet()
-                    chapterMetadata.keys.retainAll(retained); metadataRevision.keys.retainAll(retained)
-                    mangaNames.keys.retainAll(rows.map { it.mangaId }.toSet())
-                } catch(cancelled: CancellationException) { throw cancelled }
-                catch(error: Exception) { android.util.Log.e("TaskNotifications", "Unable to update task notification", error) }
-            }
+            combine(container.taskScheduler.tasks,container.taskService.leases) { rows,leases -> rows to leases }
+                .collect { (rows,leases) ->
+                    val primary=rows.filter {it.parentTaskId==null && it.type!="MEDIA_SCAN"}
+                    fun item(row:com.lmreader.core.database.tasks.TaskRecord)=TaskNoticeItem(row.taskId,when(row.state) {
+                        "QUEUED"->"PENDING";"SUCCEEDED"->"DONE";"WAITING"->"PAUSED";else->row.state
+                    },row.title,row.waitingReason?.let(::waitingReasonLabel) ?: row.stage,
+                        row.completed.coerceIn(0,Int.MAX_VALUE.toLong()).toInt(),row.total.coerceIn(0,Int.MAX_VALUE.toLong()).toInt(),row.failure)
+                    val next=listOfNotNull(
+                        translation.update(primary.filter {it.isTranslation()}.map(::item),false),
+                        export.update(primary.filter {it.type.contains("EXPORT")}.map(::item),container.exportQueue.paused.value)).associateBy {it.queue}
+                    val important=next.mapValues {it.value.phase}!=_notices.value.mapValues {it.value.phase} || summaryKey?.second!=(leases>0)
+                    _notices.value=next;delayedPublish?.cancel()
+                    val remaining=(1000L-(SystemClock.elapsedRealtime()-lastPublish)).coerceAtLeast(0)
+                    if(important || remaining==0L) publish() else delayedPublish=launch {delay(remaining);publish()}
+                }
         }
     }
     /** Called on a permission grant/return from settings, even when progress has not changed. */

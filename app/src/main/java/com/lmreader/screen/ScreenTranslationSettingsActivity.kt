@@ -145,7 +145,8 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
                     settings.regionPresets.map { if (it.name == selection.name) selection else it }) else applied
             }; showRegions = false }, dismiss = { showRegions = false })
     }
-    val workflow = workflows.firstOrNull { it.id == (t.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
+    val workflow = workflows.firstOrNull { it.id == t.workflowId }
+        ?: TranslationWorkflow.LOCAL_MACHINE.takeIf { TranslationWorkflow.isDefaultSelection(t.workflowId) }
     val local = workflow?.program?.uses(WorkflowKind.TRANSLATE) != false
     val catalog = remember(installed, workflow?.program) { TranslationModelCatalog.fromPacks(installed.values.toList()).forWorkflow(workflow?.program) }
     val locale = androidx.compose.ui.platform.LocalConfiguration.current.locales[0]
@@ -180,7 +181,7 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             }
             if (pending > 0) OutlinedButton(onClick = controller::retryPendingFrame, enabled = state.started && state.engine == ScreenEngineState.READY && !state.busy) { Text("重试失败画面（$pending）") }
             Text("暂停翻译队列可降低屏幕翻译等待时间。屏幕翻译沿用队列选择的调度策略。", style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(onClick = { container.translationQueue.pause() }) { Text("暂停翻译队列") }
+            OutlinedButton(onClick = { container.backgroundScope.launch { com.lmreader.tasks.TranslationQueueController(container).pauseAll() } }) { Text("暂停翻译队列") }
             if (state.timing.isNotBlank()) {
                 Text(state.timing, style = MaterialTheme.typography.bodySmall)
                 Text("各步骤显示累计耗时，并行运行时不能直接相加。", style = MaterialTheme.typography.bodySmall)
@@ -216,7 +217,7 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             OutlinedButton(onClick = ::openAccessibilitySettings) { Text("打开系统无障碍设置") }
             if (config.requiresAccessibility && !accessibilityAvailable) Text("请先启用无障碍辅助，再启动连续翻译。", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider()
-            ScreenChoice("翻译工作流", workflow?.name ?: "重新选择工作流", workflows.map { it.id to it.name }) { id -> translation { it.copy(workflowId = id) } }
+            ScreenChoice("翻译工作流", workflow?.name ?: "重新选择工作流", workflows.filter { it.program.inputScenario == WorkflowInputScenario.IMAGE }.map { it.id to it.name }) { id -> translation { it.copy(workflowId = id) } }
             if (workflow?.program?.usesApi() == true) ScreenChoice("选择 API", profiles.firstOrNull { it.id == t.apiProfileId }?.name ?: "跟随工作流默认",
                 listOf("" to "跟随工作流默认") + profiles.map { it.id to it.name }) { id -> translation { it.copy(apiProfileId = id.ifBlank { null }) } }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

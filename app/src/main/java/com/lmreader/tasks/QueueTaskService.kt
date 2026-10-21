@@ -38,15 +38,19 @@ class QueueTaskService : Service() {
         // Re-promote and acknowledge every start, including reused service instances.
         if (!promote()) return START_NOT_STICKY
         when(intent?.action) {
-            TaskNotificationRenderer.action(TaskQueue.TRANSLATION, false) -> container.translationQueue.pause()
-            TaskNotificationRenderer.action(TaskQueue.EXPORT, false) -> container.exportQueue.pauseAll()
+            TaskNotificationRenderer.action(TaskQueue.TRANSLATION, false) -> scope.launch { TranslationQueueController(container).pauseAll() }
+            TaskNotificationRenderer.action(TaskQueue.EXPORT, false) -> scope.launch {
+                container.exportQueue.pauseAll()
+                container.taskScheduler.tasks.value.filter { it.type == "VIDEO_EXPORT" && it.state !in TaskScheduler.TERMINAL }
+                    .forEach { container.taskScheduler.pause(it.taskId, pauseReason = "EXPORT_NOTIFICATION") }
+            }
             TaskNotificationRenderer.action(TaskQueue.TRANSLATION, true) -> {
                 resumeNotification(TaskQueue.TRANSLATION)
             }
             TaskNotificationRenderer.action(TaskQueue.EXPORT, true) -> {
                 resumeNotification(TaskQueue.EXPORT)
             }
-            PAUSE -> { container.translationQueue.pause(); container.exportQueue.pauseAll() }
+            PAUSE -> scope.launch { TranslationQueueController(container).pauseAll() }
         }
         if (!observing) {
             observing = true
@@ -80,19 +84,32 @@ class QueueTaskService : Service() {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val lease = container.taskService.acquire()
             try {
-                if(queue == TaskQueue.TRANSLATION) container.translationQueue.resumePaused().join()
-                else container.exportQueue.resumeAll()
+                if(queue == TaskQueue.TRANSLATION) TranslationQueueController(container).continueAll()
+                else {
+                    container.exportQueue.resumeAll()
+                    container.exportQueue.awaitControlJobs()
+                    container.taskScheduler.tasks.value.filter { it.type == "VIDEO_EXPORT" && it.pauseReason == "EXPORT_NOTIFICATION" }
+                        .forEach { container.taskScheduler.resume(it.taskId, onlyPauseReason = "EXPORT_NOTIFICATION") }
+                }
             } finally { container.taskService.release(lease) }
         }
     }
     private fun promote(): Boolean {
         return try {
-            ServiceCompat.startForeground(this, TaskNotificationRenderer.FOREGROUND_ID,
-                container.taskNotifications.renderer.summary(container.taskNotifications.notices.value.values, true), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            val notification = container.taskNotifications.renderer.summary(container.taskNotifications.notices.value.values, true)
+            val types = if (android.os.Build.VERSION.SDK_INT >= 35 && container.taskService.mediaProcessingActive)
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING or (if(container.taskService.dataSyncActive) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0)
+                else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            // ServiceCompat's API 34 mask excludes MEDIA_PROCESSING (0x2000), even on
+            // newer platforms. A media-only lease would consequently become TYPE_NONE.
+            if (android.os.Build.VERSION.SDK_INT >= 35) startForeground(TaskNotificationRenderer.FOREGROUND_ID, notification, types)
+            else ServiceCompat.startForeground(this, TaskNotificationRenderer.FOREGROUND_ID, notification, types)
             container.taskService.serviceReady(this); true
         } catch (error: Exception) {
+            android.util.Log.e("LMReaderTasks", "Foreground task service promotion failed", error)
             startupFailed = true; container.taskService.failStartup(error); stopSelf(); false
         }
     }
+    internal fun refreshForegroundTypes() { if(!startupFailed) promote() }
     companion object { private const val PAUSE = "com.lmreader.tasks.PAUSE" }
 }

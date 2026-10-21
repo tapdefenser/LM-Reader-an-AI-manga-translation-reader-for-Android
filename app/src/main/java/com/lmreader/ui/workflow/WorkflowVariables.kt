@@ -43,6 +43,7 @@ internal fun variableColor(type: WorkflowType): Color {
         WorkflowDataKind.NUMBER -> if(dark) Color(0xFFFFBF82) else Color(0xFF934700)
         WorkflowDataKind.BOOLEAN -> if(dark) Color(0xFFFF99AC) else Color(0xFFA32B48)
         WorkflowDataKind.IMAGE -> if(dark) Color(0xFFB9AAFF) else Color(0xFF6742A8)
+        WorkflowDataKind.AUDIO -> if(dark) Color(0xFFA5D9FF) else Color(0xFF226C98)
         WorkflowDataKind.BUBBLE -> if(dark) Color(0xFFF0A5FA) else Color(0xFF8C368D)
         WorkflowDataKind.CONTEXT -> if(dark) Color(0xFF9ADDD4) else Color(0xFF006C61)
         WorkflowDataKind.LIST -> if(dark) Color(0xFFA6D98F) else Color(0xFF396B22)

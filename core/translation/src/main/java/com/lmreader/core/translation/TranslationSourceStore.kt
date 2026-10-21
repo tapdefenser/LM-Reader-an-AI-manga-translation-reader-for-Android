@@ -13,7 +13,7 @@ class TranslationSourceStore(context: Context) {
     val settings = store.data.map { prefs -> TranslationSourceSettings(
         TranslationDownloadSource.fromStoredValue(prefs[SOURCE]),
         prefs[BASE] ?: "", prefs[WIFI] ?: true,
-        prefs[ENGINE]?.let { runCatching { TranslationModelEngine.valueOf(it) }.getOrNull() } ?: TranslationModelEngine.BERGAMOT,
+        TranslationModelEngine.fromStoredValueOrDefault(prefs[ENGINE]),
     ) }
     suspend fun save(settings: TranslationSourceSettings) {
         val base = if (settings.source == TranslationDownloadSource.CUSTOM) TranslationModelCatalog.validateCustomBase(settings.customBaseUrl) else settings.customBaseUrl.trim()

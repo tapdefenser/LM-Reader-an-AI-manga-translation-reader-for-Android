@@ -39,7 +39,32 @@ class WorkflowPageFailureIsolationTest {
         assertTrue("p2" in host.closed)
     }
 
-    private class Host(private val handleFailure: Boolean = true) : WorkflowRuntimeHost {
+    @Test fun restartEscapesSerialAndParallelPageAndCollectedPageWorkers() = runTest {
+        for(mode in WorkflowMode.entries) for(base in listOf(WorkflowTemplates.localMachine(), WorkflowReferenceTemplates.fullManga("fixture"))) {
+            fun update(node: WorkflowNode): WorkflowNode = node.copy(mode = mode,
+                children = node.children.map(::update), otherwise = node.otherwise.map(::update))
+            val host = Host(restartOnPublish = true)
+            assertFailsWith<WorkflowRestartRequested> { WorkflowRuntime().execute(base.copy(rows = base.rows.map(::update)), host) }
+            assertTrue("p2" in host.closed)
+            assertTrue(host.failed.isEmpty(), "A restart is a control command, not a failed page")
+        }
+    }
+
+    @Test fun restartEscapesLegacyPreparationWorkers() = runTest {
+        for(mode in WorkflowMode.entries) {
+            val program = WorkflowEditing.update(WorkflowReferenceTemplates.fullManga("fixture"), "prepare-manga") {
+                it.copy(kind = WorkflowKind.PREPARE_MANGA, mode = mode, variable = null,
+                    inputs = emptyMap(), collectTo = null, target = WorkflowRef("manga-originals"))
+            }
+            val host = Host(restartOnAdmission = true)
+            assertFailsWith<WorkflowRestartRequested> { WorkflowRuntime().execute(program, host) }
+            assertTrue("p2" in host.closed)
+            assertTrue(host.failed.isEmpty(), "Preparation must not consume a restart as a page failure")
+        }
+    }
+
+    private class Host(private val handleFailure: Boolean = true, private val restartOnPublish: Boolean = false,
+        private val restartOnAdmission: Boolean = false) : WorkflowRuntimeHost {
         override val manga = record("id" to text("m"), "name" to text("m"))
         override val sourceLanguage = "en"
         override val targetLanguage = "zh-Hans"
@@ -64,7 +89,7 @@ class WorkflowPageFailureIsolationTest {
                 WorkflowKind.SEG -> list(listOf(record("id" to text("$id:1"), "index" to number(1),
                     "image" to WorkflowValue.Image("$id:1"), "source" to text(""), "translation" to text(""),
                     "confidence" to number(1), "kind" to text("FREE_TEXT"))))
-                WorkflowKind.OCR -> { if (id == "p2") error("Damaged page fixture"); text("Original $id") }
+                WorkflowKind.OCR -> { if (id == "p2" && !restartOnPublish) error("Damaged page fixture"); text("Original $id") }
                 WorkflowKind.TRANSLATE -> text("Translated $id")
                 else -> error("unused $kind")
             }
@@ -87,6 +112,7 @@ class WorkflowPageFailureIsolationTest {
             return records
         }
         override suspend fun admitPage(frame: WorkflowFrame, job: Job): WorkflowPageAdmission {
+            if(restartOnAdmission && frame.identity(WorkflowSystem.PAGE) == "p2") throw WorkflowRestartRequested()
             prepared[frame.identity(WorkflowSystem.PAGE)]?.let { frame.define(WorkflowSystem.PAGE, it, WorkflowSystem.pageType) }
             return WorkflowPageAdmission.RUN
         }
@@ -95,7 +121,11 @@ class WorkflowPageFailureIsolationTest {
             apiPages = items.map { ((it as WorkflowValue.Record).fields.getValue("pageId") as WorkflowValue.Text).value }
             return list(items.map { (it as WorkflowValue.Record).copy(fields = it.fields + ("translation" to text("Translated"))) })
         }
-        override suspend fun publishPage(frame: WorkflowFrame) { published += frame.identity(WorkflowSystem.PAGE)!! }
+        override suspend fun publishPage(frame: WorkflowFrame) {
+            val id = frame.identity(WorkflowSystem.PAGE)!!
+            if(id == "p2" && restartOnPublish) throw WorkflowRestartRequested()
+            published += id
+        }
         override suspend fun closePage(frame: WorkflowFrame) { closed += frame.identity(WorkflowSystem.PAGE)!! }
         override suspend fun chapterFinished(frame: WorkflowFrame, complete: Boolean) {
             finished += complete

@@ -31,6 +31,17 @@ class TranslationModelCatalogTest {
         val invalid = JsonObject(previous + ("packages" to JsonArray(listOf(unsupported))))
         assertThrows(IllegalArgumentException::class.java) { TranslationModelCatalog(invalid.toString()) }
     }
+    @Test fun removedOpusPackagesAreIgnoredWithoutReinterpretingThemAsBergamot() {
+        val supported = catalog.pack("ja-en")
+        val supportedJson = TranslationModelCatalog.packJson(supported)
+        val opus = JsonObject(supportedJson + ("id" to JsonPrimitive("legacy-opus")) + ("engine" to JsonPrimitive("OPUS_MT")))
+        fun root(packages: List<JsonObject>) = buildJsonObject {
+            put("schema", 3); put("engine", "local-nmt-v1")
+            putJsonArray("packages") { packages.forEach { add(it) } }
+        }
+        assertEquals(listOf(supported), TranslationModelCatalog(root(listOf(supportedJson, opus)).toString()).packs)
+        assertThrows(IllegalArgumentException::class.java) { TranslationModelCatalog(root(listOf(opus)).toString()) }
+    }
     @Test fun allSupportedRoutesHaveCorrectDirectionAndSharedEnglishPivot() {
         val c = catalog
         c.languages.forEach { source -> c.languages.forEach { target ->

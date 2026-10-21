@@ -30,8 +30,7 @@ class RemoteTranslationCatalog(private val client: OkHttpClient = OkHttpClient.B
     private val endpoints: TranslationCatalogEndpoints = TranslationCatalogEndpoints()) {
     suspend fun fetch(settings: TranslationSourceSettings): TranslationModelCatalog = withContext(Dispatchers.IO) {
         withTimeout(120_000) {
-            val packs = if (settings.engine == TranslationModelEngine.OPUS_MT && settings.source != TranslationDownloadSource.CUSTOM)
-                opus(settings) else when(settings.source) {
+            val packs = when(settings.source) {
                 TranslationDownloadSource.MOZILLA -> mozilla()
                 TranslationDownloadSource.HUGGING_FACE -> huggingFace(endpoints.huggingFace)
                 TranslationDownloadSource.HF_MIRROR -> huggingFace(endpoints.hfMirror)
@@ -39,13 +38,6 @@ class RemoteTranslationCatalog(private val client: OkHttpClient = OkHttpClient.B
             }
             TranslationModelCatalog.fromPacks(packs,settings,System.currentTimeMillis())
         }
-    }
-
-    private suspend fun opus(settings: TranslationSourceSettings): List<TranslationModelPack> {
-        require(settings.source in setOf(TranslationDownloadSource.HUGGING_FACE, TranslationDownloadSource.HF_MIRROR))
-        val host = if (settings.source == TranslationDownloadSource.HF_MIRROR) endpoints.hfMirror else endpoints.huggingFace
-        val base = TranslationModelCatalog.validateCustomBase(host)
-        return RemoteOpusCatalog(base) { json(it).first }.fetch()
     }
 
     private suspend fun mozilla(): List<TranslationModelPack> = coroutineScope {

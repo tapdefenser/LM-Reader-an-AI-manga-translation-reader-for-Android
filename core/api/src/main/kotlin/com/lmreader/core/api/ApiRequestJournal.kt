@@ -5,7 +5,7 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.serialization.json.*
 
 data class ApiTraceContext(val mangaId: String = "", val mangaName: String = "配置测试",
-    val chapterName: String = "", val pageName: String = "", val stepName: String = "") : AbstractCoroutineContextElement(Key) {
+    val chapterName: String = "", val pageName: String = "", val stepName: String = "", val publicationKey: String = "*") : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<ApiTraceContext>
 }
 
@@ -27,7 +27,14 @@ interface ApiRequestJournal {
 object ApiLogPayload {
     fun sanitize(text: String): String {
         fun clean(value: JsonElement, key: String = ""): JsonElement = when(value) {
-            is JsonObject -> JsonObject(value.mapValues { (k, v) -> clean(v, k) })
+            is JsonObject -> {
+                val audio = (value["format"] as? JsonPrimitive)?.content == "wav" ||
+                    (value["mimeType"] as? JsonPrimitive)?.content?.startsWith("audio/") == true
+                JsonObject(value.mapValues { (k, v) ->
+                    if(audio && k == "data" && v is JsonPrimitive && v.isString)
+                        JsonPrimitive("[音频附件：约 ${v.content.length * 3 / 4} 字节]") else clean(v, k)
+                })
+            }
             is JsonArray -> JsonArray(value.map { clean(it) })
             is JsonPrimitive -> {
                 val content = value.content

@@ -57,10 +57,13 @@ class TaskNotificationsIntegrationTest {
     }
     @Test fun actualNotificationButtonsControlOnlyTheirOwnQueue() = runBlocking {
         val container = AppContainer.from(context)
-        container.startupReady.await()
+        container.startupReady.await(); container.translationQueue.awaitReady()
         val oldT = container.translationQueue.paused.value; val oldE = container.exportQueue.paused.value
         container.taskService.setVisible(true); container.taskService.allowRetry()
-        container.translationQueue.resume(); container.exportQueue.resumeAll()
+        container.translationQueue.clearQueuePauseIntent(); container.exportQueue.resumeAll()
+        val token = "notification-card-${UUID.randomUUID()}"
+        val task = container.taskScheduler.submit("VIDEO", token, token, token,
+            org.json.JSONObject().put("videoId", token).toString())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val acquired = CompletableDeferred<Unit>()
         val holder = scope.launch {
@@ -71,21 +74,26 @@ class TaskNotificationsIntegrationTest {
             withTimeout(15_000) { acquired.await() }
             val renderer = container.taskNotifications.renderer
             fun card(queue: TaskQueue, phase: TaskNoticePhase) = renderer.queue(TaskNotice(queue, phase, TaskNoticeItem("generated", "RUNNING"), 1))
+            suspend fun awaitState(state: String) = withTimeout(5000) {
+                while(container.workDatabase.tasks().get(task.taskId)?.state != state) delay(30)
+            }
             card(TaskQueue.TRANSLATION, TaskNoticePhase.RUNNING).actions.first().actionIntent.send()
-            withTimeout(5000) { while(!container.translationQueue.paused.value) delay(50) }
+            awaitState("PAUSED")
             assertFalse(container.exportQueue.paused.value)
             container.taskService.setVisible(false)
             card(TaskQueue.TRANSLATION, TaskNoticePhase.PAUSED).actions.first().actionIntent.send()
-            withTimeout(5000) { while(container.translationQueue.paused.value) delay(50) }
+            awaitState("QUEUED")
             assertFalse(container.exportQueue.paused.value)
             card(TaskQueue.EXPORT, TaskNoticePhase.RUNNING).actions.first().actionIntent.send()
             withTimeout(5000) { while(!container.exportQueue.paused.value) delay(50) }
-            assertFalse(container.translationQueue.paused.value)
+            assertEquals("QUEUED", container.workDatabase.tasks().get(task.taskId)?.state)
             card(TaskQueue.EXPORT, TaskNoticePhase.PAUSED).actions.first().actionIntent.send()
             withTimeout(5000) { while(container.exportQueue.paused.value) delay(50) }
+            assertEquals("QUEUED", container.workDatabase.tasks().get(task.taskId)?.state)
         } finally {
+            container.taskScheduler.pause(task.taskId, cancel = true)
             holder.cancelAndJoin(); scope.cancel()
-            if(oldT) container.translationQueue.pause() else container.translationQueue.resume()
+            if(oldT) container.translationQueue.pause() else container.translationQueue.clearQueuePauseIntent()
             if(oldE) container.exportQueue.pauseAll() else container.exportQueue.resumeAll()
             container.taskService.setVisible(false)
         }

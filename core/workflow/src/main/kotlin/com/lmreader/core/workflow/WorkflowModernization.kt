@@ -4,6 +4,20 @@ import com.lmreader.core.model.*
 
 /** Saved queue snapshots remain executable; editable files use the smaller current vocabulary. */
 object WorkflowModernization {
+    /** Old MERGE_LIST text concatenation is exactly APPEND, including saved queue snapshots. */
+    fun migrateTextMerges(program: WorkflowProgram): WorkflowProgram {
+        if (!program.uses(WorkflowKind.MERGE_LIST)) return program
+        val scopes = WorkflowValidator.validate(program).scopes
+        fun row(node: WorkflowNode): WorkflowNode {
+            val target = node.target
+            val type = target?.let { ref -> scopes[node.id].orEmpty().lastOrNull { it.variable.id == ref.variableId }
+                ?.variable?.type?.let { WorkflowReferencePaths.resolve(it, ref.path)?.type } }
+            return node.copy(kind = if (node.kind == WorkflowKind.MERGE_LIST && type == WorkflowType.TEXT) WorkflowKind.APPEND else node.kind,
+                children = node.children.map(::row), otherwise = node.otherwise.map(::row))
+        }
+        return program.copy(rows = program.rows.map(::row))
+    }
+
     fun apply(program: WorkflowProgram): WorkflowProgram {
         fun row(n: WorkflowNode): WorkflowNode {
             var changed = n.copy(children = n.children.map(::row), otherwise = n.otherwise.map(::row))
@@ -17,6 +31,6 @@ object WorkflowModernization {
             }
             return changed
         }
-        return program.copy(rows = program.rows.map(::row))
+        return migrateTextMerges(program.copy(rows = program.rows.map(::row)))
     }
 }

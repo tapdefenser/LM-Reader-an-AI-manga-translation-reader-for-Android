@@ -43,10 +43,27 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /** 路由常量集中一处，避免字符串散落在各个页面里。 */
+private fun resolveTaskOptions(row: com.lmreader.core.database.tasks.TaskRecord, context: android.content.Context,
+    nav: NavHostController) {
+    val payload = runCatching { org.json.JSONObject(row.payload) }.getOrElse { org.json.JSONObject() }
+    if(row.waitingReason in setOf("CAPABILITY", "API_ACCESS")) {
+        val localAsr = payload.optJSONObject("options")?.optString("subtitleSource") == "ASR_LOCAL"
+        nav.navigate(if(localAsr) Routes.SETTINGS_API_ASR else Routes.SETTINGS_API)
+    } else if(row.type.startsWith("VIDEO") && payload.optString("videoId").isNotBlank()) {
+        val id = payload.getString("videoId")
+        com.lmreader.ui.video.openVideoPlayer(context, id, listOf(id), if(row.waitingReason == "CONFIG_CHANGED") "OPTIONS" else "INFO")
+    } else if(row.type == "EXPORT") nav.navigate(Routes.SETTINGS_EXPORT)
+    else if(payload.optString("mangaId").isNotBlank() && row.waitingReason != "ACCESS")
+        nav.navigate(Routes.translationOptions(payload.getString("mangaId")))
+    else nav.navigate(Routes.SETTINGS_PATHS)
+}
+
 object Routes {
     const val ONBOARDING = "onboarding"
     const val LIBRARY = "library"
     const val BOOKSHELF = "bookshelf"
+    const val VIDEOS = "videos"
+    const val VIDEO_PLAYER = "video/{videoId}"
     const val SETTINGS = "settings"
     const val SETTINGS_GENERAL = "settings/general"
     const val SETTINGS_ABOUT = "settings/about"
@@ -61,6 +78,7 @@ object Routes {
     const val SETTINGS_API_SEG = "settings/api/seg"
     const val SETTINGS_API_OCR_LOCAL = "settings/api/ocr/local"
     const val SETTINGS_API_LOCAL = "settings/api/local"
+    const val SETTINGS_API_ASR = "settings/api/asr"
     const val SETTINGS_LOCAL_VISION = "settings/api/ocr/local-test"
     const val SETTINGS_API_EDITOR = "settings/api/editor/{kind}/{profileId}"
     fun apiEditor(kind: ApiProfileKind, id: String?) = "settings/api/editor/${kind.name}/${id ?: "new"}"
@@ -160,16 +178,23 @@ fun LmReaderNavHost(
     }
     LaunchedEffect(requestedQueue, destination) {
         if (requestedQueue != null) {
-            navController.navigate(when (requestedQueue) { "export" -> Routes.EXPORT_QUEUE; "offline" -> Routes.SETTINGS_API_LOCAL; else -> Routes.TRANSLATION_QUEUE }) { launchSingleTop = true }
+            navController.navigate(when (requestedQueue) {
+                "settings-asr" -> Routes.SETTINGS_API_ASR; "settings-api" -> Routes.SETTINGS_API
+                "settings-workflows" -> Routes.TRANSLATION_WORKFLOWS
+                "export" -> Routes.EXPORT_QUEUE; "offline" -> Routes.SETTINGS_API_LOCAL; else -> Routes.TRANSLATION_QUEUE
+            }) { launchSingleTop = true }
             onQueueOpened()
         }
     }
 
     // 侧栏「翻译队列」的角标接真实计数：入队真的会写待翻译记录，数字必须跟着动
     // （开发文档 8.1「队列入口显示活动任务数」；写死 0 就是在骗用户）。
-    val pendingTranslations by container.translationRepository
-        .observePendingCount()
-        .collectAsStateWithLifecycle(initialValue = 0)
+    val queueRows by container.taskScheduler.tasks.collectAsStateWithLifecycle()
+    val chapterRows by container.translationQueue.items.collectAsStateWithLifecycle()
+    val pendingTranslations = com.lmreader.tasks.translationQueueGroups(queueRows, chapterRows).sumOf { group ->
+        if(group.mangaId != null) group.chapters.size + group.tasks.count { it.type == "READER_PAGE" }
+        else group.tasks.count { it.parentTaskId == null }
+    }
     val exportTasks by container.exportQueue.tasks.collectAsStateWithLifecycle()
     val entry by navController.currentBackStackEntryAsState()
 
@@ -179,11 +204,13 @@ fun LmReaderNavHost(
         drawerContent = {
             MainMenuSheet(
                 activeTranslationTasks = pendingTranslations,
-                activeExportTasks = exportTasks.count { it.state == "PENDING" || it.state == "RUNNING" || it.state == "PAUSED" },
+                activeExportTasks = exportTasks.count { it.state == "PENDING" || it.state == "RUNNING" || it.state == "PAUSED" } +
+                    queueRows.count { it.type == "VIDEO_EXPORT" && it.state !in setOf("SUCCEEDED", "CANCELLED", "FAILED") },
                 onNavigate = { target ->
                     when (target) {
                         MainDestination.LIBRARY -> navController.navigateMainDestination(Routes.LIBRARY)
                         MainDestination.BOOKSHELF -> navController.navigateMainDestination(Routes.BOOKSHELF)
+                        MainDestination.VIDEOS -> navController.navigateMainDestination(Routes.VIDEOS)
                         MainDestination.TRANSLATION_QUEUE ->
                             navController.navigateMainDestination(Routes.TRANSLATION_QUEUE)
                         MainDestination.TRANSLATION_WORKFLOWS ->
@@ -217,6 +244,17 @@ fun LmReaderNavHost(
                 sizeTransform = null,
             ) {
                 composable(Routes.API_LOGS) { ApiLogScreen(container, onBack = { navController.popBackStack() }) }
+                composable(Routes.VIDEOS) {
+                    com.lmreader.ui.video.catalog.VideoCatalogScreen(container, false, openMenu,
+                        onPlay = { id, ids -> com.lmreader.ui.video.openVideoPlayer(context, id, ids) },
+                        onAction = { id, action -> com.lmreader.ui.video.openVideoPlayer(context, id, listOf(id), action) })
+                }
+                composable(Routes.VIDEO_PLAYER) { videoEntry ->
+                    LaunchedEffect(videoEntry) {
+                        val id = requireNotNull(videoEntry.arguments?.getString("videoId"))
+                        com.lmreader.ui.video.openVideoPlayer(context, id, listOf(id)); navController.popBackStack()
+                    }
+                }
                 composable(
                     route = Routes.READER,
                     arguments = listOf(
@@ -257,21 +295,25 @@ fun LmReaderNavHost(
                 }
 
                 composable(Routes.LIBRARY) {
+                    com.lmreader.ui.video.catalog.HomeMediaPane(container, false, openMenu) {
                     LibraryScreen(
                         container = container,
                         onOpenMenu = openMenu,
                         onOpenManga = { mangaId -> navController.navigate(Routes.mangaDetail(mangaId)) },
                         onOpenSettings = { navController.navigateSingleTop(Routes.SETTINGS_PATHS) },
                     )
+                    }
                 }
 
                 composable(Routes.BOOKSHELF) {
+                    com.lmreader.ui.video.catalog.HomeMediaPane(container, true, openMenu) {
                     BookshelfScreen(
                         container = container,
                         onOpenMenu = openMenu,
                         onOpenManga = { mangaId -> navController.navigate(Routes.mangaDetail(mangaId)) },
                         onOpenLibrary = { navController.navigateMainDestination(Routes.LIBRARY) },
                     )
+                    }
                 }
 
                 composable(Routes.SETTINGS) {
@@ -323,6 +365,7 @@ fun LmReaderNavHost(
                     ApiConfigurationHomeScreen(
                         onLlm = { navController.navigate(Routes.SETTINGS_API_LLM) { launchSingleTop = true } },
                         onLocal = { navController.navigate(Routes.SETTINGS_API_LOCAL) { launchSingleTop = true } },
+                        onAsr = { navController.navigateSingleTop(Routes.SETTINGS_API_ASR) },
                         onOcr = { navController.navigate(Routes.SETTINGS_API_OCR) { launchSingleTop = true } },
                         onSeg = { navController.navigateSingleTop(Routes.SETTINGS_API_SEG) },
                         onBack = { navController.popBackStack() },
@@ -330,6 +373,9 @@ fun LmReaderNavHost(
                 }
                 composable(Routes.SETTINGS_API_LOCAL) {
                     com.lmreader.ui.settings.translation.LocalTranslationScreen(container) { navController.popBackStack() }
+                }
+                composable(Routes.SETTINGS_API_ASR) {
+                    com.lmreader.ui.settings.asr.LocalAsrScreen(container) { navController.popBackStack() }
                 }
                 listOf(Routes.SETTINGS_API_LLM to ApiProfileKind.LLM, Routes.SETTINGS_API_OCR to ApiProfileKind.OCR).forEach { (route, kind) ->
                     composable(route) {
@@ -406,7 +452,9 @@ fun LmReaderNavHost(
 
 
                 composable(Routes.TRANSLATION_QUEUE) {
-                    com.lmreader.ui.queue.TranslationQueueScreen(container) { navController.popBackStack() }
+                    com.lmreader.tasks.UnifiedTaskScreen(container, onResolve = { row ->
+                        resolveTaskOptions(row, context, navController)
+                    }) { navController.popBackStack() }
                 }
 
                 composable(Routes.TRANSLATION_WORKFLOWS) {
@@ -416,7 +464,7 @@ fun LmReaderNavHost(
                 composable(Routes.EXPORT_QUEUE) {
                     com.lmreader.ui.queue.ExportQueueScreen(container,
                         onBack = { navController.popBackStack() },
-                        onSettings = { navController.navigateSingleTop(Routes.SETTINGS_EXPORT) })
+                        onSettings = { navController.navigate(Routes.SETTINGS_EXPORT) })
                 }
             }
             }

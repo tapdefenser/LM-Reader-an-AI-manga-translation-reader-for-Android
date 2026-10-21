@@ -2,6 +2,7 @@
 <!-- API 密文与设备 Keystore 绑定，不随备份迁移。 -->
 <full-backup-content>
     <exclude domain="file" path="screen-vision-preprocessing/" />
+    <exclude domain="file" path="video-analysis-cache/" />
     <exclude domain="file" path="datastore/api_profiles.preferences_pb" />
     <exclude domain="file" path="api-request-logs/" />
     <!-- Publication journals are meaningful only with this installation's private snapshots. -->

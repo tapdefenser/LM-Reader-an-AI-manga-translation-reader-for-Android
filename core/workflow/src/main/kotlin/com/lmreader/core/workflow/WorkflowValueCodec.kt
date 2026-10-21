@@ -11,6 +11,7 @@ object WorkflowValueCodec {
             WorkflowDataKind.NUMBER -> value is WorkflowValue.Number && value.value.isFinite()
             WorkflowDataKind.BOOLEAN -> value is WorkflowValue.Boolean
             WorkflowDataKind.IMAGE -> value is WorkflowValue.Image
+            WorkflowDataKind.AUDIO -> value is WorkflowValue.Audio
             WorkflowDataKind.CONTEXT -> value is WorkflowValue.Context
             WorkflowDataKind.DICTIONARY -> value is WorkflowValue.Dictionary
             WorkflowDataKind.LIST -> value is WorkflowValue.ListValue && value.items.size <= 10000 && type.element?.let { item -> value.items.all { matches(it, item, depth + 1) } } == true
@@ -25,9 +26,14 @@ object WorkflowValueCodec {
         is WorkflowValue.Record -> JsonObject(value.fields.mapValues { json(it.value) })
         is WorkflowValue.Dictionary -> JsonObject(value.entries.mapValues { JsonPrimitive(it.value) })
         is WorkflowValue.Image -> error("图片应作为真实附件发送")
+        is WorkflowValue.Audio -> error("音频应作为真实附件发送，不能写入提示词或结构化结果")
         is WorkflowValue.Context -> error("上下文应作为有角色的消息发送")
     }
-    fun display(value: WorkflowValue): String = if (value is WorkflowValue.Text) value.value else json(value).toString()
+    fun display(value: WorkflowValue): String = when (value) {
+        is WorkflowValue.Text -> value.value
+        is WorkflowValue.Audio -> error("音频应作为真实附件发送，不能写入提示词")
+        else -> json(value).toString()
+    }
     fun parseResponse(raw: String, type: WorkflowType, expectedBubbleId: String? = null, expectedItems: WorkflowValue.ListValue? = null): WorkflowValue {
         require(raw.toByteArray().size <= 4_000_000) { "结构化结果过大" }
         if (type == WorkflowType.TEXT) return WorkflowValue.Text(raw)

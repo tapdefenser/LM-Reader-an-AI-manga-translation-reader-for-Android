@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -15,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.lmreader.core.model.*
 import com.lmreader.core.workflow.*
@@ -22,10 +24,17 @@ import com.lmreader.core.workflow.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailableVariable>, outScope: List<WorkflowAvailableVariable>, profiles: List<ApiProfile>,
-    dismiss: () -> Unit, readOnly: Boolean = false, collectScope: List<WorkflowAvailableVariable> = emptyList(), save: (WorkflowNode) -> Unit) {
-    var node by remember(value.id) { mutableStateOf(value) }
+    dismiss: () -> Unit, readOnly: Boolean = false, collectScope: List<WorkflowAvailableVariable> = emptyList(),
+    blockedContexts: List<WorkflowBlockedTarget> = emptyList(), createTarget: ((WorkflowNode, WorkflowType) -> Unit)? = null,
+    save: (WorkflowNode) -> Unit) {
+    var node by remember(value) { mutableStateOf(value) }
+    val initialOutputLimit = (value.inputs["maxOutputLength"] as? WorkflowExpression.Number)?.value?.let {
+        if(it.isFinite() && it >= 1 && it <= Int.MAX_VALUE && it % 1 == 0.0) it.toInt().toString() else it.toString()
+    }.orEmpty()
+    var outputLimit by remember(value) { mutableStateOf(initialOutputLimit) }
+    val outputLimitValid = outputLimit.isBlank() || outputLimit.toIntOrNull()?.let { it > 0 } == true
     var leaving by remember { mutableStateOf(false) }
-    val dirty = !readOnly && node != value
+    val dirty = !readOnly && (node != value || outputLimit != initialOutputLimit)
     val latestDirty by rememberUpdatedState(dirty)
     fun leave() { if(dirty) leaving = true else dismiss() }
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = {
@@ -47,7 +56,7 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
             Row {
                 Text(WorkflowLabels.kind(node.kind), Modifier.weight(1f).padding(top = 12.dp), style = MaterialTheme.typography.titleLarge)
                 TextButton(onClick = { leave() }) { Text(if(readOnly) "关闭" else "取消") }
-                if(enabled) TextButton(onClick = { save(node) }) { Text("完成") }
+                if(enabled) TextButton(enabled = outputLimitValid, onClick = { save(node) }) { Text("完成") }
             }
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Section("输入")
@@ -66,13 +75,7 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     WorkflowKind.OCR -> { input("image", "<图片> · 气泡图片", WorkflowType.IMAGE); input("language", "<文本> · 原文语言", WorkflowType.TEXT) }
                     WorkflowKind.TRANSLATE -> {
                         input("text", "<文本> · 原文", WorkflowType.TEXT); input("source", "<文本> · 源语言", WorkflowType.TEXT); input("target", "<文本> · 目标语言", WorkflowType.TEXT)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TranslationModelEngine.entries.forEach { engine ->
-                                FilterChip(selected = (node.inputs["engine"] as? WorkflowExpression.Text)?.value.let { it == engine.name || it == null && engine == TranslationModelEngine.BERGAMOT },
-                                    onClick = { parameter("engine", WorkflowExpression.Text(engine.name)) }, enabled = enabled,
-                                    label = { Text(if (engine == TranslationModelEngine.OPUS_MT) "OPUS-MT" else "Bergamot") })
-                            }
-                        }
+                        Text("使用本地 Bergamot 引擎；需要已安装且支持当前语言方向的模型。", style = MaterialTheme.typography.bodySmall)
                     }
                     WorkflowKind.API, WorkflowKind.API_STREAM -> {
                         input("context", "<上下文> · 请求上下文", WorkflowType.CONTEXT, optional = true)
@@ -92,6 +95,12 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                             parameter("images", it); parameter("attachCurrentImage", null)
                         }
                         Text("可选择单张图片或图片列表；列表按原顺序作为同一次请求的附件发送，张数不限，只受单次请求总大小限制。新建变量时可直接选择 <列表<图片>>，再用新增项或循环收集图片。", style = MaterialTheme.typography.bodySmall)
+                        if(refs.any { it.type == WorkflowType.AUDIO || it.type == WorkflowType.list(WorkflowType.AUDIO) }) {
+                            ExpressionEditor("<音频>／<列表<音频>> · 录音附件（可选）", null, node.inputs["audios"],
+                                refs.filter { it.type == WorkflowType.AUDIO || it.type == WorkflowType.list(WorkflowType.AUDIO) },
+                                optional = true, variableOnly = true, enabled = enabled) { parameter("audios", it) }
+                            Text("当前句子录音与中点截图按需附带；API 模型需支持对应的音频或图片输入。", style = MaterialTheme.typography.bodySmall)
+                        }
                         if (automatic != null) Text("每次请求附带当前这一项的裁图；游离文字也按气泡项处理。", style = MaterialTheme.typography.bodySmall)
                         ExpressionEditor("<列表> · 校验输入气泡（可选）", null, node.inputs["expectedBubbles"], refs.filter { it.type in setOf(WorkflowType.list(WorkflowType.BUBBLE), WorkflowType.list(WorkflowType.TRANSLATION), WorkflowType.list(WorkflowType.PAGE_RECORD)) }, optional = true, variableOnly = true, enabled = enabled) { parameter("expectedBubbles", it) }
                         input("expectedCount", "<数字> · 期望输出项数（可选）", WorkflowType.NUMBER, optional = true)
@@ -107,7 +116,7 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     }
                     WorkflowKind.SET -> input("value", "赋值", targetType())
                     WorkflowKind.APPEND -> input("value", "新增值", targetType()?.let { if(it.kind == WorkflowDataKind.LIST) it.element else it })
-                    WorkflowKind.MERGE_LIST -> input("value", "合并列表", targetType())
+                    WorkflowKind.MERGE_LIST -> input("value", "合并列表（同类型列表）", targetType() ?: node.resultType)
                     WorkflowKind.REPLACE -> { input("text", "<文本> · 匹配文本", WorkflowType.TEXT); input("dictionary", "<字典> · 译名字典", WorkflowType.DICTIONARY) }
                     WorkflowKind.MESSAGE -> {
                         TemplateEditor("<文本> · 用户上下文", node.inputs["user"], refs, enabled) { parameter("user", it) }
@@ -115,7 +124,7 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     }
                     WorkflowKind.MERGE_GLOSSARY -> input("items", "<列表> · 原词／译名", WorkflowType.list(WorkflowType.GLOSSARY_ENTRY))
                     WorkflowKind.IF -> input("condition", "<布尔> · 条件", WorkflowType.BOOLEAN)
-                    WorkflowKind.RETURN -> input("value", "旧版返回值", node.resultType)
+                    WorkflowKind.RETURN -> input("value", "返回值", node.resultType)
                     else -> Text("由漫画与当前作用域提供。", style = MaterialTheme.typography.bodySmall)
                 }
                 Section("输出")
@@ -124,7 +133,7 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     WorkflowKind.OCR, WorkflowKind.TRANSLATE, WorkflowKind.REPLACE -> { r -> r.type == WorkflowType.TEXT }
                     WorkflowKind.MESSAGE -> { r -> r.type == WorkflowType.CONTEXT }
                     WorkflowKind.APPEND -> { r -> r.type.kind in setOf(WorkflowDataKind.TEXT, WorkflowDataKind.LIST) }
-                    WorkflowKind.MERGE_LIST -> { r -> r.type.kind == WorkflowDataKind.LIST }
+                    WorkflowKind.MERGE_LIST -> { r -> r.type.kind == WorkflowDataKind.LIST && r.ref.path.none { it.toIntOrNull() != null } }
                     WorkflowKind.API -> { r -> apiOutput(r.type) }
                     WorkflowKind.API_STREAM -> { r -> r.type.kind == WorkflowDataKind.LIST && r.type.element?.kind in setOf(WorkflowDataKind.RECORD, WorkflowDataKind.DICTIONARY) && apiOutput(r.type) }
                     else -> { _ -> true }
@@ -132,12 +141,29 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                 if(node.kind in setOf(WorkflowKind.SEG, WorkflowKind.OCR, WorkflowKind.TRANSLATE, WorkflowKind.API, WorkflowKind.API_STREAM, WorkflowKind.SET, WorkflowKind.REPLACE, WorkflowKind.APPEND, WorkflowKind.MERGE_LIST, WorkflowKind.MESSAGE)) {
                     // Appends are commutative, so an outer list or text stays selectable from a nested async branch.
                     val append = node.kind in setOf(WorkflowKind.APPEND, WorkflowKind.MERGE_LIST)
-                    val writable = WorkflowEditing.writeTargets(outScope, append).filter(filter)
-                    ReferencePicker("输出到", node.target, writable, enabled = enabled) { ref ->
+                    val writable = if (node.kind == WorkflowKind.MESSAGE) outRefs.filter(filter).filter { WorkflowEditing.contextWriteIssue(it.ref, outScope) == null }
+                        else WorkflowEditing.writeTargets(outScope, append).filter(filter)
+                    ReferencePicker(if (node.kind == WorkflowKind.MESSAGE) "写入上下文 · <上下文>" else "输出到", node.target, writable, enabled = enabled,
+                        emptyMessage = when (node.kind) {
+                            WorkflowKind.MESSAGE -> "没有可写上下文。请在此步骤之前创建，或使用下方创建按钮。"
+                            WorkflowKind.MERGE_LIST -> "没有可合并的目标列表。请先创建列表变量。"
+                            else -> "没有可写的兼容变量；请在此步骤之前声明。"
+                        }, blocked = if (node.kind == WorkflowKind.MESSAGE) blockedContexts else emptyList()) { ref ->
                         val type = outRefs.firstOrNull { it.ref == ref }?.type ?: node.resultType
-                        node = node.copy(target = ref, resultType = type, variable = if(node.kind == WorkflowKind.API_STREAM) node.variable?.copy(type = type.element ?: WorkflowType.TRANSLATION) else node.variable)
+                        node = node.copy(target = ref, resultType = type,
+                            inputs = if (node.kind == WorkflowKind.MERGE_LIST && type != targetType()) node.inputs + ("value" to WorkflowExpression.Empty(type)) else node.inputs,
+                            variable = if(node.kind == WorkflowKind.API_STREAM) node.variable?.copy(type = type.element ?: WorkflowType.TRANSLATION) else node.variable)
                     }
-                    if(append) Text("可追加到外层声明的列表或文本。并行分支同时追加不保证顺序，但不会丢项。", style = MaterialTheme.typography.bodySmall)
+                    if (node.kind == WorkflowKind.MESSAGE) Text("选择已有变量，消息写入该上下文。跨条目积累请使用同步循环；并行处理可先按顺序收集文本，再同步构造上下文。", style = MaterialTheme.typography.bodySmall)
+                    if (node.kind in setOf(WorkflowKind.MESSAGE, WorkflowKind.MERGE_LIST) && createTarget != null) {
+                        val type = if (node.kind == WorkflowKind.MESSAGE) WorkflowType.CONTEXT else targetType()?.takeIf { it.kind == WorkflowDataKind.LIST }
+                            ?: node.resultType.takeIf { it.kind == WorkflowDataKind.LIST } ?: WorkflowType.list(WorkflowType.TEXT)
+                        TextButton(enabled = enabled, onClick = { createTarget(node, type) }, modifier = Modifier.testTag("workflow-create-target")) {
+                            Text(if (node.kind == WorkflowKind.MESSAGE) "在此步骤前创建并选中上下文" else "在此步骤前创建并选中${WorkflowLabels.type(type)}")
+                        }
+                    }
+                    if(append) Text(if (node.kind == WorkflowKind.MERGE_LIST) "同类型列表合并到列表；文本拼接使用追加一项。可合并到异步分支的外层列表，不丢项，但不保证并行完成顺序。"
+                        else "可追加到外层声明的列表或文本。并行分支同时追加不保证顺序，但不会丢项。", style = MaterialTheme.typography.bodySmall)
                 }
                 if(node.variable != null) {
                     val variable = requireNotNull(node.variable)
@@ -146,6 +172,7 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     else TypedVariable(WorkflowReferenceChoice(WorkflowRef(variable.id), variable.name, variable.type, false))
                 }
                 if(node.kind == WorkflowKind.EACH) {
+                    Text("循环可能把修改后的条目按原位置回写到所遍历的可写列表；收集结果是另一项输出，并按输入顺序收集。异步分支的父层变量只读（列表追加/合并除外）。", style = MaterialTheme.typography.bodySmall)
                     ReferencePicker("收集到列表（可选）", node.collectTo, outRefs.filter { !it.readOnly && it.type.kind == WorkflowDataKind.LIST }, optional = true, enabled = enabled) {
                         node = node.copy(collectTo = it, inputs = if(it == null) node.inputs - "collectValue" - "flatten" else node.inputs)
                     }
@@ -164,14 +191,20 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                 if(node.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM)) {
                     Text("输出：${WorkflowLabels.type(node.resultType)}", color = variableColor(node.resultType))
                     if(apiOutput(node.resultType)) Text("JSON 示例：${AndroidWorkflowHost.schemaExample(node.resultType)}", style = MaterialTheme.typography.bodySmall)
-                    if(node.kind == WorkflowKind.API_STREAM) Text("每收到一个完整 JSON 条目，按顺序执行内部行。当前条目序号从 1 开始；后续行等待 API 完整结束。", style = MaterialTheme.typography.bodySmall)
+                    if(node.kind == WorkflowKind.API_STREAM) Text(if(node.inputs["maxOutputLength"] != null)
+                        "启用长度限制后，完整响应通过长度检查才按顺序执行内部行，避免超限重试重复执行。当前条目序号从 1 开始。"
+                        else "每收到一个完整 JSON 条目，按顺序执行内部行。当前条目序号从 1 开始；后续行等待 API 完整结束。", style = MaterialTheme.typography.bodySmall)
                 }
                 if(node.kind in setOf(WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.APPLY_ORDER)) Text("本页译文气泡列表。单条记录可在流式循环中回填；列表可以一次回填。", style = MaterialTheme.typography.bodySmall)
+                if(node.kind == WorkflowKind.APPLY_ORDER) Text("起始序号必须为从 1 开始的整数；超出本页气泡范围会停止回填。", style = MaterialTheme.typography.bodySmall)
+                if(node.kind == WorkflowKind.REPLACE) Text("优先匹配最长原词，替换一次，不再匹配替换结果。例如 A→B、B→C，输入 A 得到 B。", style = MaterialTheme.typography.bodySmall)
                 Section("参数")
                 OutlinedTextField(node.label, { if(it.length <= 80) node = node.copy(label = it) }, enabled = enabled, label = { Text("步骤名称（可选）") }, modifier = Modifier.fillMaxWidth())
                 if(node.kind in setOf(WorkflowKind.CHAPTERS, WorkflowKind.PAGES, WorkflowKind.EACH)) Row {
                     Text("异步", Modifier.weight(1f)); Switch(node.mode == WorkflowMode.ASYNC, { node = node.copy(mode = if(it) WorkflowMode.ASYNC else WorkflowMode.SYNC) }, enabled = enabled)
                 }
+                if(node.kind in setOf(WorkflowKind.CHAPTERS, WorkflowKind.PAGES) && node.mode == WorkflowMode.ASYNC)
+                    Text("异步执行时父层上下文只读；可在内部新建，跨项积累请使用同步或有序收集。每页完成时由当前宿主保存页成果。", style = MaterialTheme.typography.bodySmall)
                 // The limit only applies while the branches run in parallel; null follows the engine setting.
                 if(node.mode == WorkflowMode.ASYNC && node.kind in setOf(WorkflowKind.CHAPTERS, WorkflowKind.PAGES, WorkflowKind.EACH)) {
                     val limit = node.parallelLimit
@@ -189,16 +222,25 @@ internal fun WorkflowNodeEditor(value: WorkflowNode, scope: List<WorkflowAvailab
                     val id = (node.inputs["profile"] as? WorkflowExpression.Text)?.value
                     OutlinedButton(onClick = { choosing = true }, enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text("API 配置：${profiles.firstOrNull { it.id == id }?.name ?: "未绑定"}") }
                     if(choosing) ChoiceDialog("选择 API 配置", profiles.filter { it.kind == ApiProfileKind.LLM }.map { it.id to "${it.name} · ${it.model} · 并行 ${it.parallelLimit}" }, { choosing = false }) { parameter("profile", WorkflowExpression.Text(it)); choosing = false }
+                    OutlinedTextField(outputLimit, {
+                        outputLimit = it
+                        parameter("maxOutputLength", if(it.isBlank()) null else WorkflowExpression.Number(it.toIntOrNull()?.toDouble() ?: -1.0))
+                    }, enabled = enabled, singleLine = true, isError = !outputLimitValid,
+                        label = { Text("最大输出长度（字符，可选）") },
+                        supportingText = { Text(if(outputLimitValid) "留空不额外限制。正文、思考及 JSON 符号均计入字符数；超限立即中止请求，按 API 配置的重试次数重试。" else "最大输出长度必须是正整数") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth().testTag("workflow-api-max-output-length"))
                     if(scope.none { it.variable.id in setOf(WorkflowSystem.CHAPTER, WorkflowSystem.PAGE) }) Row {
                         Text("整漫画单请求", Modifier.weight(1f)); Switch(node.inputs["wholeManga"] == WorkflowExpression.Boolean(true), { parameter("wholeManga", WorkflowExpression.Boolean(it)) }, enabled = enabled)
                     }
+                    if(node.inputs["wholeManga"] == WorkflowExpression.Boolean(true)) Text("整漫画单请求由翻译队列支持；其他入口需支持此模式，不能按普通单页请求使用。", style = MaterialTheme.typography.bodySmall)
                 }
                 if(node.kind == WorkflowKind.MERGE_GLOSSARY) Text("已有原词保持原译名；后来条目不能覆盖。", style = MaterialTheme.typography.bodySmall)
             }
         }
     }
     if(leaving) AlertDialog(onDismissRequest = { leaving = false }, title = { Text("保存步骤修改？") }, text = { Text("当前步骤有未保存的修改。") },
-        confirmButton = { TextButton(onClick = { save(node) }) { Text("保存") } }, dismissButton = { Row {
+        confirmButton = { TextButton(enabled = outputLimitValid, onClick = { save(node) }) { Text("保存") } }, dismissButton = { Row {
             TextButton(onClick = dismiss) { Text("放弃") }; TextButton(onClick = { leaving = false }) { Text("继续编辑") }
         } })
 }
@@ -213,7 +255,8 @@ private fun apiOutput(type: WorkflowType): Boolean = when(type.kind) {
 
 @Composable
 private fun ReferencePicker(label: String, value: WorkflowRef?, choices: List<WorkflowReferenceChoice>, optional: Boolean = false,
-    enabled: Boolean = true, changed: (WorkflowRef?) -> Unit) {
+    enabled: Boolean = true, emptyMessage: String = "没有可用变量；请在此步骤之前声明。",
+    blocked: List<WorkflowBlockedTarget> = emptyList(), changed: (WorkflowRef?) -> Unit) {
     var query by remember(label) { mutableStateOf("") }
     val matches = workflowOptionMatcher(query)
     val visible = choices.filter { matches(typedLabel(it)) }.sortedBy { it.ref != value }
@@ -224,8 +267,9 @@ private fun ReferencePicker(label: String, value: WorkflowRef?, choices: List<Wo
             if(optional && matches("不使用")) item { FilterChip(value == null, { changed(null) }, label = { Text("不使用") }, enabled = enabled) }
             items(visible) { choice -> FilterChip(choice.ref == value, { changed(choice.ref) }, label = { TypedVariable(choice) }, enabled = enabled) }
         }
-        if(value != null && choices.none { it.ref == value }) Text("引用 · 此处变量不可用", color = MaterialTheme.colorScheme.error)
-        if(visible.isEmpty()) Text("无匹配变量", style = MaterialTheme.typography.bodySmall)
+        if(value != null && choices.none { it.ref == value }) Text(blocked.firstOrNull { it.choice.ref == value }?.reason ?: "引用 · 此处变量不可用，请检查类型、作用域及声明顺序。", color = MaterialTheme.colorScheme.error)
+        if(visible.isEmpty()) Text(if (choices.isNotEmpty() && query.isNotBlank()) "搜索无匹配变量；请清空或修改搜索。" else emptyMessage, style = MaterialTheme.typography.bodySmall)
+        blocked.filter { matches(typedLabel(it.choice)) }.forEach { Text("${typedLabel(it.choice)}：${it.reason}", style = MaterialTheme.typography.bodySmall) }
         if(query.isNotBlank()) choices.firstOrNull { it.ref == value }?.let { TypedVariable(it) }
     }
 }
@@ -317,7 +361,7 @@ private fun TemplateEditor(label: String, expression: WorkflowExpression?, refs:
     }
 }
 private fun serializable(type: WorkflowType): Boolean = when(type.kind) {
-    WorkflowDataKind.IMAGE, WorkflowDataKind.CONTEXT -> false
+    WorkflowDataKind.IMAGE, WorkflowDataKind.AUDIO, WorkflowDataKind.CONTEXT -> false
     WorkflowDataKind.LIST -> type.element?.let(::serializable) == true
     else -> type.fields.values.all(::serializable)
 }
@@ -346,7 +390,7 @@ internal fun TypeEditor(label: String, value: WorkflowType, depth: Int = 0, enab
         }
     }
     if(choosing) ChoiceDialog(label, buildList {
-        listOf(WorkflowType.TEXT, WorkflowType.NUMBER, WorkflowType.BOOLEAN, WorkflowType.IMAGE).forEach { add(it to WorkflowLabels.type(it)) }
+        listOf(WorkflowType.TEXT, WorkflowType.NUMBER, WorkflowType.BOOLEAN, WorkflowType.IMAGE, WorkflowType.AUDIO).forEach { add(it to WorkflowLabels.type(it)) }
         add(WorkflowType.BUBBLE to "${WorkflowLabels.type(WorkflowType.BUBBLE)}（来自 SEG）")
         listOf(WorkflowType.CONTEXT, WorkflowType.DICTIONARY).forEach { add(it to WorkflowLabels.type(it)) }
         if(depth < 4) {

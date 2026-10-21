@@ -31,7 +31,7 @@ class TranslationWorkflowStore(private val root: File) {
     suspend fun reload() = mutex.withLock { _workflows.value = TranslationWorkflow.BUILT_INS + readUserWorkflows() }
 
     fun find(id: String?): TranslationWorkflow? =
-        if (id == null || id == TranslationWorkflow.LOCAL_MACHINE_ID) TranslationWorkflow.LOCAL_MACHINE
+        if (TranslationWorkflow.isDefaultSelection(id)) TranslationWorkflow.LOCAL_MACHINE
         else _workflows.value.firstOrNull { it.id == id }
 
     suspend fun create(): TranslationWorkflow = mutate { items ->

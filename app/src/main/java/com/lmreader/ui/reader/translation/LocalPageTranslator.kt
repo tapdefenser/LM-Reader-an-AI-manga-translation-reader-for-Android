@@ -80,6 +80,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
     /** Caller holds pageWriteMutex, including queue state checks before publication. */
     suspend fun translateRecognized(page: RecognizedPage, source: LocalTranslationLanguage,
         target: LocalTranslationLanguage, render: BubbleRenderSettings,
+        expectedRevision: String? = null, requireAbsent: Boolean = false, resultIdentity: String? = null,
         progress: (PageTranslationProgress) -> Unit = {}): ReaderPageTranslation = withContext(Dispatchers.IO) {
         val translated = ArrayList<LocalTranslatedText>(); val used = linkedSetOf<String>()
         val packSnapshot = modelPacks()
@@ -95,7 +96,8 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
         val job = currentCoroutineContext()
         artifacts.save(page.page.pageId, page.hash, source, target, page.width, page.height,
             bindPageTranslations(page.groups, translated), packSnapshot.filter { it.id in used }.map { it.identity },
-            (System.nanoTime() - page.started) / 1_000_000, render, checkCancelled = { job.ensureActive() }).also {
+            (System.nanoTime() - page.started) / 1_000_000, render, expectedRevision = expectedRevision,
+            requireAbsent = requireAbsent, resultIdentity = resultIdentity, checkCancelled = { job.ensureActive() }).also {
                 vision.preprocessingCache.commitPage(page.page.pageId)
             }
     }
@@ -107,8 +109,10 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
         progress: (PageTranslationProgress) -> Unit = {}): ReaderPageTranslation {
         retainPreprocessing(page.pageId)
         try {
+            val expectedRevision = pageWriteMutex.withLock { artifacts.current(page.pageId)?.revision }
             val recognized = recognize(segment(pageSource, page, segThreshold, textDetectionThreshold, segTextScope, progress), source, segTextScope, progress = progress)
-            return pageWriteMutex.withLock { translateRecognized(recognized, source, target, render, progress) }
+            return pageWriteMutex.withLock { translateRecognized(recognized, source, target, render,
+                expectedRevision = expectedRevision, requireAbsent = expectedRevision == null, progress = progress) }
         } finally { releasePreprocessing(page.pageId) }
     }
     suspend fun releaseModels() { vision.releaseModels(); translator.releaseModels() }

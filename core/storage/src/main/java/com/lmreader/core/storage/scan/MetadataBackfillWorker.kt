@@ -10,10 +10,15 @@ import com.lmreader.core.model.MangaRepository
 import com.lmreader.core.model.MetadataOwnerType
 import com.lmreader.core.model.MetadataRecord
 import com.lmreader.core.model.SourcePermissionState
+import com.lmreader.core.model.ResourceGovernor
+import com.lmreader.core.model.InferencePriority
 import com.lmreader.core.storage.access.TreeAccess
 import java.io.InputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * 补全阶段：为已发现漫画补 ComicInfo 简介与作者（开发文档 6.1 第 2 步、7）。
@@ -61,6 +66,7 @@ class MetadataBackfillWorker(
     private val openTree: (treeUri: String, documentId: String) -> ContentTree?,
     private val openInputStream: (treeUri: String, documentId: String) -> InputStream?,
     private val mangaRepository: MangaRepository,
+    private val admission: (suspend (List<String>) -> Int)? = null,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
@@ -68,11 +74,13 @@ class MetadataBackfillWorker(
     constructor(
         treeAccess: TreeAccess,
         mangaRepository: MangaRepository,
+        admission: (suspend (List<String>) -> Int)? = null,
         clock: () -> Long = System::currentTimeMillis,
     ) : this(
         openTree = { treeUri, documentId -> treeAccess.openAt(treeUri, documentId) },
         openInputStream = { treeUri, documentId -> treeAccess.openInputStream(treeUri, documentId) },
         mangaRepository = mangaRepository,
+        admission = admission,
         clock = clock,
     )
 
@@ -82,18 +90,24 @@ class MetadataBackfillWorker(
      * 单部失败不阻断其它作品（开发文档 3）：逐部捕获异常。授权失效的来源整体跳过，
      * 因为继续尝试只会为每部作品重复一次 SecurityException（验收 A07）。
      */
-    suspend fun backfill(mangaIds: List<String>): Int = withContext(Dispatchers.IO) {
+    suspend fun backfill(mangaIds: List<String>): Int = admission?.invoke(mangaIds) ?: backfillDirect(mangaIds)
+
+    /** Only the registered executor (or an unconfigured test worker) runs a batch directly. */
+    suspend fun backfillDirect(mangaIds: List<String>, progress: suspend (Int, Int) -> Unit = { _, _ -> }): Int = withContext(Dispatchers.IO) {
         var updated = 0
         val brokenSources = mutableSetOf<String>()
-        for (mangaId in mangaIds) {
-            val target = runCatching { mangaRepository.getBackfillTarget(mangaId) }.getOrNull() ?: continue
+        for ((index, mangaId) in mangaIds.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            progress(index, updated)
+            val target = try { mangaRepository.getBackfillTarget(mangaId) } catch(error: CancellationException) { throw error }
+                catch(_: Exception) { null } ?: continue
             if (target.sourcePermission == SourcePermissionState.LOST) continue
             if (target.sourceTreeUri in brokenSources) continue
-            val changed = runCatching { backfillOne(mangaId) }
-                .onFailure { brokenSources += target.sourceTreeUri }
-                .getOrDefault(false)
+            val changed = try { backfillOne(mangaId) } catch(error: CancellationException) { throw error }
+                catch(_: Exception) { brokenSources += target.sourceTreeUri; false }
             if (changed) updated++
         }
+        progress(mangaIds.size, updated)
         updated
     }
 
@@ -109,7 +123,12 @@ class MetadataBackfillWorker(
      *   那里每张卡片都会来一次，没有这条守卫就会把已经读过目录的作品重复枚举。
      *   扫描期的补全队列本来就只取 `metadataProbedAt IS NULL`，传默认值即可。
      */
-    suspend fun backfillOne(mangaId: String, force: Boolean = false): Boolean {
+    suspend fun backfillOne(mangaId: String, force: Boolean = false): Boolean =
+        withContext(Dispatchers.IO + InferencePriority(ResourceGovernor.MAINTENANCE)) {
+            ResourceGovernor.shared.use("io") { backfillOneDirect(mangaId, force) }
+        }
+
+    private suspend fun backfillOneDirect(mangaId: String, force: Boolean): Boolean {
         val target = mangaRepository.getBackfillTarget(mangaId) ?: return false
         // 探过一次就不再开目录（"读到"与"确实没有"都算探过，见 metadataProbedAt 的注释）。
         if (!force && target.manga.metadataProbedAt != null) return false

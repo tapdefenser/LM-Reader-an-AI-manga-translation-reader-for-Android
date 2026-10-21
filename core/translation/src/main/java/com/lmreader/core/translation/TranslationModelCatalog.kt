@@ -12,7 +12,14 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
     val mirrorRevision = root.stringOrNull("mirrorRevision") ?: ""
     val sourceKey = root.stringOrNull("sourceKey")
     val fetchedAt = root["fetchedAt"]?.jsonPrimitive?.longOrNull
-    val packs = root.getValue("packages").jsonArray.map { parsePack(it.jsonObject) }
+    val packs = run {
+        val elements = root.getValue("packages").jsonArray
+        // Old caches and custom catalogs may still list removed engines. Keep the
+        // supported Bergamot packs, but never reinterpret an OPUS/ONNX pack as Marian.
+        val supported = elements.filter { TranslationModelEngine.isSupported(it.jsonObject.stringOrNull("engine")) }
+        require(supported.size == elements.size || supported.isNotEmpty()) { "目录未提供受支持的机翻引擎" }
+        supported.map { parsePack(it.jsonObject) }
+    }
     val languages get() = packs.flatMap { listOf(it.source, it.target) }.distinct().sortedBy { it.tag }
 
     init {
@@ -32,9 +39,6 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
     fun pack(id: String) = packs.firstOrNull { it.id == id } ?: error("未知语言包：$id")
     fun forEngine(engine: TranslationModelEngine): TranslationModelCatalog = if (packs.all { it.engine == engine }) this else
         TranslationModelCatalog(JsonObject(root + ("packages" to JsonArray(packs.filter { it.engine == engine }.map(::packJson)))))
-    fun withAdditionalPacks(additional: List<TranslationModelPack>) = TranslationModelCatalog(JsonObject(root + mapOf(
-        "schema" to JsonPrimitive(3), "engine" to JsonPrimitive("local-nmt-v1"),
-        "packages" to JsonArray((packs + additional).map(::packJson)))))
     fun route(source: LocalTranslationLanguage, target: LocalTranslationLanguage,
         engine: TranslationModelEngine? = null): List<TranslationModelPack> {
         if (source == target) return emptyList()
@@ -59,17 +63,7 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
 
     fun downloadUrl(pack: TranslationModelPack, file: TranslationModelFile, settings: TranslationSourceSettings): String {
         if (sourceKey != null) require(sourceKey == sourceKey(settings)) { "下载源已改变，请重新获取语言包列表" }
-        file.url?.let { address ->
-            val url = validateDownloadUrl(address)
-            // The bundled OPUS snapshot pins public HF URLs; mirror selection
-            // must still work before its first successful metadata refresh.
-            if(sourceKey == null && pack.engine == TranslationModelEngine.OPUS_MT &&
-                settings.source in setOf(TranslationDownloadSource.HUGGING_FACE, TranslationDownloadSource.HF_MIRROR) &&
-                url.toHttpUrl().host in setOf("huggingface.co", "hf-mirror.com")) {
-                return url.toHttpUrl().newBuilder().host(if(settings.source == TranslationDownloadSource.HF_MIRROR) "hf-mirror.com" else "huggingface.co").build().toString()
-            }
-            return url
-        }
+        file.url?.let { address -> return validateDownloadUrl(address) }
         val (base, path) = when (settings.source) {
             TranslationDownloadSource.MOZILLA -> officialBaseUrl to file.officialPath
             TranslationDownloadSource.HUGGING_FACE -> "https://huggingface.co" to "$mirrorRepository/resolve/$mirrorRevision/${file.mirrorPath}"
@@ -81,7 +75,6 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
 
     companion object {
         fun sourceKey(settings: TranslationSourceSettings) =
-            (if (settings.engine == TranslationModelEngine.BERGAMOT) "" else "${settings.engine.name}:") +
             settings.source.name + if(settings.source == TranslationDownloadSource.CUSTOM) ":${validateCustomBase(settings.customBaseUrl)}" else ""
         fun validateCustomBase(value: String): String {
             val url = value.trim().toHttpUrl()
@@ -97,13 +90,10 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
             require(pack.id.length in 1..100 && pack.id.matches(Regex("[A-Za-z0-9-]+")) && safeVersion(pack.version))
             require(pack.source != pack.target)
             require(pack.files.isNotEmpty() && pack.files.map { it.name }.distinct().size == pack.files.size)
+            require(pack.files.none { it.name.endsWith(".onnx", ignoreCase = true) }) { "ONNX files cannot be loaded by the Bergamot engine" }
             val roles = pack.files.map { it.role }.toSet()
-            require(if (pack.engine == TranslationModelEngine.OPUS_MT)
-                roles == setOf("encoder", "decoder", "srcVocab", "trgVocab", "vocab", "config") else
-                roles == setOf("model", "lexicalShortlist", "vocab") || roles == setOf("model", "lexicalShortlist", "srcVocab", "trgVocab"))
-            require(roles.size == pack.files.size && pack.installedBytes <=
-                if (pack.engine == TranslationModelEngine.OPUS_MT) 350_000_000L else 1_073_741_824L)
-            require(pack.targetPrefix.length <= 80 && '\u0000' !in pack.targetPrefix)
+            require(roles == setOf("model", "lexicalShortlist", "vocab") || roles == setOf("model", "lexicalShortlist", "srcVocab", "trgVocab"))
+            require(roles.size == pack.files.size && pack.installedBytes <= 1_073_741_824L)
             require(pack.repository.isEmpty() || pack.repository.matches(Regex("[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")))
             require(pack.license.length <= 80)
             pack.files.forEach { file ->
@@ -111,7 +101,7 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
                 require(file.size in 1..536_870_912L && file.downloadSize in 1..536_870_912L)
                 val git = file.gitBlobSha1
                 if (git != null) {
-                    require(pack.engine == TranslationModelEngine.OPUS_MT && file.role in setOf("config", "vocab", "srcVocab", "trgVocab"))
+                    require(file.role in setOf("vocab", "srcVocab", "trgVocab"))
                     require(git.matches(Regex("[a-f0-9]{40}")) && file.size <= 8_388_608 && file.compression == TranslationFileCompression.NONE)
                     require((file.sha256.isEmpty() && file.downloadSha256.isEmpty()) ||
                         file.sha256.matches(Regex("[a-f0-9]{64}")) && file.downloadSha256.matches(Regex("[a-f0-9]{64}")))
@@ -122,8 +112,9 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
             }
         }
         internal fun parsePack(pack: JsonObject): TranslationModelPack {
-            // Unknown backends must never be mistaken for Marian models.
-            val engine = pack.stringOrNull("engine")?.let(TranslationModelEngine::valueOf) ?: TranslationModelEngine.BERGAMOT
+            // Missing engine means legacy Bergamot; unknown names are rejected instead
+            // of being loaded as Marian models.
+            val engine = pack.stringOrNull("engine")?.let { TranslationModelEngine.requireSupported(it) } ?: TranslationModelEngine.BERGAMOT
             return TranslationModelPack(pack.string("id"), pack.string("version"),
             LocalTranslationLanguage.fromTag(pack.string("source")), LocalTranslationLanguage.fromTag(pack.string("target")),
             pack.getValue("files").jsonArray.map { element -> val f=element.jsonObject
@@ -131,12 +122,11 @@ class TranslationModelCatalog private constructor(private val root: JsonObject) 
                     f.string("officialPath"), f.string("mirrorPath"), f.number("downloadSize"), f.string("downloadSha256"),
                     f.stringOrNull("compression")?.let(TranslationFileCompression::valueOf) ?: TranslationFileCompression.GZIP,
                     f.stringOrNull("url"), f.stringOrNull("downloadPath"), f.stringOrNull("gitBlobSha1"))
-            }, engine, pack.stringOrNull("targetPrefix") ?: "", pack.stringOrNull("license") ?: "", pack.stringOrNull("repository") ?: "")
+            }, engine, pack.stringOrNull("license") ?: "", pack.stringOrNull("repository") ?: "")
         }
         internal fun packJson(pack: TranslationModelPack) = buildJsonObject {
             put("id",pack.id);put("version",pack.version);put("source",pack.source.tag);put("target",pack.target.tag)
             put("engine",pack.engine.name)
-            if (pack.targetPrefix.isNotEmpty()) put("targetPrefix", pack.targetPrefix)
             if (pack.license.isNotEmpty()) put("license", pack.license)
             if (pack.repository.isNotEmpty()) put("repository", pack.repository)
             putJsonArray("files") {pack.files.forEach { file -> add(buildJsonObject {

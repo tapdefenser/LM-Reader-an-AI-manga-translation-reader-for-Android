@@ -26,7 +26,7 @@ object WorkflowValidator {
             is WorkflowExpression.Text -> WorkflowType.TEXT
             is WorkflowExpression.Number -> WorkflowType.NUMBER.also { if (!e.value.isFinite()) issue(n, "数字必须有限") }
             is WorkflowExpression.Boolean -> WorkflowType.BOOLEAN
-            is WorkflowExpression.Empty -> e.type
+            is WorkflowExpression.Empty -> e.type.also { if (it.kind == WorkflowDataKind.AUDIO) issue(n, "音频不能通过空值构造，请使用当前句子录音或附件") }
             is WorkflowExpression.Ref -> refType(e.value, scope).also { if (it == null) issue(n, "变量或字段在此处不可用：${e.value.variableId}") }
             is WorkflowExpression.Template -> WorkflowType.TEXT.also {
                 val names = Regex("\\$\\{([^}]+)\\}").findAll(e.text).map { m -> m.groupValues[1] }.toSet()
@@ -152,8 +152,8 @@ object WorkflowValidator {
                     WorkflowKind.IF -> { input("condition", WorkflowType.BOOLEAN); visit(n.children, n.kind, scope, depth + 1, n.id); visit(n.otherwise, n.kind, scope, depth + 1, n.id + ":otherwise") }
                     WorkflowKind.DECLARE -> {
                         val type = n.variable?.type
-                        fun canInitialize(t: WorkflowType): Boolean = t.kind !in setOf(WorkflowDataKind.IMAGE, WorkflowDataKind.BUBBLE) && t.fields.values.all(::canInitialize)
-                        if(type != null && n.inputs["value"] == null && !canInitialize(type)) issue(n, "图片、气泡或含图片的记录需要设置初始引用")
+                        fun canInitialize(t: WorkflowType): Boolean = t.kind !in setOf(WorkflowDataKind.IMAGE, WorkflowDataKind.AUDIO, WorkflowDataKind.BUBBLE) && t.fields.values.all(::canInitialize)
+                        if(type != null && n.inputs["value"] == null && !canInitialize(type)) issue(n, "图片、音频、气泡或含图片的记录需要设置初始引用")
                         n.inputs["value"]?.let { if (type != null && !compatible(expressionType(it, n, inputScope), type)) issue(n, "初始值类型不匹配") }
                         scope = define(n.variable)
                     }
@@ -167,13 +167,20 @@ object WorkflowValidator {
                     WorkflowKind.OCR -> { input("image", WorkflowType.IMAGE); input("language", WorkflowType.TEXT); output(WorkflowType.TEXT) }
                     WorkflowKind.TRANSLATE -> {
                         input("text", WorkflowType.TEXT); input("source", WorkflowType.TEXT); input("target", WorkflowType.TEXT); output(WorkflowType.TEXT)
-                        if (runCatching { n.translationEngine() }.isFailure) issue(n, "机翻引擎必须明确选择")
+                        runCatching { n.translationEngine() }.exceptionOrNull()?.let { failure ->
+                            issue(n, failure.message ?: "机翻引擎必须明确选择")
+                        }
                     }
                     WorkflowKind.API, WorkflowKind.API_STREAM -> {
                         input("profile", WorkflowType.TEXT); input("prompt", WorkflowType.TEXT)
+                        n.inputs["maxOutputLength"]?.let {
+                            if(it !is WorkflowExpression.Number || !it.value.isFinite() || it.value < 1 || it.value % 1 != 0.0 || it.value > Int.MAX_VALUE)
+                                issue(n, "最大输出长度必须是正整数")
+                        }
                         if ((n.inputs["profile"] as? WorkflowExpression.Text)?.value?.isBlank() == true) issue(n, "请选择 API 配置")
                         n.inputs["context"]?.let { if (expressionType(it, n, scope)?.kind != WorkflowDataKind.CONTEXT) issue(n, "上下文参数必须是上下文") }
                         n.inputs["images"]?.let { val t = expressionType(it, n, scope); if (t?.kind != WorkflowDataKind.IMAGE && t != WorkflowType.list(WorkflowType.IMAGE)) issue(n, "附件必须是图片或图片列表") }
+                        n.inputs["audios"]?.let { val t = expressionType(it, n, scope); if (t?.kind != WorkflowDataKind.AUDIO && t != WorkflowType.list(WorkflowType.AUDIO)) issue(n, "音频附件必须是音频或音频列表") }
                         n.inputs["attachCurrentImage"]?.let {
                             if (it !is WorkflowExpression.Boolean) issue(n, "自动附带当前气泡图片必须是开关")
                             if (it == WorkflowExpression.Boolean(true) && WorkflowEditing.currentBubble(scope) == null) issue(n, "自动附图需要位于气泡循环内")
@@ -199,7 +206,7 @@ object WorkflowValidator {
                             WorkflowDataKind.RECORD -> t.fields.isNotEmpty() && t.fields.values.all(::apiType)
                             else -> false
                         }
-                        if (!apiType(n.resultType)) issue(n, "API 不能构造图片或气泡几何")
+                        if (!apiType(n.resultType)) issue(n, "API 不能构造图片、音频或气泡几何")
                         output(n.resultType)
                         if(n.kind == WorkflowKind.API_STREAM) {
                             val element = n.resultType.element
@@ -217,6 +224,10 @@ object WorkflowValidator {
                             if(item?.kind != WorkflowDataKind.RECORD || item.fields["translation"] != WorkflowType.TEXT) issue(n, "顺序回填需要含 translation 文本字段的记录（列表）")
                             if(item?.fields?.get("source")?.let { it != WorkflowType.TEXT } == true) issue(n, "原文 source 应为文本")
                             input("index", WorkflowType.NUMBER)
+                            (n.inputs["index"] as? WorkflowExpression.Number)?.value?.let { index ->
+                                if (!index.isFinite() || index < 1 || index % 1.0 != 0.0 || index > Int.MAX_VALUE)
+                                    issue(n, "起始气泡序号必须是从 1 开始的整数")
+                            }
                         }
                         if(refType(WorkflowRef(WorkflowSystem.PAGE), scope) == null) issue(n, "回填必须位于每页内")
                         else writable(WorkflowRef(WorkflowSystem.PAGE, listOf("bubbles")), n, scope)
@@ -228,13 +239,17 @@ object WorkflowValidator {
                             if (target.path.any { it.toIntOrNull() != null }) issue(n, "目标必须是整个列表，不能是列表中的某一项")
                         }
                         val value = input("value")
-                        if (t?.kind == WorkflowDataKind.TEXT && value != WorkflowType.TEXT) issue(n, "文本只能追加文本")
+                        if (n.kind == WorkflowKind.MERGE_LIST && t?.kind != WorkflowDataKind.LIST) issue(n, "合并列表需要同类型列表；文本拼接请使用追加一项")
+                        else if (t?.kind == WorkflowDataKind.TEXT && value != WorkflowType.TEXT) issue(n, "文本只能追加文本")
                         else if (t?.kind == WorkflowDataKind.LIST && !compatible(value, if (n.kind == WorkflowKind.APPEND) t.element!! else t)) issue(n, "追加条目的类型不匹配")
                         else if (t?.kind !in setOf(WorkflowDataKind.TEXT, WorkflowDataKind.LIST)) issue(n, "此变量不支持追加")
                     }
                     WorkflowKind.REPLACE -> { input("text", WorkflowType.TEXT); input("dictionary", WorkflowType.DICTIONARY); output(WorkflowType.TEXT) }
                     WorkflowKind.MESSAGE -> {
-                        val ref = n.target; if (ref == null) issue(n, "请选择上下文") else { writable(ref, n, scope); if (refType(ref, scope) != WorkflowType.CONTEXT) issue(n, "消息应追加到上下文") }
+                        val ref = n.target; if (ref == null) issue(n, "请选择写入上下文；请先在此步骤之前创建上下文变量") else {
+                            WorkflowEditing.contextWriteIssue(ref, scope)?.let { issue(n, it) }
+                            if (refType(ref, scope) != WorkflowType.CONTEXT) issue(n, "消息应追加到上下文")
+                        }
                         input("user", WorkflowType.TEXT); n.inputs["assistant"]?.let { if (expressionType(it, n, scope) != WorkflowType.TEXT) issue(n, "助手消息必须是文本") }
                     }
                     WorkflowKind.MERGE_GLOSSARY -> input("items", WorkflowType.list(WorkflowType.GLOSSARY_ENTRY))
@@ -247,9 +262,23 @@ object WorkflowValidator {
             scopes[(rows.lastOrNull()?.id ?: parent?.name.orEmpty()) + ":after"] = scope
         }
         if (program.version != 1) issues += WorkflowIssue("", "不支持的工作流版本")
-        visit(program.rows, null, emptyList(), 0)
-        fixedKinds.forEach { if (counts[it] != 1) issues += WorkflowIssue("", "漫画、每章节、每页结构各保留一个") }
-        if (counts[WorkflowKind.SEG] == null) issues += WorkflowIssue(program.allNodes().firstOrNull { it.kind == WorkflowKind.PAGES }?.id.orEmpty(), "请添加 SEG 行生成译文气泡")
+        val textInput = program.inputScenario == WorkflowInputScenario.TIMED_TEXT
+        val initial = if (!textInput) emptyList() else listOf(
+            WorkflowVariable(WorkflowSystem.SOURCE, "源语言", WorkflowType.TEXT), WorkflowVariable(WorkflowSystem.TARGET, "目标语言", WorkflowType.TEXT),
+            WorkflowVariable(WorkflowSystem.STYLE, "文风", WorkflowType.TEXT), WorkflowVariable(WorkflowSystem.GLOSSARY, "译名字典", WorkflowType.DICTIONARY),
+            WorkflowVariable(WorkflowSystem.TEXT_ENTRIES, "字幕条目", WorkflowType.list(WorkflowSystem.subtitleType)),
+            WorkflowVariable(WorkflowSystem.CURRENT_AUDIO, "当前句子录音", WorkflowType.AUDIO),
+            WorkflowVariable(WorkflowSystem.CURRENT_IMAGE, "句子区间中点截图", WorkflowType.IMAGE)).map { WorkflowAvailableVariable(it, true) }
+        visit(program.rows, null, initial, 0)
+        if (textInput) {
+            val imageOnly = fixedKinds + setOf(WorkflowKind.SEG, WorkflowKind.OCR, WorkflowKind.PREPARE_MANGA, WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.APPLY_ORDER)
+            program.allNodes().filter { it.kind in imageOnly }.forEach { issues += WorkflowIssue(it.id, "字幕文本流程不能使用图像或漫画结构") }
+            if (program.rows.lastOrNull()?.kind != WorkflowKind.RETURN || program.rows.lastOrNull()?.resultType != WorkflowType.list(WorkflowSystem.subtitleType))
+                issues += WorkflowIssue("", "字幕流程最后应返回完整字幕条目列表")
+        } else {
+            fixedKinds.forEach { if (counts[it] != 1) issues += WorkflowIssue("", "漫画、每章节、每页结构各保留一个") }
+            if (counts[WorkflowKind.SEG] == null) issues += WorkflowIssue(program.allNodes().firstOrNull { it.kind == WorkflowKind.PAGES }?.id.orEmpty(), "请添加 SEG 行生成译文气泡")
+        }
         return WorkflowValidation(issues.distinct(), scopes, outputs)
     }
 }

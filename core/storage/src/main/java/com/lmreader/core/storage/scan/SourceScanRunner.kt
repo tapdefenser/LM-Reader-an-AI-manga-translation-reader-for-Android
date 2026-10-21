@@ -47,6 +47,15 @@ class SourceScanRunner(
     private val mangaRepository: MangaRepository,
     private val sourceRepository: SourceRepository,
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Admission seam for the durable task store.
+     *
+     * The default runs [work] inline, preserving the original in-process semantics for callers
+     * and tests. The app supplies a callback that submits a `SOURCE_SCAN` task and waits for its
+     * executor, which rebuilds the scan through [runScanNow].
+     */
+    private val admission: suspend (LibrarySource, Boolean, suspend () -> Unit) -> Unit =
+        { _, _, work -> work() },
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -107,6 +116,17 @@ class SourceScanRunner(
         loopJob.join()
     }
 
+    /**
+     * Executor entry point: run exactly one scan for [source], without scheduling, merging or
+     * terminal-state bookkeeping (those stay in [requestScan]/[runScanLoop]).
+     *
+     * Only the app's `SOURCE_SCAN` executor calls this in production. It must not call
+     * [requestScan], otherwise admission would recurse into another durable task.
+     */
+    suspend fun runScanNow(source: LibrarySource, force: Boolean) {
+        runScan(source, force)
+    }
+
     suspend fun cancel(sourceId: String) {
         val job = lock.withLock {
             pendingCommands.remove(sourceId)
@@ -140,7 +160,11 @@ class SourceScanRunner(
             while (currentCoroutineContext().isActive) {
                 lock.withLock { currentCommands[sourceId] = command }
                 val actual = CoroutineScope(currentCoroutineContext()).launch {
-                    runScan(command.source, command.force)
+                    // Admission owns the actual run in production (durable SOURCE_SCAN task);
+                    // the default callback still runs the work inline for existing callers.
+                    admission(command.source, command.force) {
+                        runScan(command.source, command.force)
+                    }
                 }
                 lock.withLock { activeRunJobs[sourceId] = actual }
                 actual.join()

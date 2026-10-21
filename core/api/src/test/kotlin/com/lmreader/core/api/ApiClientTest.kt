@@ -12,6 +12,54 @@ import kotlin.test.*
 import org.junit.Test
 
 class ApiClientTest {
+    @Test fun managedRequestsRecordReceiptAndDoNotRetryAnAmbiguousServerFailure() = runBlocking {
+        val calls = AtomicInteger()
+        val events = java.util.Collections.synchronizedList(mutableListOf<Triple<String, String, String>>())
+        Server { e -> calls.incrementAndGet(); e.reply(503, "{}") }.use { server ->
+            withContext(TaskContext("task", 2, 100, onRemoteRequest = { id, scope, status -> events += Triple(id, scope, status) }) +
+                ApiTraceContext(publicationKey = "page")) {
+                assertFailsWith<ApiException> { ApiClient(pause = {}).stream(server.profile(), "test").toList() }
+            }
+        }
+        assertEquals(1, calls.get())
+        assertEquals(listOf("PREPARED", "SENT", "UNKNOWN"), events.map { it.third })
+        assertEquals(1, events.map { it.first }.distinct().size)
+        assertTrue(events.all { it.second == "page" })
+    }
+    @Test fun managedRateLimitRejectionCanRetryWithoutUncertainBilling() = runBlocking {
+        val calls = AtomicInteger()
+        val statuses = java.util.Collections.synchronizedList(mutableListOf<String>())
+        Server { e -> if(calls.incrementAndGet() == 1) e.reply(429, "{}") else e.reply(200, success, "text/event-stream") }.use { server ->
+            withContext(TaskContext("task", 1, 0, onRemoteRequest = { _, _, status -> statuses += status })) {
+                ApiClient(pause = {}).stream(server.profile(), "test").toList()
+            }
+        }
+        assertEquals(2, calls.get())
+        assertEquals(listOf("PREPARED", "SENT", "REJECTED", "PREPARED", "SENT", "RECEIVED"), statuses.toList())
+    }
+    @Test fun interactiveApiWaiterWinsNextPermitAndStaleCallerCannotRaiseRegisteredLimit() = runBlocking {
+        val limiter = ApiConcurrencyLimiter()
+        limiter.register("profile", 1, "server")
+        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+        val order = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val first = launch { limiter.withPermit("profile", 8, "server") { entered.complete(Unit); release.await() } }
+        entered.await()
+        val ordinaryWaiting = CompletableDeferred<Unit>()
+        val ordinary = launch(TaskContext("ordinary", 0, 0, onWaiting = { if(it != null) ordinaryWaiting.complete(Unit) })) {
+            limiter.withPermit("profile", 8, "server") { order += "ordinary" }
+        }
+        ordinaryWaiting.await()
+        val urgentWaiting = CompletableDeferred<Unit>()
+        val urgent = launch(TaskContext("urgent", 0, 100, onWaiting = { if(it != null) urgentWaiting.complete(Unit) })) {
+            limiter.withPermit("profile", 8, "server") { order += "urgent" }
+        }
+        urgentWaiting.await()
+        assertEquals(1, limiter.activeRequests.value)
+        assertTrue(order.isEmpty())
+        release.complete(Unit); joinAll(first, ordinary, urgent)
+        assertEquals(listOf("urgent", "ordinary"), order.toList())
+        assertEquals(0, limiter.activeRequests.value)
+    }
     @Test fun `backoff releases the permit and cancellation does not start another attempt`() = runBlocking<Unit> {
         val calls = AtomicInteger()
         val backoff = CompletableDeferred<Unit>()

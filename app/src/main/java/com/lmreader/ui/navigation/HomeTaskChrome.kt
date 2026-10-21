@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Translate
+import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,6 +33,7 @@ import com.lmreader.di.AppContainer
 import com.lmreader.screen.ScreenBallPosition
 import com.lmreader.tasks.TaskQueue
 import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /** Home-only space for ongoing work and the future screen translation entry. */
 @Composable
@@ -40,10 +43,22 @@ internal fun HomeTaskChrome(container: AppContainer, enabled: Boolean, onOpenQue
     val screenState by container.screenTranslation.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val step by container.translationQueue.currentStep.collectAsStateWithLifecycle()
+    val mediaMode by container.preferences.homeMediaMode.collectAsStateWithLifecycle(initialValue = null)
+    val scope = rememberCoroutineScope()
     val notice = notices[TaskQueue.TRANSLATION]?.takeIf { enabled && it.working }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             content(Modifier.weight(1f).fillMaxWidth())
+            if(enabled && mediaMode != null) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 16.dp),
+                horizontalArrangement = Arrangement.Center) {
+                SingleChoiceSegmentedButtonRow(Modifier.widthIn(max = 264.dp).width(240.dp)) {
+                    listOf("IMAGE" to "图片", "VIDEO" to "视频").forEachIndexed { index, (mode, label) ->
+                        SegmentedButton(selected = mediaMode == mode, onClick = { scope.launch { container.preferences.setHomeMediaMode(mode) } },
+                            shape = SegmentedButtonDefaults.itemShape(index, 2),
+                            icon = { Icon(if(mode == "IMAGE") Icons.Outlined.Image else Icons.Outlined.Videocam, null) }) { Text(label) }
+                    }
+                }
+            }
             if (notice != null) Surface(color = MaterialTheme.colorScheme.secondaryContainer,
                 modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenQueue).testTag("home-translation-progress")) {
                 Row(Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -53,8 +68,7 @@ internal fun HomeTaskChrome(container: AppContainer, enabled: Boolean, onOpenQue
                         Text(listOf(notice.item.manga, notice.item.chapter).filter(String::isNotBlank).joinToString(" · ")
                             .ifBlank { stringResource(R.string.lmreader_task_translation) },
                             style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                        Text(listOfNotNull(step?.pageName?.takeIf(String::isNotBlank),
-                            step?.rowLabel?.takeIf(String::isNotBlank),
+                        Text(listOfNotNull(notice.item.chapter.takeIf(String::isNotBlank),
                             if (notice.item.total > 0) "${notice.item.completed}/${notice.item.total}" else null).joinToString(" · "),
                             style = MaterialTheme.typography.bodySmall, maxLines = 1)
                     }
@@ -65,7 +79,7 @@ internal fun HomeTaskChrome(container: AppContainer, enabled: Boolean, onOpenQue
             val density = LocalDensity.current
             val size = with(density) { 48.dp.toPx() }
             val rangeX = (with(density) { maxWidth.toPx() } - size).coerceAtLeast(0f)
-            val rangeY = (with(density) { maxHeight.toPx() } - size * 2).coerceAtLeast(0f)
+            val rangeY = (with(density) { (maxHeight - 128.dp).toPx() } - size * 2).coerceAtLeast(0f)
             var x by rememberSaveable { mutableFloatStateOf(.94f) }
             var y by rememberSaveable { mutableFloatStateOf(.76f) }
             var tucked by rememberSaveable { mutableStateOf(false) }

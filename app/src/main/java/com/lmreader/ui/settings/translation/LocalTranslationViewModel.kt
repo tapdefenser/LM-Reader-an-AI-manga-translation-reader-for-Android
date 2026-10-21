@@ -20,18 +20,6 @@ internal class LocalTranslationViewModel(private val container: AppContainer): V
     val state = mutable.asStateFlow()
     private var job: Job? = null
     private var catalogJob: Job? = null
-    init {
-        viewModelScope.launch {
-            container.translationSources.settings.collectLatest { settings ->
-                if (settings.engine == TranslationModelEngine.OPUS_MT) {
-                    catalogJob?.cancelAndJoin()
-                    container.translationCatalogs.select(settings)
-                    val fetchedAt = container.translationCatalogs.state.value.catalog.fetchedAt ?: 0L
-                    if (System.currentTimeMillis() - fetchedAt > 24 * 60 * 60 * 1000L) refreshCatalog()
-                }
-            }
-        }
-    }
     fun refreshCatalog() {
         if(catalogJob?.isActive==true) return
         catalogJob=viewModelScope.launch {
@@ -41,17 +29,6 @@ internal class LocalTranslationViewModel(private val container: AppContainer): V
         }
     }
     fun cancelCatalog() {catalogJob?.cancel()}
-    fun engine(value: TranslationModelEngine) {
-        if (state.value.running) return
-        cancelCatalog()
-        mutable.update { it.copy(result = null, error = null) }
-        viewModelScope.launch {
-            val settings = container.translationSources.settings.first()
-            container.translationSources.save(settings.copy(engine = value,
-                source = if (value == TranslationModelEngine.OPUS_MT && settings.source == TranslationDownloadSource.MOZILLA)
-                    TranslationDownloadSource.HUGGING_FACE else settings.source))
-        }
-    }
     fun source(value: LocalTranslationLanguage) { if (!state.value.running) mutable.update { it.copy(source=value,result=null,error=null) } }
     fun target(value: LocalTranslationLanguage) { if (!state.value.running) mutable.update { it.copy(target=value,result=null,error=null) } }
     fun text(value: String) { if (!state.value.running) mutable.update { it.copy(input=value,result=null,error=null) } }

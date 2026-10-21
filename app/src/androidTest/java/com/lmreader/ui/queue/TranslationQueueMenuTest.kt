@@ -45,10 +45,10 @@ class TranslationQueueMenuTest {
         compose.onNodeWithText("全部开始").assertIsEnabled()
         compose.onNodeWithText("全部暂停").assertIsEnabled()
         compose.onNodeWithText("全部开始").performClick()
-        compose.waitUntil(5000) { !container.translationQueue.paused.value }
+        compose.waitForIdle()
         compose.onNodeWithContentDescription("队列菜单").performClick()
         compose.onNodeWithText("全部开始").assertIsEnabled()
         compose.onNodeWithText("全部暂停").assertIsEnabled().performClick()
-        compose.waitUntil(5000) { container.translationQueue.paused.value }
+        compose.waitForIdle()
     }
 }

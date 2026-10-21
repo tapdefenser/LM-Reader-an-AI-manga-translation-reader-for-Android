@@ -73,12 +73,7 @@ fun LocalTranslationScreen(container:AppContainer,onBack:()->Unit) {
     }}) {padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding),contentPadding=PaddingValues(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
             item {
-                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    TranslationModelEngine.entries.forEach { option -> FilterChip(selected=engine==option,onClick={vm.engine(option)},
-                        enabled=settings!=null && !test.running,label={Text(if(option==TranslationModelEngine.OPUS_MT) "OPUS-MT" else "Bergamot")}) }
-                }
-                Text(stringResource(if(engine==TranslationModelEngine.OPUS_MT) R.string.local_mt_opus_backend else R.string.local_mt_backend),style=MaterialTheme.typography.titleMedium)
-                if(engine==TranslationModelEngine.OPUS_MT) Text(stringResource(R.string.local_mt_opus_help),style=MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.local_mt_backend),style=MaterialTheme.typography.titleMedium)
                 Text(stringResource(R.string.local_mt_current_source,settings?.let {sourceLabel(it.source)} ?: stringResource(R.string.local_mt_loading)),style=MaterialTheme.typography.bodySmall)
                 Text(stringResource(R.string.local_mt_download_lifetime),style=MaterialTheme.typography.bodySmall)
                 TextButton(onClick={licenseOpen=true}) {Text(stringResource(R.string.local_mt_licenses))}
@@ -231,7 +226,7 @@ private fun SourceDialog(initial:TranslationSourceSettings,container:AppContaine
     var wifi by remember {mutableStateOf(initial.wifiOnly)};var error by remember {mutableStateOf<String?>(null)};var saving by remember {mutableStateOf(false)}
     val scope=rememberCoroutineScope()
     AlertDialog(onDismissRequest={if(!saving) onDismiss()},title={Text(stringResource(R.string.local_mt_source_title))},text={Column(Modifier.verticalScroll(rememberScrollState())) {
-        TranslationDownloadSource.entries.filter {initial.engine!=TranslationModelEngine.OPUS_MT || it!=TranslationDownloadSource.MOZILLA}.forEach {option ->Row(Modifier.fillMaxWidth().clickable(enabled=!saving) {source=option}) {
+        TranslationDownloadSource.entries.forEach {option ->Row(Modifier.fillMaxWidth().clickable(enabled=!saving) {source=option}) {
             RadioButton(source==option,{source=option},enabled=!saving);Text(sourceLabel(option),Modifier.padding(top=12.dp))
         }}
         if(source==TranslationDownloadSource.CUSTOM) OutlinedTextField(base,{base=it},Modifier.fillMaxWidth(),label={Text(stringResource(R.string.local_mt_custom_base))},singleLine=true,enabled=!saving)

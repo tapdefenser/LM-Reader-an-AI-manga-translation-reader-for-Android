@@ -6,8 +6,48 @@ import java.util.UUID
 data class WorkflowPosition(val parentId: String? = null, val index: Int, val otherwise: Boolean = false)
 data class WorkflowFlatRow(val node: WorkflowNode, val depth: Int, val position: WorkflowPosition)
 data class WorkflowReferenceChoice(val ref: WorkflowRef, val label: String, val type: WorkflowType, val readOnly: Boolean)
+data class WorkflowBlockedTarget(val choice: WorkflowReferenceChoice, val reason: String)
 
 object WorkflowEditing {
+    /** MESSAGE uses ordinary synchronous writes, never the parallel append channel. */
+    fun contextWriteIssue(ref: WorkflowRef, scope: List<WorkflowAvailableVariable>): String? {
+        val variable = scope.lastOrNull { it.variable.id == ref.variableId }
+            ?: return "上下文变量在此处不可用；请在此步骤之前声明"
+        if (variable.iterator) return "循环条目不可直接写入；请在循环内新建上下文变量"
+        if (variable.readOnly) return "异步分支的外层上下文只读；请在分支内创建，或使用同步循环积累"
+        val choice = references(listOf(variable)).firstOrNull { it.ref == ref }
+            ?: return "上下文字段不存在"
+        if (choice.readOnly) return "此字段只读；请创建可写上下文变量"
+        return null
+    }
+
+    fun blockedContextTargets(program: WorkflowProgram, id: String): List<WorkflowBlockedTarget> {
+        val scope = WorkflowValidator.validate(program).scopes[id].orEmpty()
+        val row = flatten(program).first { it.node.id == id }
+        val later = rows(program, row.position).drop(row.position.index + 1).mapNotNull { it.variable?.id }.toSet()
+        val hidden = program.allNodes().mapNotNull { it.variable }.distinctBy { it.id }
+            .filter { variable -> scope.none { it.variable.id == variable.id } }
+        return references(scope).filter { it.type == WorkflowType.CONTEXT }.mapNotNull { choice ->
+            contextWriteIssue(choice.ref, scope)?.let { WorkflowBlockedTarget(choice, it) }
+        } + references(hidden.map { WorkflowAvailableVariable(it) }).filter { it.type == WorkflowType.CONTEXT }.map { choice ->
+            WorkflowBlockedTarget(choice, if (choice.ref.variableId in later) "声明在此步骤之后；请将声明移到此步骤之前"
+                else "变量属于其他作用域；请在当前作用域创建上下文")
+        }
+    }
+
+    /** Insert beside the edited step, inside its branch, and bind it as one undoable change. */
+    fun createTargetBefore(program: WorkflowProgram, node: WorkflowNode, type: WorkflowType): WorkflowProgram {
+        require(node.kind == WorkflowKind.MESSAGE && type == WorkflowType.CONTEXT ||
+            node.kind == WorkflowKind.MERGE_LIST && type.kind == WorkflowDataKind.LIST)
+        val position = flatten(program).first { it.node.id == node.id }.position
+        val names = program.allNodes().mapNotNull { it.variable?.name }.toSet()
+        val base = if (type == WorkflowType.CONTEXT) "上下文" else "合并结果"
+        val name = generateSequence(1) { it + 1 }.map { if (it == 1) base else "$base$it" }.first { it !in names }
+        val variable = WorkflowVariable(UUID.randomUUID().toString(), name, type)
+        val updated = update(program, node.id) { node.copy(target = WorkflowRef(variable.id), resultType = type) }
+        return insert(updated, position, WorkflowNode(UUID.randomUUID().toString(), WorkflowKind.DECLARE, variable = variable))
+    }
+
     fun currentBubble(scope: List<WorkflowAvailableVariable>): WorkflowVariable? =
         scope.lastOrNull { it.iterator && it.variable.type == WorkflowType.BUBBLE }?.variable
     fun automaticImage(node: WorkflowNode, scope: List<WorkflowAvailableVariable>): WorkflowRef? =
@@ -90,11 +130,16 @@ object WorkflowEditing {
         scope.forEach { walk(it, it.variable.type, emptyList(), it.variable.name, 0) }
     }
     /** Output targets a row may write: appends reach read-only parents, iteration variables are never assignment targets. */
-    fun writeTargets(outScope: List<WorkflowAvailableVariable>, append: Boolean = false): List<WorkflowReferenceChoice> =
-        references(outScope).filterNot { choice ->
-            (choice.readOnly && !append) || outScope.any { it.variable.id == choice.ref.variableId &&
-                (it.iterator || WorkflowReferencePaths.resolve(it.variable.type, choice.ref.path)?.readOnly == true) }
+    fun writeTargets(outScope: List<WorkflowAvailableVariable>, append: Boolean = false): List<WorkflowReferenceChoice> {
+        // Parallel append bypasses inherited read-only scope, never an intrinsic system/geometry restriction.
+        val intrinsic = if (append) references(outScope.map { it.copy(readOnly = false) }).filterNot { it.readOnly }.map { it.ref }.toSet() else emptySet()
+        return references(outScope).filterNot { choice ->
+            (choice.readOnly && (!append || choice.ref !in intrinsic)) ||
+                (append && choice.ref.path.any { it.toIntOrNull() != null }) ||
+                outScope.any { it.variable.id == choice.ref.variableId &&
+                    (it.iterator || WorkflowReferencePaths.resolve(it.variable.type, choice.ref.path)?.readOnly == true) }
         }
+    }
     fun copyNode(node: WorkflowNode): WorkflowNode {
         require(node.kind !in WorkflowValidator.fixedKinds)
         val nodes = WorkflowProgram(rows = listOf(node)).allNodes()

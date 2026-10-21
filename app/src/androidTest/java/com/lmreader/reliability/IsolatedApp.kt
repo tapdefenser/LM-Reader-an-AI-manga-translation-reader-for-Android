@@ -25,6 +25,7 @@ class IsolatedApp(base: Context) : Application() {
 suspend fun closeContainer(container: AppContainer) {
     // Room observers must finish before the connection pool is closed.
     container.backgroundScope.coroutineContext.job.cancelAndJoin()
+    container.workDatabase.close()
     container.database.close()
 }
 

@@ -13,7 +13,7 @@ object WorkflowLabels {
     }
     fun type(type: WorkflowType): String = "<" + when (type.kind) {
         WorkflowDataKind.TEXT -> "文本"; WorkflowDataKind.NUMBER -> "数字"; WorkflowDataKind.BOOLEAN -> "布尔"
-        WorkflowDataKind.IMAGE -> "图片"; WorkflowDataKind.BUBBLE -> "气泡"; WorkflowDataKind.CONTEXT -> "上下文"
+        WorkflowDataKind.IMAGE -> "图片"; WorkflowDataKind.AUDIO -> "音频"; WorkflowDataKind.BUBBLE -> "气泡"; WorkflowDataKind.CONTEXT -> "上下文"
         WorkflowDataKind.LIST -> "列表${type.element?.let(::type) ?: "<?>"}"
         WorkflowDataKind.RECORD -> when(type) { WorkflowType.TRANSLATION -> "气泡对照"; WorkflowType.PAGE_RECORD -> "页翻译记录"; WorkflowType.GLOSSARY_ENTRY -> "译名条目"; else -> "自定义记录" }; WorkflowDataKind.DICTIONARY -> "字典"
     } + ">"

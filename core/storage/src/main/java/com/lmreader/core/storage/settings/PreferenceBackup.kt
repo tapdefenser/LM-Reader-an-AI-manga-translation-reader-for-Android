@@ -30,7 +30,7 @@ class PreferenceBackup(private val context: Context) {
     private val types = buildMap {
         listOf("onboarding_completed", "chapter_sort_desc", "chapter_order_desc", "chapter_order_manual", "bookshelf_sort_desc",
             "translation_auto_detect_source", "vision_seg_gpu", "vision_ocr_hardware_acceleration").forEach { put(it, "boolean") }
-        listOf("library_display_mode", "library_source_filter", "chapter_order_mode", "bookshelf_sort_mode", "translation_source_language",
+        listOf("home_media_mode", "video_library_state", "video_shelf_state", "video_subtitle_style", "library_display_mode", "library_source_filter", "chapter_order_mode", "bookshelf_sort_mode", "translation_source_language",
             "translation_target_language", "translation_global_style", "bubble_fill_mode_v1", "reader_settings_v1", "vision_ocr_backend", "screen_translation_options_v1").forEach { put(it, "string") }
         listOf("bubble_opacity_v1", "bubble_padding_v1", "vision_seg_concurrency", "vision_ocr_concurrency", "translation_preprocess_cache_mb",
             "machine_translation_concurrency", "machine_translation_memory_mb").forEach { put(it, "int") }

@@ -21,6 +21,24 @@ import kotlinx.coroutines.flow.map
  * `preferencesDataStore` 委托，否则同一文件会被打开两次并抛异常。
  */
 class AppPreferences(private val context: Context) {
+    val videoSubtitleStyle: Flow<String> = context.preferenceStore.data.map { it[stringPreferencesKey("video_subtitle_style")] ?: "{}" }
+    suspend fun setVideoSubtitleStyle(style: String) {
+        require(style.length <= 16_000)
+        context.preferenceStore.edit { it[stringPreferencesKey("video_subtitle_style")] = style }
+    }
+    /** One selection shared by gallery and shelf; their list state remains separate. */
+    val homeMediaMode: Flow<String> = context.preferenceStore.data.map { if(it[KEY_HOME_MEDIA_MODE] == "VIDEO") "VIDEO" else "IMAGE" }
+    suspend fun setHomeMediaMode(mode: String) {
+        require(mode in setOf("IMAGE", "VIDEO"))
+        context.preferenceStore.edit { it[KEY_HOME_MEDIA_MODE] = mode }
+    }
+    private val KEY_HOME_MEDIA_MODE = stringPreferencesKey("home_media_mode")
+    fun videoHomeState(shelf: Boolean): Flow<String> = context.preferenceStore.data.map {
+        it[stringPreferencesKey(if(shelf) "video_shelf_state" else "video_library_state")] ?: "{}"
+    }
+    suspend fun setVideoHomeState(shelf: Boolean, state: String) {
+        context.preferenceStore.edit { it[stringPreferencesKey(if(shelf) "video_shelf_state" else "video_library_state")] = state }
+    }
 
     /**
      * 是否完成首次引导。默认 false（开发文档 3）。

@@ -13,6 +13,28 @@ import java.util.UUID
 
 @RunWith(AndroidJUnit4::class)
 class ReaderPageArtifactStoreTest {
+    @Test fun taskIdentityAndHumanProvenanceSurviveEditsAndReopen() {
+        val identity = "a".repeat(64)
+        val saved = store.save("page", "source-hash", LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED,
+            200, 300, regions("page"), emptyList(), 0, resultIdentity = identity)
+        val human = store.saveEdits(saved, saved.regions.map { it.copy(translatedText = "human") })
+        val loaded = store.current("page")!!
+        assertEquals(human.revision, loaded.revision); assertTrue(loaded.manuallyEdited)
+        assertTrue(loaded.matchesTask(saved.source, saved.target, identity))
+        assertFalse(loaded.matchesTask(saved.source, LocalTranslationLanguage.JAPANESE, identity))
+        assertFalse(loaded.matchesTask(saved.source, saved.target, "b".repeat(64)))
+    }
+
+    @Test fun oldSchemaTwoDataIsViewableButTaskMatchingRemainsUnknown() {
+        val saved = save("page")
+        val envelope = JSONObject(saved.dataFile.readText()); val json = JSONObject(envelope.getString("document"))
+        json.remove("resultIdentity"); json.remove("manuallyEdited")
+        val text = json.toString()
+        saved.dataFile.writeText(envelope.put("document", text).put("sha256", ReaderPageArtifactStore.sha256(text.toByteArray(Charsets.UTF_8))).toString())
+        val old = store.load("page", "source-hash")!!
+        assertEquals(saved.regions, old.regions); assertNull(old.resultIdentity)
+        assertFalse(old.matchesTask(old.source, old.target, "a".repeat(64)))
+    }
     @Test fun newBubbleFontScaleRotationAndGeometrySurviveSaving() {
         val base=ReaderPageTranslation("manual","",File(root,"new-draft"),LocalTranslationLanguage.ENGLISH,
             LocalTranslationLanguage.CHINESE_SIMPLIFIED,"hash",200,300,emptyList(),emptyList(),0)

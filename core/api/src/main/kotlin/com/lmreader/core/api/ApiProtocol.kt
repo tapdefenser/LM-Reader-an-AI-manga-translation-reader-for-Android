@@ -8,6 +8,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 /** 协议组装与校验，独立于 Android、存储和 HTTP 传输。 */
 object ApiProtocol {
     private val protectedFields = setOf("model", "messages", "input", "contents", "stream", "systemInstruction")
+    private const val MAX_MEDIA_BASE64 = 24_000_000L
 
     fun validate(profile: ApiProfile, requireModel: Boolean = true) {
         val url = profile.url.trim().toHttpUrlOrNull()
@@ -76,7 +77,10 @@ object ApiProtocol {
 
     fun requestBody(profile: ApiProfile, messages: List<ApiMessage>): String {
         validate(profile)
-        require(messages.isNotEmpty() && messages.size <= 200 && messages.any { it.text.isNotBlank() || it.images.isNotEmpty() }) { "请求消息不能为空或过多" }
+        require(messages.isNotEmpty() && messages.size <= 200 && messages.any { it.text.isNotBlank() || it.images.isNotEmpty() || it.audios.isNotEmpty() }) { "请求消息不能为空或过多" }
+        require(messages.all { it.audios.isEmpty() || it.role == "user" }) { "仅用户消息可以包含音频附件" }
+        val mediaLength = messages.sumOf { message -> message.images.sumOf { it.base64.length.toLong() } + message.audios.sumOf { it.base64.length.toLong() } }
+        require(mediaLength <= MAX_MEDIA_BASE64) { "图片与音频附件合计不能超过 24 MB" }
         val p = profile.parameters
         val body = buildJsonObject {
             when (profile.format) {
@@ -84,16 +88,20 @@ object ApiProtocol {
                     put("model", profile.model.trim()); put("stream", true)
                     put("messages", buildJsonArray { messages.forEach { message -> add(buildJsonObject {
                         put("role", message.role)
-                        if (message.images.isEmpty()) put("content", message.text) else put("content", buildJsonArray {
+                        if (message.images.isEmpty() && message.audios.isEmpty()) put("content", message.text) else put("content", buildJsonArray {
                             add(buildJsonObject { put("type", "text"); put("text", message.text) })
                             message.images.forEach { img -> add(buildJsonObject { put("type", "image_url"); put("image_url", buildJsonObject { put("url", img.dataUrl) }) }) }
+                            message.audios.forEach { audio -> add(buildJsonObject {
+                                put("type", "input_audio"); put("input_audio", buildJsonObject { put("data", audio.base64); put("format", audio.format) })
+                            }) }
                         })
                     }) } })
                     if (profile.thinkingEnabled) put("reasoning_effort", profile.thinkingLevel.wireValue)
                 }
                 ApiFormat.RESPONSES -> {
+                    require(messages.none { it.audios.isNotEmpty() }) { "当前 Responses 协议不支持音频附件，请选择支持音频的 Chat Completions 或 Gemini 配置" }
                     put("model", profile.model.trim()); put("stream", true)
-                    if (messages.size == 1 && messages.single().role == "user" && messages.single().images.isEmpty()) put("input", messages.single().text)
+                    if (messages.size == 1 && messages.single().role == "user" && messages.single().images.isEmpty() && messages.single().audios.isEmpty()) put("input", messages.single().text)
                     else put("input", buildJsonArray { messages.forEach { message -> add(buildJsonObject {
                         put("role", message.role); put("content", buildJsonArray {
                             add(buildJsonObject { put("type", if (message.role == "assistant") "output_text" else "input_text"); put("text", message.text) })
@@ -110,6 +118,7 @@ object ApiProtocol {
                         put("role", if (message.role == "assistant") "model" else "user"); put("parts", buildJsonArray {
                             add(buildJsonObject { put("text", message.text) })
                             message.images.forEach { img -> add(buildJsonObject { put("inlineData", buildJsonObject { put("mimeType", img.mimeType); put("data", img.base64) }) }) }
+                            message.audios.forEach { audio -> add(buildJsonObject { put("inlineData", buildJsonObject { put("mimeType", audio.normalizedMimeType); put("data", audio.base64) }) }) }
                         })
                     }) } })
                     put("generationConfig", buildJsonObject {

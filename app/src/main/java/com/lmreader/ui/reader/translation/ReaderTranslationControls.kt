@@ -69,10 +69,11 @@ fun PageTranslationDialog(container: AppContainer,initialSource: LocalTranslatio
     engines: Set<TranslationModelEngine> = setOf(TranslationModelEngine.BERGAMOT)) {
     val installed by container.translationModels.installedPacks.collectAsStateWithLifecycle()
     val catalog = remember(installed) { TranslationModelCatalog.fromPacks(installed.values.toList()) }
-    val routesReady = initialSource != null && engines.all { engine -> runCatching { catalog.route(initialSource, initialTarget, engine) }.isSuccess }
+    val routesReady = initialSource != null && engines.isNotEmpty() && engines.all { engine -> runCatching { catalog.route(initialSource, initialTarget, engine) }.isSuccess }
     AlertDialog(onDismissRequest = onDismiss, title = { Text(stringResource(R.string.reader_mt_action)) }, text = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("使用这部漫画的翻译选项，重译当前页。")
+            Text("将替换本页全部识别区域与译文，包括人工校对。新成果保存前取消或失败会保留原成果；若期间有人保存校对，本次结果不会覆盖新版本。")
             Text("原文：" + (initialSource?.let { languageLabel(it) } ?: "未选"))
             Text("目标：" + languageLabel(initialTarget))
             if (requiresLocalModels && !routesReady) Text("请在翻译选项中选择已下载模型支持的语言", color = MaterialTheme.colorScheme.error)

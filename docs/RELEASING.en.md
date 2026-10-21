@@ -4,7 +4,7 @@
 
 Release date: 2026-10-19. Version `0.1.11`, code `13`, tag `v0.1.11`, APK `LM-Reader-v0.1.11-64bit.apk`. See the [current notes](releases/v0.1.11.md) and [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.11).
 
-Use the same build/sign/package workflow and certificate below. `tools/package_release.py` reads the current `gradle/release.properties`, requires committed sources and packages this version's notes and checksums. This release adds OPUS-MT with automatic package discovery and fixes external screen-translation settings entry points; see the current notes for verification scope. Open distribution and long-running ARM checks remain as documented below.
+Use the same build/sign/package workflow and certificate below. `tools/package_release.py` reads the current `gradle/release.properties`, requires committed sources and packages this version's notes and checksums. See the current notes for verification scope. Open distribution and long-running ARM checks remain as documented below.
 
 ## v0.1.6 Reference
 
@@ -39,6 +39,7 @@ Use JDK 21, Python 3.9+/PyYAML, SDK Platform 37.0, Build Tools 36.0.0, NDK 28.2.
 python -m pip install PyYAML
 python tools/fetch_vision_models.py
 python tools/fetch_translation_sources.py
+python tools/fetch_asr_sources.py
 python tools/test_ui_translations.py
 ./gradlew :app:assembleDebug :app:lintDebug test --no-parallel --max-workers=2
 ./gradlew :app:assembleRelease :app:lintRelease --no-parallel --max-workers=2

@@ -44,7 +44,7 @@ interface TranslationDao {
     @Query("UPDATE chapter_translation SET state = 'INTERRUPTED', failure = '上次运行被中断', updatedAt = :at WHERE state = 'RUNNING'")
     suspend fun interruptRunning(at: Long)
 
-    @Query("UPDATE chapter_translation SET state = :state, updatedAt = :at WHERE chapterId IN (:ids) AND state IN ('PENDING', 'RUNNING', 'PAUSED')")
+    @Query("UPDATE chapter_translation SET state = :state, updatedAt = :at WHERE chapterId IN (:ids) AND state IN ('PENDING', 'RUNNING', 'PAUSED', 'INTERRUPTED')")
     suspend fun controlQueueItems(ids: List<String>, state: String, at: Long)
 
     @Query("UPDATE chapter_translation SET state = 'CANCELLED', updatedAt = :at WHERE chapterId IN (:ids) AND state != 'DONE'")

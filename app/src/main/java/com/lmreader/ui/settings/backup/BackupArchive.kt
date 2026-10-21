@@ -12,9 +12,14 @@ object BackupArchive {
     private const val MANIFEST = "manifest.properties"
     val tables = listOf("library_sources", "mangas", "chapters", "categories", "metadata_records",
         "shelf_entries", "reading_progress", "chapter_read_state", "chapter_translation", "manga_glossary")
-    private val documents = setOf("preferences.json", "api.json", "settings.json", "workflows.json", "queue-order.json")
+    private val requiredDocuments = setOf("preferences.json", "api.json", "settings.json", "workflows.json", "queue-order.json")
+    /** New media/task section; absent in old archives, which then keep all local media/task data. */
+    private val optionalDocuments = setOf("media-work.json")
+    private val documents = requiredDocuments + optionalDocuments
     fun allowed(name: String) = name in documents || tables.any { name == "database/$it.json" } ||
-        Regex("pages/[a-f0-9]{64}\\.json").matches(name)
+        Regex("pages/[a-f0-9]{64}\\.json").matches(name) || name == "video-library.json" ||
+        Regex("videos/[a-f0-9-]{36}\\.json").matches(name) ||
+        Regex("videos/[a-f0-9-]{36}/(frames|proofs|sources)/[a-f0-9]{64}\\.json").matches(name)
 
     fun write(root: File, output: OutputStream) {
         val files = root.walkTopDown().filter { it.isFile }.sortedBy { it.relativeTo(root).invariantSeparatorsPath }.toList()
@@ -60,7 +65,8 @@ object BackupArchive {
         val manifest = Properties().apply { File(root, MANIFEST).inputStream().use { load(it) } }
         require(manifest.getProperty("format") == "LM-Reader" && manifest.getProperty("version") == "1") { "不支持此备份版本" }
         val expected = manifest.stringPropertyNames().filter { it.startsWith("sha256.") }.map { it.removePrefix("sha256.") }.toSet()
-        require(expected + MANIFEST == seen && documents.all { it in expected } && tables.all { "database/$it.json" in expected }) { "备份清单不完整" }
+        require(expected + MANIFEST == seen && requiredDocuments.all { it in expected } &&
+            tables.all { "database/$it.json" in expected }) { "备份清单不完整" }
         expected.forEach { name ->
             val file = File(root, name)
             require(manifest.getProperty("size.$name") == file.length().toString() && manifest.getProperty("sha256.$name") == ExportFiles.hash(file)) { "备份校验失败：$name" }

@@ -2,10 +2,12 @@ package com.lmreader.core.translation
 
 import com.lmreader.core.model.*
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.*
 import org.junit.*
 import org.junit.Assert.*
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.security.MessageDigest
 
 class TranslationCatalogStoreTest {
     @get:Rule val temp=TemporaryFolder()
@@ -48,5 +50,37 @@ class TranslationCatalogStoreTest {
         folder.listFiles()!!.single().writeText("corrupt")
         val reopened=TranslationCatalogStore(fallback,folder,::result);reopened.select(mozilla)
         assertFalse(reopened.state.value.fetched);assertEquals(8,reopened.state.value.catalog.packs.size)
+    }
+    private fun cacheFile(folder:File,settings:TranslationSourceSettings):File {
+        val key=TranslationModelCatalog.sourceKey(settings)
+        val hash=MessageDigest.getInstance("SHA-256").digest(key.toByteArray()).joinToString("") {"%02x".format(it)}
+        return File(folder,"$hash.json")
+    }
+    @Test fun unsupportedCachedPackagesAreIgnoredWithoutLosingSupportedOnes()=runBlocking {
+        val folder=temp.newFolder();val current=fallback.pack("ja-en")
+        val supported=TranslationModelCatalog.packJson(current)
+        val removed=JsonObject(supported + ("id" to JsonPrimitive("legacy-opus")) + ("engine" to JsonPrimitive("OPUS_MT")))
+        val cached=buildJsonObject {
+            put("schema",3);put("engine","local-nmt-v1");put("sourceKey",TranslationModelCatalog.sourceKey(mozilla));put("fetchedAt",100L)
+            putJsonArray("packages") {add(supported);add(removed)}
+        }
+        cacheFile(folder,mozilla).writeText(cached.toString())
+        val store=TranslationCatalogStore(fallback,folder)
+        store.select(mozilla)
+        assertTrue(store.state.value.fetched)
+        assertEquals(listOf(current),store.state.value.catalog.packs)
+    }
+    @Test fun cacheWithOnlyUnsupportedPackagesFallsBackToBundledCatalog()=runBlocking {
+        val folder=temp.newFolder();val current=fallback.pack("ja-en")
+        val removed=JsonObject(TranslationModelCatalog.packJson(current) + ("engine" to JsonPrimitive("OPUS_MT")))
+        val cached=buildJsonObject {
+            put("schema",3);put("engine","local-nmt-v1");put("sourceKey",TranslationModelCatalog.sourceKey(mozilla))
+            putJsonArray("packages") {add(removed)}
+        }
+        cacheFile(folder,mozilla).writeText(cached.toString())
+        val store=TranslationCatalogStore(fallback,folder)
+        store.select(mozilla)
+        assertFalse(store.state.value.fetched)
+        assertEquals(fallback.packs,store.state.value.catalog.packs)
     }
 }

@@ -10,6 +10,8 @@ import com.lmreader.core.database.entity.ChapterTranslationEntity
 import com.lmreader.core.model.*
 import com.lmreader.di.AppContainer
 import com.lmreader.ui.workflow.translationTaskSnapshot
+import com.lmreader.ui.workflow.WorkflowRunSettings
+import com.lmreader.ui.workflow.workflowResultIdentity
 import com.lmreader.core.workflow.WorkflowEditing
 import com.lmreader.core.workflow.WorkflowPosition
 import com.lmreader.core.workflow.WorkflowValidator
@@ -366,9 +368,13 @@ class QueueSchedulingIntegrationTest {
         pages += extraId to extra
         val cachedId = pages[0].first
         val hash = java.security.MessageDigest.getInstance("SHA-256").digest(pages[0].second.readBytes()).joinToString("") { "%02x".format(it) }
-        container.localPageTranslator.artifacts.save(cachedId, hash, LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED,
-            800, 1000, emptyList(), emptyList(), 0, BubbleRenderSettings())
         val settings = MangaTranslationSettings(sourceLanguage = "en", targetLanguage = "zh-Hans")
+        val identity = workflowResultIdentity(TranslationWorkflow.LOCAL_MACHINE.program,
+            WorkflowRunSettings(LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED, "", BubbleRenderSettings(), settings.effectiveSegThreshold(),
+                segTextScope = settings.segTextScope, textDetectionThreshold = settings.effectiveTextDetectionThreshold(), freeTextMergeGapRatio = settings.effectiveFreeTextMergeGapRatio()),
+            container.translationModels.installedPacks.value.values.toList(), container.localVision.modelIdentities, container.visionExecutionPreferences.settings.value)
+        container.localPageTranslator.artifacts.save(cachedId, hash, LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED,
+            800, 1000, emptyList(), emptyList(), 0, BubbleRenderSettings(), resultIdentity = identity)
         val snapshot = translationTaskSnapshot(TranslationWorkflow.LOCAL_MACHINE, settings, "en", "zh-Hans", "", BubbleRenderSettings())
         val at = System.currentTimeMillis()
         val dao = container.database.translationDao()

@@ -39,7 +39,7 @@ fun MainMenuSheet(
             Spacer(Modifier.height(8.dp))
 
             MainDestination.entries
-                .filter { it != MainDestination.MENU }
+                .filter { it !in setOf(MainDestination.MENU, MainDestination.VIDEOS, MainDestination.EXPORT_QUEUE) }
                 .forEach { destination ->
                     val badge = when (destination) {
                         MainDestination.TRANSLATION_QUEUE -> activeTranslationTasks
@@ -82,6 +82,7 @@ enum class MainDestination(val label: String) {
     MENU("菜单"),
     LIBRARY("图库"),
     BOOKSHELF("书架"),
+    VIDEOS("本地视频"),
     TRANSLATION_QUEUE("翻译队列"),
     TRANSLATION_WORKFLOWS("翻译工作流"),
     API_LOGS("API 日志"),

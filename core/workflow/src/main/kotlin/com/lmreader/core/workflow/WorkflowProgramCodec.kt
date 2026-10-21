@@ -7,6 +7,7 @@ object WorkflowProgramCodec {
     fun encode(program: WorkflowProgram): String = json(program).toString()
     fun json(program: WorkflowProgram): JsonObject = buildJsonObject {
         put("version", program.version); put("rows", JsonArray(program.rows.map(::node)))
+        if (program.inputScenario != WorkflowInputScenario.IMAGE) put("inputScenario", program.inputScenario.name)
     }
     fun decode(text: String): WorkflowProgram {
         require(text.toByteArray().size <= 1_000_000) { "工作流超过大小上限" }
@@ -30,7 +31,8 @@ object WorkflowProgramCodec {
                 j["collectTo"]?.takeUnless { it is JsonNull }?.let(::readRef),
                 j["parallelLimit"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.int)
         }
-        return WorkflowProgram(rows = root.getValue("rows").jsonArray.map { readNode(it, 0) })
+        return WorkflowModernization.migrateTextMerges(WorkflowProgram(rows = root.getValue("rows").jsonArray.map { readNode(it, 0) },
+            inputScenario = WorkflowInputScenario.valueOf(root["inputScenario"]?.jsonPrimitive?.content ?: "IMAGE")))
     }
     fun type(value: WorkflowType): JsonObject = buildJsonObject {
         put("kind", value.kind.name); value.element?.let { put("element", type(it)) }

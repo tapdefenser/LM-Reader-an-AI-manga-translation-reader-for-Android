@@ -34,11 +34,12 @@ class TaskNoticeTracker(private val queue: TaskQueue) {
             return TaskNotice(queue, TaskNoticePhase.RUNNING,
                 TaskNoticeItem("single-page", "RUNNING", chapter = priorityPage), live.size, singlePage = true)
         }
-        val running = live.firstOrNull { it.state == "RUNNING" }
+        val running = live.firstOrNull { it.state in setOf("RUNNING", "PAUSING", "CANCELLING") }
         val pending = live.firstOrNull { it.state == "PENDING" }
         val held = live.firstOrNull { it.state == "PAUSED" }
         val failed = live.filter { it.state in setOf("FAILED", "INTERRUPTED") }
         val phase = when {
+            running?.state in setOf("PAUSING", "CANCELLING") -> TaskNoticePhase.PAUSING
             paused && running != null -> TaskNoticePhase.PAUSING
             paused && (pending != null || held != null) -> TaskNoticePhase.PAUSED
             running != null -> TaskNoticePhase.RUNNING

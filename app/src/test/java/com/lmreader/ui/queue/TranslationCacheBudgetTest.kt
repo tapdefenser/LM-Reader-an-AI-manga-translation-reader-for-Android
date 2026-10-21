@@ -5,6 +5,48 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TranslationCacheBudgetTest {
+    @Test fun differentKindsShareGlobalCapacityAndReleaseTheirOwnAccount() = runBlocking {
+        val global = TranslationCacheBudget(64)
+        val chapters = TranslationCacheBudget(64, global)
+        val video = TranslationCacheBudget(32, global)
+        val page = chapters.acquire(48, "chapter")
+        assertNull(video.tryAcquire(32, "video"))
+        assertEquals(48L, global.bytes.value)
+        val waiting = async { video.acquire(32, "video") }
+        yield(); assertFalse(waiting.isCompleted)
+        page.release()
+        val frame = withTimeout(1000) { waiting.await() }
+        assertEquals(0L, chapters.bytes.value)
+        assertEquals(32L, video.bytes.value)
+        assertEquals(32L, global.bytes.value)
+        frame.release(); frame.release()
+        assertEquals(0L, global.bytes.value)
+    }
+    @Test fun interactivePageWinsTheNextSharedMemoryAdmission() = runBlocking {
+        val global = TranslationCacheBudget(32)
+        val video = TranslationCacheBudget(32, global)
+        val reader = TranslationCacheBudget(32, global)
+        val held = video.acquire(32, "running")
+        val ordinary = async { video.acquire(32, "ordinary") }
+        yield()
+        val interactive = async(com.lmreader.core.model.InferencePriority(100)) { reader.acquire(32, "interactive") }
+        yield(); held.release()
+        val first = withTimeout(1000) { interactive.await() }
+        assertFalse(ordinary.isCompleted)
+        first.release(); withTimeout(1000) { ordinary.await() }.release()
+        assertEquals(0L, global.bytes.value)
+    }
+    @Test fun cancellingAChildWaitDoesNotLeakGlobalCapacity() = runBlocking {
+        val global = TranslationCacheBudget(32)
+        val video = TranslationCacheBudget(32, global)
+        val reader = TranslationCacheBudget(32, global)
+        val frame = video.acquire(32, "video")
+        val waiting = async { reader.acquire(16, "reader") }
+        yield(); waiting.cancelAndJoin(); frame.release()
+        val page = reader.acquire(32, "reader")
+        assertEquals(32L, global.bytes.value)
+        page.release(); assertEquals(0L, global.bytes.value)
+    }
     @Test fun preparedOtherMangaCanReachItsApiBeforeCapacityIsDeclaredBlocked() = runBlocking {
         val budget = TranslationCacheBudget(32)
         val prepared = budget.acquire(16, "prepared-manga")

@@ -15,14 +15,26 @@ data class ReaderPageTranslation(
     val regions: List<PageTranslatedRegion>, val modelPacks: List<String>, val elapsedMillis: Long,
     val renderSettings: BubbleRenderSettings = BubbleRenderSettings(),
     val preview: Boolean = false,
-)
+    val resultIdentity: String? = null,
+    val manuallyEdited: Boolean = false,
+    val producerTaskId: String? = null,
+) {
+    fun matchesTask(source: LocalTranslationLanguage, target: LocalTranslationLanguage, identity: String) =
+        this.source == source && this.target == target && resultIdentity != null && resultIdentity == identity
+}
 
-internal class PageTranslationRevisionConflict : IllegalStateException("Page translation changed before saving edits")
+internal class PageTranslationRevisionConflict : IllegalStateException("页成果已更新，本次写入已停止；请重新载入后再试")
 
 /** Durable page data, never an image cache. Atomic replacement also protects user edits. */
 class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = null) {
     init { check(root.isDirectory || root.mkdirs()) }
     fun has(pageId: String) = file(pageId).isFile || legacyPointer(pageId)?.isFile == true
+    /** Existing results remain viewable even when their task identity is unknown. */
+    @Synchronized
+    fun current(pageId: String): ReaderPageTranslation? {
+        if (!file(pageId).exists()) migratePage(pageId)
+        return read(pageId)
+    }
     @Synchronized
     fun snapshot(pageIds: List<String>, target: File): Map<String, ReaderPageTranslation> {
         migrateLegacy(); check(target.isDirectory || target.mkdirs())
@@ -52,11 +64,13 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
         width: Int, height: Int, regions: List<PageTranslatedRegion>, packs: List<String>, elapsed: Long,
         render: BubbleRenderSettings = BubbleRenderSettings(), expectedRevision: String? = null,
         requireAbsent: Boolean = false,
+        resultIdentity: String? = null, manuallyEdited: Boolean = false, producerTaskId: String? = null,
         checkCancelled: () -> Unit = {}): ReaderPageTranslation {
         if (requireAbsent && read(pageId) != null) throw PageTranslationRevisionConflict()
         if (expectedRevision != null && read(pageId)?.revision != expectedRevision) throw PageTranslationRevisionConflict()
         val result = ReaderPageTranslation(pageId, UUID.randomUUID().toString(), file(pageId), source, target,
-            hash, width, height, regions, packs, elapsed, render)
+            hash, width, height, regions, packs, elapsed, render, resultIdentity = resultIdentity, manuallyEdited = manuallyEdited,
+            producerTaskId = producerTaskId)
         validate(result)
         val document = encode(result).toString()
         val contents = JSONObject().put("sha256", sha256(document.toByteArray(Charsets.UTF_8)))
@@ -75,7 +89,8 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
     fun saveEdits(saved: ReaderPageTranslation, regions: List<PageTranslatedRegion>, checkCancelled: () -> Unit = {}) =
         save(saved.pageId, saved.sourceSha256, saved.source, saved.target, saved.width, saved.height, regions,
             saved.modelPacks, saved.elapsedMillis, saved.renderSettings, saved.revision.takeIf { it.isNotEmpty() },
-            requireAbsent = saved.revision.isEmpty(), checkCancelled = checkCancelled)
+            requireAbsent = saved.revision.isEmpty(), resultIdentity = saved.resultIdentity, manuallyEdited = true,
+            producerTaskId = saved.producerTaskId, checkCancelled = checkCancelled)
 
     /** Import old metadata before removing its private PNG. No comic source is opened. */
     @Synchronized
@@ -159,10 +174,13 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
                 BubbleRenderSettings(BubbleFillMode.valueOf(it.getString("fillMode")), it.getInt("opacity"), it.getInt("padding"),
                     runCatching { BubbleFont.valueOf(it.optString("font")) }.getOrDefault(BubbleFont.SYSTEM),
                     it.optInt("fontScale", 100), it.optBoolean("bold", false), it.optInt("freeTextMaskExpansion", 6))
-            } ?: BubbleRenderSettings()).also(::validate)
+            } ?: BubbleRenderSettings(), resultIdentity = json.optString("resultIdentity").takeIf { it.isNotBlank() && it != "null" },
+            manuallyEdited = json.optBoolean("manuallyEdited", false),
+            producerTaskId = json.optString("producerTaskId").takeIf { it.isNotBlank() && it != "null" }).also(::validate)
     }
 
     private fun validate(data: ReaderPageTranslation) {
+        require(data.resultIdentity == null || data.resultIdentity.matches(Regex("[a-f0-9]{64}"))) { "Invalid result identity" }
         require(data.width > 1 && data.height > 1 && data.width.toLong() * data.height <= 4_000_000)
         require(data.regions.size <= 1000 && data.regions.map { it.region.id }.distinct().size == data.regions.size)
         fun validRect(r: PixelRect) = listOf(r.left, r.top, r.right, r.bottom).all(Float::isFinite) &&
@@ -179,6 +197,8 @@ class ReaderPageArtifactStore(val root: File, private val legacyRoot: File? = nu
     private fun encode(data: ReaderPageTranslation) = JSONObject().put("schema", 2).put("pageId", data.pageId)
         .put("revision", data.revision).put("sourceSha256", data.sourceSha256).put("source", data.source.tag).put("target", data.target.tag)
         .put("width", data.width).put("height", data.height).put("elapsedMillis", data.elapsedMillis)
+        .put("resultIdentity", data.resultIdentity).put("manuallyEdited", data.manuallyEdited)
+        .put("producerTaskId", data.producerTaskId)
         .put("modelPacks", JSONArray(data.modelPacks)).put("render", JSONObject().put("fillMode", data.renderSettings.fillMode.name)
             .put("opacity", data.renderSettings.opacityPercent).put("padding", data.renderSettings.textPaddingPercent)
             .put("font", data.renderSettings.font.name).put("fontScale", data.renderSettings.fontScalePercent).put("bold", data.renderSettings.bold)

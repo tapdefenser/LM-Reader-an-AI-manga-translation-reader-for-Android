@@ -42,13 +42,17 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        requestedQueue.value = intent.getStringExtra("open-queue")
+        requestedQueue.value = intent.getStringExtra("open-queue") ?: intent.getStringExtra("open-settings")?.let { "settings-$it" }
     }
     override fun onStart() {
         super.onStart()
         val container = AppContainer.from(this)
         container.screenTranslation.setVisible(this, true)
         container.taskService.setVisible(true)
+        container.readerPageTasks
+        container.videoTasks
+        container.taskScheduler.poke()
+        container.videoMaintenance.refresh()
         container.translationQueue.start()
         container.exportQueue.start()
         container.taskNotifications.refresh()
@@ -72,7 +76,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         val container = AppContainer.from(this)
-        requestedQueue.value = intent.getStringExtra("open-queue")
+        requestedQueue.value = intent.getStringExtra("open-queue") ?: intent.getStringExtra("open-settings")?.let { "settings-$it" }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 container.taskService.leases.collect { leases ->

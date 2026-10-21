@@ -26,11 +26,12 @@ import com.lmreader.di.AppContainer
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ApiConfigurationHomeScreen(onLlm: () -> Unit, onLocal: () -> Unit, onOcr: () -> Unit, onSeg: () -> Unit, onBack: () -> Unit) {
+fun ApiConfigurationHomeScreen(onLlm: () -> Unit, onLocal: () -> Unit, onOcr: () -> Unit, onSeg: () -> Unit, onBack: () -> Unit, onAsr: () -> Unit = {}) {
     Scaffold(topBar = { ApiTopBar("API 与翻译引擎", onBack) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             ApiEntry("LLM 配置", "模型连接、请求参数与流式测试", onLlm)
             ApiEntry("本地翻译引擎", "离线机翻、语言包与下载源", onLocal)
+            ApiEntry("本地 ASR 模型", "离线语音识别、模型下载/导入与资源设置", onAsr)
             ApiEntry("OCR 配置", "本地 OCR 与远程模型配置", onOcr)
             ApiEntry("SEG 配置", "气泡分割、并发、GPU 加速与预处理缓存", onSeg)
         }

@@ -23,10 +23,11 @@ internal class TranslationRepositoryImpl(private val database: LmReaderDatabase)
             val states = dao.byChapters(chapterIds).associateBy { it.chapterId }
             val rows = chapterIds.distinct().mapNotNull { id ->
                 val old = states[id]
-                if (old != null && old.state != TranslationState.CANCELLED.name) return@mapNotNull null
+                val changed = old != null && (old.configSnapshot != request.configSnapshot || old.sourceLanguage != request.sourceLanguage || old.targetLanguage != request.targetLanguage)
+                if (old != null && old.state != TranslationState.CANCELLED.name && !(old.state == TranslationState.DONE.name && changed)) return@mapNotNull null
                 ChapterTranslationEntity(id, mangaId, request.targetLanguage, TranslationState.PENDING.name,
-                    request.sourceLanguage, false, request.configSnapshot, request.at, old?.translatedAt,
-                    old?.translatedCount ?: 0, null, request.at)
+                    request.sourceLanguage, false, request.configSnapshot, request.at, null,
+                    0, null, request.at)
             }
             dao.upsertAll(rows)
             // 同一事务收藏，队列开始运行前书架即可看到；重复入队也不改已有分类。

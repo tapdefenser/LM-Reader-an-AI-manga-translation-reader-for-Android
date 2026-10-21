@@ -1,2 +1,3 @@
 -keep class com.lmreader.core.translation.BergamotNative { *; }
--keep class com.lmreader.core.translation.MarianTokenizerNative { *; }
+# Resolved by exported JNI names in liblmreader_asr.so.
+-keep class com.lmreader.core.translation.asr.WhisperNative { *; }

@@ -9,6 +9,7 @@ import java.io.File
 class QueueOrderStore(private val file: File) {
     private val atomic = AtomicFile(file)
     private var manga = mutableListOf<String>()
+    private var translationGroups = mutableListOf<String>()
     private var chapters = mutableMapOf<String, MutableList<String>>()
     private var paused = false
     private var scheduling = TranslationSchedulingPriority.RESOURCES
@@ -19,13 +20,14 @@ class QueueOrderStore(private val file: File) {
         reload()
     }
     @Synchronized fun reload() {
-        manga.clear(); chapters.clear(); excluded.clear(); paused = false; scheduling = TranslationSchedulingPriority.RESOURCES
+        manga.clear(); translationGroups.clear(); chapters.clear(); excluded.clear(); paused = false; scheduling = TranslationSchedulingPriority.RESOURCES
         runCatching {
             val root = JSONObject(atomic.openRead().bufferedReader().use { it.readText() })
             paused = root.optBoolean("paused", false)
             scheduling = TranslationSchedulingPriority.entries.firstOrNull { it.name == root.optString("schedulingPriority") }
                 ?: TranslationSchedulingPriority.RESOURCES
             manga = root.getJSONArray("manga").strings().toMutableList()
+            translationGroups = root.optJSONArray("translationGroups")?.strings()?.toMutableList() ?: mutableListOf()
             val groups = root.getJSONObject("chapters")
             groups.keys().forEach { id -> chapters[id] = groups.getJSONArray(id).strings().toMutableList() }
             root.optJSONObject("excludedPages")?.let { saved -> saved.keys().forEach { id ->
@@ -36,6 +38,8 @@ class QueueOrderStore(private val file: File) {
     }
 
     @Synchronized fun mangaOrder(ids: List<String>): List<String> = order(manga, ids)
+    @Synchronized fun translationGroupOrder(ids: List<String>): List<String> = order(translationGroups, ids)
+    @Synchronized fun sortTranslationGroups(ids: List<String>) { translationGroups = ids.toMutableList(); save() }
     @Synchronized fun chapterOrder(mangaId: String, ids: List<String>): List<String> =
         order(chapters.getOrPut(mangaId) { mutableListOf() }, ids)
 
@@ -84,6 +88,7 @@ class QueueOrderStore(private val file: File) {
         val excludedJson = JSONObject()
         excluded.forEach { (id, entry) -> excludedJson.put(id, JSONObject().put("queuedAt", entry.queuedAt).put("pages", JSONArray(entry.pages.toList()))) }
         val bytes = JSONObject().put("manga", JSONArray(manga)).put("chapters", groupJson).put("paused", paused)
+            .put("translationGroups", JSONArray(translationGroups))
             .put("schedulingPriority", scheduling.name)
             .put("excludedPages", excludedJson)
             .toString().toByteArray(Charsets.UTF_8)

@@ -80,71 +80,30 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
             }
         }
     }
+    private var pageTaskId: String? = null
+    init { viewModelScope.launch {
+        container.taskScheduler.tasks.collect { tasks ->
+            val task = tasks.firstOrNull { it.taskId == pageTaskId }
+                ?: tasks.firstOrNull { it.type == com.lmreader.tasks.ReaderPageTasks.TYPE && it.ownerKey == "reader-page:$currentPageId" && it.state !in com.lmreader.tasks.TaskScheduler.TERMINAL }
+                ?: return@collect
+            pageTaskId = task.taskId
+            val active = task.state in setOf("QUEUED", "RUNNING", "PAUSING", "CANCELLING")
+            mutable.update { it.copy(activePageId = if(active) task.ownerKey.removePrefix("reader-page:") else null,
+                activePageName = task.title, progress = if(active) PageTranslationProgress(PageTranslationStage.TRANSLATING) else null,
+                failure = task.failure, cancelled = task.state == "CANCELLED") }
+            if(task.state == "SUCCEEDED") currentItem?.let { showPage(it, currentRender) }
+        }
+    } }
     fun translate(item: ReaderItem.PageItem,source: LocalTranslationLanguage,target: LocalTranslationLanguage,render: BubbleRenderSettings) {
-        val previous=translating;previous?.cancel();loadingCache?.cancel()
-        translating=viewModelScope.launch {
-            previous?.join()
-            val queue = container.translationQueue
-            var lease: String? = null
-            queue.pauseForPriority()
+        val expectedRevision = mutable.value.pages[item.page.pageId]?.revision
+        loadingCache?.cancel()
+        translating = viewModelScope.launch {
             try {
-                lease = container.taskService.acquire()
-                queue.awaitCurrentPage()
-                queue.setPriorityPage(item.chapter.title + " · " + item.page.displayName)
-                mutable.update {it.copy(source=source,target=target,progress=PageTranslationProgress(PageTranslationStage.READING),
-                    activePageId=item.page.pageId,activePageName=item.page.displayName,failure=null,cancelled=false,completedRegions=null)}
-                val options=container.mangaRepository.translationSettings(mangaId)
-                require(translationSetupComplete(options.sourceLanguage,options.targetLanguage,options.autoDetectSource)) {
-                    "请先填写漫画的原文语言和目标语言"
-                }
-                val workflow=container.translationWorkflows.find(options.workflowId)
-                    ?: error("所选翻译工作流已删除")
-                val program = workflow.program.withApiOverride(options.apiProfileId)
-                require(workflow.program.uses(WorkflowKind.SEG)) { "工作流需要 SEG 生成气泡" }
-                val installed = container.translationModels.installedCatalog().languages
-                val configuredSource = com.lmreader.ui.translation.matchEngineLanguage(options.sourceLanguage, installed) ?: LocalTranslationLanguage.fromTag(requireNotNull(options.sourceLanguage))
-                val configuredTarget = com.lmreader.ui.translation.matchEngineLanguage(options.targetLanguage, installed) ?: LocalTranslationLanguage.fromTag(requireNotNull(options.targetLanguage))
-                val routes = program.localTranslationRoutes(configuredSource, configuredTarget)
-                routes.forEach { container.translationModels.installedCatalog().route(it.source, it.target, it.engine) }
-                container.shelfRepository.ensureOnShelf(mangaId)
-                queue.prepareMangaResources(routes, workflow.program.uses(WorkflowKind.SEG), if(workflow.program.uses(WorkflowKind.OCR)) setOf(configuredSource) else emptySet())
-                val categoryId = container.shelfRepository.categoryIdOf(mangaId)
-                val categoryStyle = categoryId?.let { id -> container.shelfRepository.observeCategories().first().firstOrNull { it.categoryId == id }?.customStyle }
-                val settings = WorkflowRunSettings(configuredSource, configuredTarget,
-                    resolveTranslationStyle(options, categoryStyle, container.preferences.translationGlobalStyle.first()), render, options.effectiveSegThreshold(), container.apiProfiles.profiles.first(), options.segTextScope, options.effectiveTextDetectionThreshold(), options.effectiveFreeTextMergeGapRatio())
-                val mangaName = container.mangaRepository.getCards(listOf(mangaId)).firstOrNull()?.displayName ?: mangaId
-                val host = object : AndroidWorkflowHost(container.applicationContext, container, mangaId, mangaName,
-                    listOf(WorkflowChapterInput(item.chapter.chapterId, item.chapter.title, item.chapter.source, listOf(item.page))), settings,
-                    TranslationCacheBudget(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576), reusePages = false, requestOrigin = "单页重译") {
-                    override fun step(node: WorkflowNode, frame: WorkflowFrame) {
-                        val stage = when(node.kind) { WorkflowKind.SEG -> PageTranslationStage.SEGMENTING; WorkflowKind.OCR -> PageTranslationStage.OCR; else -> PageTranslationStage.TRANSLATING }
-                        val progress = PageTranslationProgress(stage)
-                        mutable.update { it.copy(progress = progress) }; queue.setPriorityProgress(item.page.displayName, progress, node.label.ifBlank { WorkflowLabels.kind(node.kind) })
-                    }
-                    override fun progress(frame: WorkflowFrame, progress: PageTranslationProgress) {
-                        mutable.update { it.copy(progress = progress) }; queue.setPriorityProgress(item.page.displayName, progress)
-                    }
-                    override suspend fun pagePreviewed(frame: WorkflowFrame, saved: ReaderPageTranslation) {
-                        mutable.update { it.copy(pages = rememberPage(it.pages, saved)) }
-                    }
-                }
-                val result = try { WorkflowRuntime(8, workflow.retries).execute(program, host); host.published[item.page.pageId] ?: error("工作流没有生成本页译文") }
-                    finally {
-                        host.close()
-                        if(host.published[item.page.pageId] == null) showPage(item, render)
-                    }
-                ensureActive()
-                queue.includePage(item.chapter.chapterId, item.page.pageId)
-                mutable.update {it.copy(pages=rememberPage(it.pages,result), originals=it.originals-item.page.pageId,completedRegions=result.regions.size,
-                    draft=if(it.editing && currentPageId==result.pageId) PageBubbleDraft(result) else it.draft)}
-            } catch(cancelled: CancellationException) {mutable.update {it.copy(cancelled=true)};throw cancelled}
-            catch(failure: Exception) {mutable.update {it.copy(failure=failure.message ?: failure.javaClass.simpleName)}}
-            finally {
-                queue.setPriorityPage(null)
-                queue.resumeAfterPriority()
-                lease?.let(container.taskService::release)
-                mutable.update {it.copy(progress=null,activePageId=null)}
-            }
+                pageTaskId = container.readerPageTasks.submit(mangaId, item, render, expectedRevision)
+                mutable.update { it.copy(source=source,target=target,activePageId=item.page.pageId,activePageName=item.page.displayName,
+                    progress=PageTranslationProgress(PageTranslationStage.READING),failure=null,cancelled=false,completedRegions=null) }
+            } catch(e: CancellationException) { throw e }
+            catch(e: Exception) { mutable.update { it.copy(failure=e.message,progress=null,activePageId=null) } }
         }
     }
     private fun rememberPage(pages: Map<String,ReaderPageTranslation>,page: ReaderPageTranslation)=
@@ -158,7 +117,7 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
             viewModelScope.launch {
                 try {
                     // Stop this reader's writer first; background writers are serialized by clearPage.
-                    translating?.cancelAndJoin()
+                    translating?.join(); pageTaskId?.let { container.taskScheduler.pause(it, cancel = true) }
                     withContext(Dispatchers.IO) { container.translationQueue.clearPage(item.chapter.chapterId, item.page.pageId) }
                     mutable.update { it.copy(pages=it.pages-item.page.pageId, originals=it.originals-item.page.pageId,
                         draft=if(it.draft?.saved?.pageId==item.page.pageId) null else it.draft, completedRegions=null) }
@@ -262,7 +221,7 @@ class ReaderPageTranslationViewModel(private val container: AppContainer,private
             finally { mutable.update { it.copy(savingEdits=false) } }
         }
     }
-    fun cancel() {translating?.cancel()}
+    fun cancel() { viewModelScope.launch { pageTaskId?.let { container.taskScheduler.pause(it, cancel = true) } } }
     fun clearMessage() {mutable.update {it.copy(failure=null,cancelled=false,completedRegions=null)}}
     fun clearEditFailure() {mutable.update {it.copy(editFailure=null)}}
 }

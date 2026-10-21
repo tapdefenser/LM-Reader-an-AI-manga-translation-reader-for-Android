@@ -68,9 +68,7 @@
     <string name="local_mt_source_help">保存后可获取当前源的语言包列表。自定义源需提供 catalog.json。社区源可能转到海外 CDN；换源继续下载时会重取未完成文件。</string>
     <string name="local_mt_wifi_only">仅 Wi-Fi 下载</string>
     <string name="local_mt_save">保存</string>
-    <string name="local_mt_license_summary">Mozilla 模型：MPL-2.0；社区副本另标 CC-BY-4.0。OPUS-MT 按包保留模型卡声明的 Apache-2.0／CC-BY-4.0，以及原始来源和版本。</string>
+    <string name="local_mt_license_summary">Mozilla 模型：MPL-2.0；社区副本另标 CC-BY-4.0。语言包按包保留模型卡声明的来源和版本。</string>
     <string name="local_mt_license_file">选择许可文件：%1$s</string>
     <string name="local_mt_cannot_open">无法打开导入文件</string>
-    <string name="local_mt_opus_backend">OPUS-MT 专用机翻 · 离线 CPU</string>
-    <string name="local_mt_opus_help">首次进入或缓存超过一天时自动获取列表；支持手动刷新。优先直译，缺少直接包时从已安装模型寻找短中转路径，不限定英语。每包不超过 350 MB，按需下载。当前使用 CPU；现成模型尚未验证 QNN／NNAPI 加速。此处选择用于管理和测试模型，实际任务在工作流中选择引擎。</string>
 </resources>

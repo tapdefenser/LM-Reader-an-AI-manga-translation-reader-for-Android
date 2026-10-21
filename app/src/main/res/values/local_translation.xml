@@ -68,9 +68,7 @@
     <string name="local_mt_source_help">Fetch the catalog after saving. Custom sources must provide catalog.json. Community sources may redirect to overseas CDNs. Changing source restarts unfinished files.</string>
     <string name="local_mt_wifi_only">Download over Wi-Fi only</string>
     <string name="local_mt_save">Save</string>
-    <string name="local_mt_license_summary">Mozilla models: MPL-2.0; the community copy also declares CC-BY-4.0. OPUS-MT retains each model card’s Apache-2.0/CC-BY-4.0 declaration, original repository and revision.</string>
+    <string name="local_mt_license_summary">Mozilla models: MPL-2.0; the community copy also declares CC-BY-4.0. Each pack retains its model-card source and revision.</string>
     <string name="local_mt_license_file">License file: %1$s</string>
     <string name="local_mt_cannot_open">Unable to open the import file</string>
-    <string name="local_mt_opus_backend">OPUS-MT machine translation · Offline CPU</string>
-    <string name="local_mt_opus_help">Fetches the list automatically on first visit or when over a day old; manual refresh is available. Direct translation first; otherwise use a short route through any installed language. Packs are downloaded on demand and capped at 350 MB. CPU is used; QNN/NNAPI acceleration is not yet validated for these models. This selection manages and tests models; tasks select their engine in the workflow.</string>
 </resources>

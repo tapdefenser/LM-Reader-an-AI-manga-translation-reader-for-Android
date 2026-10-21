@@ -29,6 +29,7 @@ object WorkflowSource {
                 fun imageArgument() = n.inputs["images"]?.let { "图片=${expr(it)}, " }
                     ?: WorkflowEditing.automaticImage(n, validation.scopes[n.id].orEmpty())?.let { "图片=${ref(it)}（自动）, " }
                     ?: "图片=无, "
+                fun audioArgument() = n.inputs["audios"]?.let { "音频=${expr(it)}, " }.orEmpty()
                 val mode = (if(n.mode == WorkflowMode.ASYNC) "异步" else "同步") + (n.parallelLimit?.let { "，最多并行 $it" } ?: "")
                 val header = when(n.kind) {
                     WorkflowKind.MANGA -> "漫画"
@@ -43,13 +44,15 @@ object WorkflowSource {
                     WorkflowKind.TRANSLATE -> "请求：${target()} = 本地机翻(${input("text")}, ${input("source")}, ${input("target")})"
                     WorkflowKind.API -> "请求：${target()} = API(配置=${input("profile")}, " +
                         (n.inputs["context"]?.let { "上下文=${expr(it)}, " } ?: "") + "提示词=${input("prompt")}, " +
-                        imageArgument() + "输出=${WorkflowLabels.type(n.resultType)}" +
+                        imageArgument() + audioArgument() + "输出=${WorkflowLabels.type(n.resultType)}" +
+                        (n.inputs["maxOutputLength"]?.let { ", 最大输出长度=${expr(it)} 字符" } ?: "") +
                         (n.inputs["expectedBubbles"]?.let { ", 校验=${expr(it)}" } ?: "") +
                         (n.inputs["expectedCount"]?.let { ", 校验项数=${expr(it)}" } ?: "") +
                         (if(n.inputs["wholeManga"] == WorkflowExpression.Boolean(true)) ", 整漫画一次请求" else "") + ")"
                     WorkflowKind.API_STREAM -> "每(${n.variable?.name}${n.variable?.type?.let(WorkflowLabels::type)}) 在 API请求－流式输出(配置=${input("profile")}, " +
                         (n.inputs["context"]?.let { "上下文=${expr(it)}, " } ?: "") + "提示词=${input("prompt")}, " +
-                        imageArgument() + "输出=${WorkflowLabels.type(n.resultType)}" +
+                        imageArgument() + audioArgument() + "输出=${WorkflowLabels.type(n.resultType)}" +
+                        (n.inputs["maxOutputLength"]?.let { ", 最大输出长度=${expr(it)} 字符" } ?: "") +
                         (n.inputs["expectedBubbles"]?.let { ", 校验=${expr(it)}" } ?: "") +
                         (n.inputs["expectedCount"]?.let { ", 校验项数=${expr(it)}" } ?: "") +
                         (if(n.inputs["wholeManga"] == WorkflowExpression.Boolean(true)) ", 整漫画一次请求" else "") + ") 累积到 ${target()}"

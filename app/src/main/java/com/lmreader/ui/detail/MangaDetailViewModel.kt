@@ -447,22 +447,13 @@ class MangaDetailViewModel(
                 return@launch
             }
             val configuredSource = source ?: return@launch
-            val catalog = installedTranslationCatalog()
-            val sourceLanguage = com.lmreader.ui.translation.matchEngineLanguage(configuredSource, catalog.languages)
-            val targetLanguage = com.lmreader.ui.translation.matchEngineLanguage(configuredTarget, catalog.languages)
-            if (workflow.program.uses(com.lmreader.core.model.WorkflowKind.TRANSLATE) &&
-                (sourceLanguage == null || targetLanguage == null || sourceLanguage == targetLanguage ||
-                runCatching { workflow.program.localTranslationRoutes(sourceLanguage, targetLanguage).forEach { catalog.route(it.source, it.target, it.engine) } }.isFailure)) {
-                _state.update { it.copy(openTranslationOptions = true) }
-                return@launch
-            }
             val globalStyle = preferences.translationGlobalStyle.first()
             val categoryId = shelfRepository.categoryIdOf(mangaId)
             val categoryStyle = categoryId?.let { id ->
                 shelfRepository.observeCategories().first().firstOrNull { it.categoryId == id }?.customStyle
             }
             val snapshot = runCatching { translationTaskSnapshot(workflow, settings, configuredSource, configuredTarget,
-                resolveTranslationStyle(settings, categoryStyle, globalStyle), bubblePreferences.settings.first(), apiProfiles()) }
+                resolveTranslationStyle(settings, categoryStyle, globalStyle), bubblePreferences.settings.first(), apiProfiles(), allowMissingCapabilities = true) }
                 .getOrElse { failure -> _state.update { it.copy(message = failure.message ?: "工作流配置无效") }; return@launch }
             val queued = runCatching {
                 translationQueue.enqueue(

@@ -14,7 +14,8 @@ import java.util.concurrent.atomic.AtomicReference
 data class QueuePageWork(val task: ChapterTranslationEntity, val source: PageSource, val page: ReaderPage,
     val sourceLanguage: LocalTranslationLanguage, val targetLanguage: LocalTranslationLanguage,
     val render: BubbleRenderSettings, val threshold: Float, val retries: Int, val segTextScope: SegTextScope = SegTextScope.ALL,
-    val textDetectionThreshold: Float = .35f, val freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO)
+    val textDetectionThreshold: Float = .35f, val freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO,
+    val resultIdentity: String? = null, val baseRevision: String? = null)
 
 /** A manga owns both async branches. The MB budget provides backpressure without serializing stages. */
 internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWork>,
@@ -42,7 +43,11 @@ internal class MangaPagePipeline(parent: CoroutineScope, works: List<QueuePageWo
                 for (state in states.values) {
                     try {
                         val work = state.work
-                        if (translator.cached(work.source, work.page, work.render) != null) {
+                        val saved = translator.cached(work.source, work.page, work.render)
+                        if (saved?.revision != work.baseRevision) throw PageTranslationRevisionConflict()
+                        if (saved != null) {
+                            if (work.resultIdentity == null || !saved.matchesTask(work.sourceLanguage, work.targetLanguage, work.resultIdentity))
+                                throw PageTranslationRevisionConflict()
                             state.segmentation.complete(Result.success(null)); continue
                         }
                         state.lease = budget.acquire(32L * 1_048_576, state.work.task.mangaId)

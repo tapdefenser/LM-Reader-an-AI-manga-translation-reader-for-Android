@@ -14,6 +14,7 @@ sealed interface WorkflowValue {
     data class Number(val value: Double) : WorkflowValue
     data class Boolean(val value: kotlin.Boolean) : WorkflowValue
     data class Image(val key: String) : WorkflowValue
+    data class Audio(val key: String) : WorkflowValue
     data class Record(val fields: Map<String, WorkflowValue>) : WorkflowValue
     data class ListValue(val items: List<WorkflowValue>) : WorkflowValue
     data class Dictionary(val entries: Map<String, String>) : WorkflowValue
@@ -23,15 +24,26 @@ data class WorkflowContextMessage(val role: String, val content: WorkflowExpress
 data class WorkflowResolvedMessage(val role: String, val content: String)
 data class WorkflowApiCall(val profileId: String, val messages: List<WorkflowResolvedMessage>,
     val images: List<WorkflowValue.Image>, val resultType: WorkflowType, val expectedBubbleId: String?,
-    val expectedItems: WorkflowValue.ListValue? = null, val wholeManga: Boolean = false, val stepName: String = "", val expectedCount: Int? = null)
+    val expectedItems: WorkflowValue.ListValue? = null, val wholeManga: Boolean = false, val stepName: String = "", val expectedCount: Int? = null,
+    val maxOutputLength: Int? = null, val audios: List<WorkflowValue.Audio> = emptyList())
 enum class WorkflowPageAdmission { RUN, CACHED, SKIP }
 class WorkflowPageStopped : CancellationException("队列调度已改变")
 class WorkflowBubbleStopped : CancellationException("原文区域已被新 SEG 替代")
+/** A durable host must restart work; unlike cancellation this must escape bounded launch workers. */
+open class WorkflowRestartRequested : Exception("工作流需要从安全边界重新执行")
 class WorkflowExecutionFailure(val rowId: String, val rowLabel: String, cause: Throwable) :
     IllegalStateException("$rowLabel：${cause.message ?: cause.javaClass.simpleName}", cause)
 
 /** Platform operations are suspendable; live glossary is resolved at every read, never captured at chapter start. */
 interface WorkflowRuntimeHost {
+    suspend fun textEntries(): List<WorkflowValue.Record> = emptyList()
+    /** The host resolves the current sentence recording to an opaque resource, never inline bytes. */
+    suspend fun currentAudio(): WorkflowValue.Audio = WorkflowValue.Audio("")
+    suspend fun currentImage(): WorkflowValue.Image = WorkflowValue.Image("")
+    /** Capture result provenance and perform non-billable checks before any workflow request. */
+    suspend fun beginProgram(program: WorkflowProgram) {}
+    /** A host that verified every supplied page may replay only the fixed containers, without workflow side effects. */
+    val reuseSavedPagesOnly: Boolean get() = false
     val manga: WorkflowValue.Record
     val sourceLanguage: String
     val targetLanguage: String
@@ -139,6 +151,7 @@ class WorkflowFrame internal constructor(val host: WorkflowRuntimeHost, private 
         val target = owner(ref.variableId) ?: error("输出变量尚未声明")
         target.writeLock.withLock {
             val old = read(ref)
+            require(!merge || old is WorkflowValue.ListValue) { "合并列表只支持列表；文本拼接请使用追加一项" }
             val combined = when (old) {
                 is WorkflowValue.Text -> WorkflowValue.Text(old.value + ((value as? WorkflowValue.Text)?.value ?: error("文本只能追加文本")))
                 is WorkflowValue.ListValue -> old.copy(items = old.items + if (merge) (value as? WorkflowValue.ListValue)?.items
@@ -204,6 +217,7 @@ class WorkflowFrame internal constructor(val host: WorkflowRuntimeHost, private 
             WorkflowDataKind.DICTIONARY -> WorkflowValue.Dictionary(emptyMap())
             WorkflowDataKind.CONTEXT -> WorkflowValue.Context(emptyList())
             WorkflowDataKind.RECORD -> WorkflowValue.Record(type.fields.mapValues { empty(it.value) })
+            WorkflowDataKind.AUDIO -> error("音频必须来自当前句子录音或真实附件，不能构造空值")
             else -> error("图片和气泡必须来自页面或 SEG")
         }
     }
@@ -214,20 +228,32 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
     init { require(concurrency in 1..8 && retries in 0..5) }
     private val pages = Semaphore(concurrency)
     private val pageIndexes = java.util.IdentityHashMap<WorkflowValue.ListValue, Map<String, WorkflowValue.ListValue>>()
-    suspend fun execute(program: WorkflowProgram, host: WorkflowRuntimeHost) {
+    suspend fun execute(program: WorkflowProgram, host: WorkflowRuntimeHost): WorkflowValue? {
         val validation = WorkflowValidator.validate(program)
         require(validation.valid) { validation.issues.joinToString("；") { it.message } }
+        host.beginProgram(program)
         val root = WorkflowFrame(host)
+        if (program.inputScenario == WorkflowInputScenario.TIMED_TEXT) {
+            root.define(WorkflowSystem.SOURCE, WorkflowValue.Text(host.sourceLanguage), WorkflowType.TEXT)
+            root.define(WorkflowSystem.TARGET, WorkflowValue.Text(host.targetLanguage), WorkflowType.TEXT)
+            root.define(WorkflowSystem.STYLE, WorkflowValue.Text(host.style), WorkflowType.TEXT)
+            root.define(WorkflowSystem.TEXT_ENTRIES, WorkflowValue.ListValue(host.textEntries()), WorkflowType.list(WorkflowSystem.subtitleType))
+            root.define(WorkflowSystem.CURRENT_AUDIO, host.currentAudio(), WorkflowType.AUDIO)
+            root.define(WorkflowSystem.CURRENT_IMAGE, host.currentImage(), WorkflowType.IMAGE)
+        }
         executeRows(program.rows, root)
+        return root.returned
     }
     private suspend fun executeRows(rows: List<WorkflowNode>, frame: WorkflowFrame): Boolean {
         for (node in rows) {
             currentCoroutineContext().ensureActive()
+            if (frame.host.reuseSavedPagesOnly && node.kind !in WorkflowValidator.fixedKinds) continue
             if (!frame.host.canProcessBubble(frame)) throw WorkflowBubbleStopped()
             if (!frame.host.continueScheduling(frame)) return false
             frame.host.step(node, frame)
             try { if (!executeNode(node, frame)) return false; if(frame.returned != null) return true }
             catch (cancelled: CancellationException) { throw cancelled }
+            catch (restart: WorkflowRestartRequested) { throw restart }
             catch (failure: WorkflowExecutionFailure) { throw failure }
             catch (failure: Exception) { throw WorkflowExecutionFailure(node.id, node.label.ifBlank { WorkflowLabels.kind(node.kind) }, failure) }
         }
@@ -283,6 +309,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                                 true
                             } catch (stop: WorkflowPageStopped) { false }
                             catch (cancelled: CancellationException) { throw cancelled }
+                            catch (restart: WorkflowRestartRequested) { throw restart }
                             catch (failure: Exception) { host.pageFailed(child, failure); true }
                             finally { withContext(NonCancellable) { host.closePage(child) } }
                         }
@@ -317,6 +344,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                                         records[index] = host.completePreparationPage(child); true
                                     } catch(stop: WorkflowPageStopped) { false }
                                     catch(cancelled: CancellationException) { throw cancelled }
+                                    catch(restart: WorkflowRestartRequested) { throw restart }
                                     catch(failure: Exception) { host.pageFailed(child, failure); true }
                                     finally { withContext(NonCancellable) { host.closePreparationPage(child) } }
                                 }
@@ -370,6 +398,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                                         true
                                     } catch(stop: WorkflowPageStopped) { false }
                                     catch(cancelled: CancellationException) { throw cancelled }
+                                    catch(restart: WorkflowRestartRequested) { throw restart }
                                     catch(failure: Exception) { host.pageFailed(child, failure); failedPages[index] = true; true }
                                     finally { withContext(NonCancellable) { if(publish) host.closePage(child) else host.closePreparationPage(child) } }
                                 }
@@ -420,6 +449,11 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                     else -> error("图片附件类型错误")
                 } } ?: if (n.inputs["attachCurrentImage"] != WorkflowExpression.Boolean(false))
                     listOfNotNull(bubble?.fields?.get("image") as? WorkflowValue.Image) else emptyList()
+                val audios = n.inputs["audios"]?.let { frame.evaluate(it) }?.let { v -> when (v) {
+                    is WorkflowValue.Audio -> listOf(v)
+                    is WorkflowValue.ListValue -> v.items.map { it as? WorkflowValue.Audio ?: error("音频附件类型错误") }
+                    else -> error("音频附件类型错误")
+                } } ?: emptyList()
                 val bubbleId = (bubble?.fields?.get("id") as? WorkflowValue.Text)?.value
                 val expected = n.inputs["expectedBubbles"]?.let { frame.evaluate(it) as WorkflowValue.ListValue }
                 val expectedCount = n.inputs["expectedCount"]?.let {
@@ -428,7 +462,11 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
                     count.toInt()
                 }
                 val wholeManga = (n.inputs["wholeManga"] as? WorkflowExpression.Boolean)?.value == true
-                val call = WorkflowApiCall((input("profile") as WorkflowValue.Text).value, messages, images, n.resultType, bubbleId, expected, wholeManga, n.label.ifBlank { WorkflowLabels.kind(n.kind) }, expectedCount)
+                val maxOutputLength = (n.inputs["maxOutputLength"] as? WorkflowExpression.Number)?.value?.let {
+                    require(it.isFinite() && it >= 1 && it % 1 == 0.0 && it <= Int.MAX_VALUE) { "最大输出长度必须是正整数" }
+                    it.toInt()
+                }
+                val call = WorkflowApiCall((input("profile") as WorkflowValue.Text).value, messages, images, n.resultType, bubbleId, expected, wholeManga, n.label.ifBlank { WorkflowLabels.kind(n.kind) }, expectedCount, maxOutputLength, audios = audios)
                 val accumulated = if(n.kind == WorkflowKind.API_STREAM) mutableListOf<WorkflowValue>() else null
                 val result = if(expected != null && expected.items.isEmpty() || expectedCount == 0) WorkflowValue.ListValue(emptyList())
                     else if(n.kind == WorkflowKind.API_STREAM) {
@@ -529,6 +567,7 @@ class WorkflowRuntime(private val concurrency: Int = 8, private val retries: Int
     private suspend fun <T> retryEngine(action: suspend () -> T): T {
         repeat(retries) { attempt ->
             try { return action() } catch (cancelled: CancellationException) { throw cancelled }
+            catch (restart: WorkflowRestartRequested) { throw restart }
             catch (failure: Exception) { delay(250L * (attempt + 1)) }
         }
         return action()

@@ -19,6 +19,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lmreader.di.AppContainer
+import com.lmreader.tasks.taskStateLabel
+import com.lmreader.tasks.waitingReasonLabel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -29,6 +33,14 @@ fun ExportQueueScreen(container: AppContainer, onBack: () -> Unit, onSettings: (
     val serviceFailure by container.taskService.failure.collectAsStateWithLifecycle()
     val storageFailure by queue.storageFailure.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val canonical by container.taskScheduler.tasks.collectAsStateWithLifecycle()
+    val videoExports = canonical.filter { it.type == "VIDEO_EXPORT" }
+    val scope = rememberCoroutineScope()
+    var commandFailure by remember { mutableStateOf<String?>(null) }
+    fun command(action: suspend () -> Unit) { scope.launch {
+        try { action() } catch(cancelled: CancellationException) { throw cancelled }
+        catch(error: Exception) { commandFailure = error.message }
+    } }
     var menu by remember { mutableStateOf(false) }
     var collapsed by remember { mutableStateOf<Set<String>>(emptySet()) }
     val groups = tasks.groupBy { it.mangaId }
@@ -39,7 +51,14 @@ fun ExportQueueScreen(container: AppContainer, onBack: () -> Unit, onSettings: (
             IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "队列菜单") }
             DropdownMenu(menu, { menu = false }) {
                 DropdownMenuItem(text = { Text(if (paused) "全部继续" else "全部暂停") }, onClick = {
-                    menu = false; if (paused) queue.resumeAll() else queue.pauseAll()
+                    menu = false
+                    if (paused) {
+                        queue.resumeAll()
+                        command { videoExports.filter { it.state in setOf("PAUSED", "WAITING", "INTERRUPTED") }.forEach { container.taskScheduler.resume(it.taskId) } }
+                    } else {
+                        queue.pauseAll()
+                        command { videoExports.filter { it.state in setOf("QUEUED", "RUNNING", "WAITING", "INTERRUPTED") }.forEach { container.taskScheduler.pause(it.taskId) } }
+                    }
                 })
                 DropdownMenuItem(text = { Text("导出设置") }, onClick = { menu = false; onSettings() })
                 DropdownMenuItem(text = { Text("清除已取消") }, onClick = { menu = false; queue.clearFinished() })
@@ -49,14 +68,51 @@ fun ExportQueueScreen(container: AppContainer, onBack: () -> Unit, onSettings: (
         Column(Modifier.fillMaxSize().padding(padding)) {
             serviceFailure?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
             storageFailure?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
+            commandFailure?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
             Text("暂停和中断保留导出快照；恢复授权后可重试。未清理的临时文件会保留在任务记录中。", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp))
             val pendingCount = tasks.count { it.state == "PENDING" || it.state == "RUNNING" }
             Text(if (paused) "队列已暂停" else "按顺序导出 · $pendingCount 项待处理",
                 modifier = Modifier.padding(16.dp))
             HorizontalDivider()
-            if (tasks.isEmpty()) {
-                Text("队列为空。请到漫画详情页选择全部或部分章节导出。", modifier = Modifier.padding(24.dp))
+            if (tasks.isEmpty() && videoExports.isEmpty()) {
+                Text("队列为空。可从漫画或视频菜单选择导出。", modifier = Modifier.padding(24.dp))
             } else LazyColumn(contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(videoExports, key = { "video-export:${it.taskId}" }) { task ->
+                    var actions by remember { mutableStateOf(false) }
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(12.dp)) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(task.title, localize = false)
+                                Text(taskStateLabel(task.state), style = MaterialTheme.typography.bodySmall)
+                                if(task.stage.isNotBlank()) Text(task.stage, style = MaterialTheme.typography.bodySmall)
+                                task.waitingReason?.let { Text(waitingReasonLabel(it), style = MaterialTheme.typography.bodySmall) }
+                                task.failure?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                            }
+                            Box {
+                                IconButton(onClick = { actions = true }) { Icon(Icons.Filled.MoreVert, "导出操作") }
+                                DropdownMenu(actions, { actions = false }) {
+                                    if(task.state in setOf("QUEUED", "RUNNING")) DropdownMenuItem(text = { Text("暂停") },
+                                        onClick = { actions = false; command { container.taskScheduler.pause(task.taskId) } })
+                                    if(task.state in setOf("PAUSED", "WAITING", "INTERRUPTED", "FAILED")) DropdownMenuItem(text = { Text(if(task.state == "FAILED") "重试失败" else "继续") },
+                                        onClick = { actions = false; command { container.taskScheduler.resume(task.taskId, retryFailed = task.state == "FAILED") } })
+                                    if(task.state !in setOf("CANCELLED", "SUCCEEDED")) DropdownMenuItem(text = { Text("取消") },
+                                        onClick = { actions = false; command { container.taskScheduler.pause(task.taskId, cancel = true) } })
+                                    if(task.state == "SUCCEEDED") DropdownMenuItem(text = { Text("分享导出文件") }, onClick = {
+                                        actions = false
+                                        command {
+                                            val output = org.json.JSONObject(task.checkpoint)
+                                            val uri = Uri.parse(output.getString("outputUri"))
+                                            val intent = Intent(Intent.ACTION_SEND).setType(output.getString("mime"))
+                                                .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            intent.clipData = android.content.ClipData.newRawUri(task.title, uri)
+                                            context.startActivity(Intent.createChooser(intent, "分享导出成果"))
+                                        }
+                                    })
+                                }
+                            }
+                        }
+                    }
+                }
                 groups.forEach { (mangaId, rows) ->
                     item(key = "manga:$mangaId") {
                         var groupMenu by remember { mutableStateOf(false) }

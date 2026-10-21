@@ -245,13 +245,19 @@ fun WorkflowEditorScreen(container: AppContainer, value: TranslationWorkflow, re
             }
         }
     }
-    adding?.let { position -> AddStepDialog({ adding = null }) { kind ->
-        val node = newNode(kind, WorkflowEditing.references(WorkflowEditing.scope(program, position)), profiles)
+    adding?.let { position -> AddStepDialog(program.inputScenario, { adding = null }) { kind ->
+        val scope = WorkflowEditing.scope(program, position)
+        val node = newNode(kind, WorkflowEditing.references(scope), profiles, WorkflowEditing.writeTargets(scope, kind in setOf(WorkflowKind.APPEND, WorkflowKind.MERGE_LIST)))
         change(WorkflowEditing.insert(program, position, node)); adding = null; selected = node
     } }
     selected?.let { node ->
         val collectScope = if(node.children.isNotEmpty()) validation.scopes[node.children.last().id + ":end"].orEmpty() else validation.scopes[node.id + ":children"].orEmpty()
-        WorkflowNodeEditor(node, validation.scopes[node.id].orEmpty(), WorkflowEditing.outputs(program, node.id, validation), profiles, { selected = null }, readOnly = locked, collectScope = collectScope) { changed ->
+        WorkflowNodeEditor(node, validation.scopes[node.id].orEmpty(), WorkflowEditing.outputs(program, node.id, validation), profiles, { selected = null }, readOnly = locked, collectScope = collectScope,
+            blockedContexts = if (node.kind == WorkflowKind.MESSAGE) WorkflowEditing.blockedContextTargets(program, node.id) else emptyList(),
+            createTarget = { edited, type ->
+                val updated = WorkflowEditing.createTargetBefore(program, edited, type)
+                change(updated); selected = updated.allNodes().first { it.id == edited.id }
+            }) { changed ->
             change(WorkflowEditing.update(program, node.id) { changed }); selected = null
         }
     }
@@ -321,14 +327,14 @@ internal fun <T> ChoiceDialog(title: String, choices: List<Pair<T, String>>, dis
 }
 
 @Composable
-private fun AddStepDialog(dismiss: () -> Unit, choose: (WorkflowKind) -> Unit) {
+private fun AddStepDialog(scenario: WorkflowInputScenario, dismiss: () -> Unit, choose: (WorkflowKind) -> Unit) {
     val groups = linkedMapOf("识别与翻译" to listOf(WorkflowKind.SEG, WorkflowKind.OCR, WorkflowKind.TRANSLATE, WorkflowKind.API, WorkflowKind.API_STREAM, WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.APPLY_ORDER),
         "变量与列表" to listOf(WorkflowKind.DECLARE, WorkflowKind.SET, WorkflowKind.APPEND, WorkflowKind.MERGE_LIST),
-        "流程" to listOf(WorkflowKind.EACH, WorkflowKind.IF), "上下文与译名" to listOf(WorkflowKind.MESSAGE, WorkflowKind.REPLACE, WorkflowKind.MERGE_GLOSSARY))
+        "流程" to (listOf(WorkflowKind.EACH, WorkflowKind.IF) + if (scenario == WorkflowInputScenario.TIMED_TEXT) listOf(WorkflowKind.RETURN) else emptyList()), "上下文与译名" to listOf(WorkflowKind.MESSAGE, WorkflowKind.REPLACE, WorkflowKind.MERGE_GLOSSARY))
     AlertDialog(onDismissRequest = dismiss, title = { Text("新增步骤") }, text = { LazyColumn {
         groups.forEach { (name, kinds) ->
             item { Text(name, style = MaterialTheme.typography.labelLarge); HorizontalDivider() }
-            items(kinds) { kind -> TextButton(onClick = { choose(kind) }, modifier = Modifier.fillMaxWidth()) { Text(WorkflowLabels.kind(kind)) } }
+            items(kinds.filterNot { scenario == WorkflowInputScenario.TIMED_TEXT && it in setOf(WorkflowKind.SEG, WorkflowKind.OCR, WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.APPLY_ORDER) }) { kind -> TextButton(onClick = { choose(kind) }, modifier = Modifier.fillMaxWidth()) { Text(WorkflowLabels.kind(kind)) } }
         }
     } }, confirmButton = { TextButton(onClick = dismiss) { Text("关闭") } })
 }
@@ -345,17 +351,21 @@ private fun VariableDialog(refs: List<WorkflowReferenceChoice>, dismiss: () -> U
     } }, confirmButton = { TextButton(onClick = dismiss) { Text("关闭") } })
 }
 
-internal fun newNode(kind: WorkflowKind, refs: List<WorkflowReferenceChoice>, profiles: List<ApiProfile>): WorkflowNode {
+internal fun newNode(kind: WorkflowKind, refs: List<WorkflowReferenceChoice>, profiles: List<ApiProfile>,
+    writeRefs: List<WorkflowReferenceChoice> = refs.filterNot { it.readOnly }): WorkflowNode {
     fun reference(type: WorkflowType) = refs.firstOrNull { it.type == type }?.let { WorkflowExpression.Ref(it.ref) } ?: WorkflowExpression.Empty(type)
     fun target(type: WorkflowType) = refs.firstOrNull { !it.readOnly && it.type == type }?.ref
     val items = refs.firstOrNull { it.ref == WorkflowRef(WorkflowSystem.PAGE, listOf("bubbles")) } ?: refs.firstOrNull { it.type.kind == WorkflowDataKind.LIST }
     val element = items?.type?.element ?: WorkflowType.TEXT
+    val mergeTarget = writeRefs.firstOrNull { it.type.kind == WorkflowDataKind.LIST && it.ref.path.none { key -> key.toIntOrNull() != null } }
+    val mergeType = mergeTarget?.type ?: WorkflowType.list(WorkflowType.TEXT)
     val variable = WorkflowVariable(if(kind == WorkflowKind.EACH && element == WorkflowSystem.pageType) WorkflowSystem.PAGE else UUID.randomUUID().toString(),
         if(kind in setOf(WorkflowKind.EACH, WorkflowKind.API_STREAM)) (if(element == WorkflowSystem.pageType && kind == WorkflowKind.EACH) "本页" else "当前条目") else "变量", if(kind == WorkflowKind.EACH) element else if(kind == WorkflowKind.API_STREAM) WorkflowType.TRANSLATION else WorkflowType.TEXT)
     return WorkflowNode(UUID.randomUUID().toString(), kind, variable = if(kind in setOf(WorkflowKind.DECLARE, WorkflowKind.EACH, WorkflowKind.API_STREAM)) variable else null,
-        resultType = if(kind == WorkflowKind.API_STREAM) WorkflowType.list(WorkflowType.TRANSLATION) else WorkflowType.TEXT,
-        target = when(kind) { WorkflowKind.SEG -> target(WorkflowType.list(WorkflowType.BUBBLE)); WorkflowKind.MESSAGE -> target(WorkflowType.CONTEXT); WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.EACH -> null; else -> target(WorkflowType.TEXT) },
+        resultType = if(kind == WorkflowKind.RETURN) WorkflowType.list(WorkflowSystem.subtitleType) else if(kind == WorkflowKind.API_STREAM) WorkflowType.list(WorkflowType.TRANSLATION) else if(kind == WorkflowKind.MERGE_LIST) mergeType else WorkflowType.TEXT,
+        target = when(kind) { WorkflowKind.SEG -> target(WorkflowType.list(WorkflowType.BUBBLE)); WorkflowKind.MESSAGE -> writeRefs.firstOrNull { it.type == WorkflowType.CONTEXT }?.ref; WorkflowKind.MERGE_LIST -> mergeTarget?.ref; WorkflowKind.APPLY_TRANSLATIONS, WorkflowKind.EACH -> null; else -> target(WorkflowType.TEXT) },
         inputs = when(kind) {
+            WorkflowKind.RETURN -> mapOf("value" to (refs.lastOrNull { it.type == WorkflowType.list(WorkflowSystem.subtitleType) }?.let { WorkflowExpression.Ref(it.ref) } ?: WorkflowExpression.Empty(WorkflowType.list(WorkflowSystem.subtitleType))))
             WorkflowKind.SEG -> mapOf("image" to reference(WorkflowType.IMAGE))
             WorkflowKind.APPLY_TRANSLATIONS -> mapOf("items" to (refs.firstOrNull { it.type == WorkflowType.TRANSLATION }?.let { WorkflowExpression.Ref(it.ref) } ?: reference(WorkflowType.list(WorkflowType.PAGE_RECORD))))
             WorkflowKind.APPLY_ORDER -> mapOf("items" to (refs.firstOrNull { it.type.kind == WorkflowDataKind.RECORD && it.type.fields["translation"] == WorkflowType.TEXT }?.let { WorkflowExpression.Ref(it.ref) } ?: reference(WorkflowType.list(WorkflowType.TRANSLATION))), "index" to (refs.firstOrNull { it.ref.variableId == WorkflowSystem.STREAM_INDEX }?.let { WorkflowExpression.Ref(it.ref) } ?: WorkflowExpression.Number(1.0)))
@@ -364,6 +374,7 @@ internal fun newNode(kind: WorkflowKind, refs: List<WorkflowReferenceChoice>, pr
             WorkflowKind.EACH -> mapOf("items" to (items?.let { WorkflowExpression.Ref(it.ref) } ?: WorkflowExpression.Empty(WorkflowType.list(WorkflowType.TEXT))))
             WorkflowKind.API, WorkflowKind.API_STREAM -> mapOf("profile" to WorkflowExpression.Text(profiles.firstOrNull { it.kind == ApiProfileKind.LLM }?.id.orEmpty()), "prompt" to WorkflowExpression.Template(""))
             WorkflowKind.MESSAGE -> mapOf("user" to WorkflowExpression.Template(""))
+            WorkflowKind.MERGE_LIST -> mapOf("value" to (refs.firstOrNull { it.type == mergeType && it.ref != mergeTarget?.ref }?.let { WorkflowExpression.Ref(it.ref) } ?: WorkflowExpression.Empty(mergeType)))
             WorkflowKind.MERGE_GLOSSARY -> mapOf("items" to reference(WorkflowType.list(WorkflowType.GLOSSARY_ENTRY)))
             WorkflowKind.REPLACE -> mapOf("text" to reference(WorkflowType.TEXT), "dictionary" to WorkflowSystem.ref(WorkflowSystem.GLOSSARY))
             WorkflowKind.IF -> mapOf("condition" to WorkflowExpression.Boolean(true))

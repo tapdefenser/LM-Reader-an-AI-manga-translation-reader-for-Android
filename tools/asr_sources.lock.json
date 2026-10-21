@@ -1,0 +1,10 @@
+[
+  {
+    "repo": "ggml-org/whisper.cpp",
+    "release": "v1.9.5",
+    "revision": "d1be6fde11ac6e0407606b4e42fe72d34add8037",
+    "path": "whisper",
+    "url": "https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d1be6fde11ac6e0407606b4e42fe72d34add8037",
+    "sha256": "645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4"
+  }
+]

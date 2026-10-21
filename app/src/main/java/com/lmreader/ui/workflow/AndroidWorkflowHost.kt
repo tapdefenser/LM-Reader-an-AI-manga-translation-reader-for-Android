@@ -12,6 +12,7 @@ import com.lmreader.core.storage.reader.ReaderPage
 import com.lmreader.core.workflow.*
 import com.lmreader.core.vision.*
 import com.lmreader.di.AppContainer
+import com.lmreader.tasks.TaskRequeue
 import com.lmreader.ui.queue.TranslationCacheBudget
 import com.lmreader.ui.reader.translation.*
 import kotlinx.coroutines.*
@@ -44,7 +45,11 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     private val ephemeral: Boolean = false,
     ephemeralGlossary: ConcurrentHashMap<String, String>? = null,
     private val pageImages: Map<String, WorkflowPageImage> = emptyMap(),
-    private val screenPreparation: List<ScreenOcrPreparation>? = null) : WorkflowRuntimeHost {
+    private val screenPreparation: List<ScreenOcrPreparation>? = null,
+    private val overwriteExisting: Boolean = false,
+    private val expectedRevisions: Map<String, String?> = emptyMap(),
+    private val restartConflictingPages: Boolean = false,
+    private val commitGate: suspend (suspend () -> Unit) -> Unit = { it() }) : WorkflowRuntimeHost {
     override val manga = record("id" to text(mangaId), "name" to text(mangaName))
     override val sourceLanguage get() = settings.source.tag
     override val targetLanguage get() = settings.target.tag
@@ -68,6 +73,13 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     private val states = ConcurrentHashMap<String, ImageState>()
     private val images = ConcurrentHashMap<String, ImageRef>()
     private val cached = ConcurrentHashMap<String, ReaderPageTranslation>()
+    private data class PublicationBase(val revision: String?)
+    private val publicationBases = ConcurrentHashMap<String, PublicationBase>()
+    private var resultProgram: WorkflowProgram? = null
+    private var resultProfiles: List<ApiProfile> = emptyList()
+    var resultIdentity: String? = null
+        private set
+    override val reuseSavedPagesOnly: Boolean get() = !ephemeral && reusePages && inputs.isNotEmpty() && cached.size == inputs.size
     private val prepared = ConcurrentHashMap<String, WorkflowValue.Record>()
     private val waitingForBitmap = AtomicInteger()
     private val prefetchLock = Mutex()
@@ -99,14 +111,64 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
             com.lmreader.core.database.entity.MangaGlossaryEntity(mangaId, source, target, false, System.currentTimeMillis())
         })
     }
+    private fun currentResultIdentity(program: WorkflowProgram) = workflowResultIdentity(program,
+        settings.copy(apiProfiles = resultProfiles), container.translationModels.installedPacks.value.values.toList(),
+        vision.modelIdentities, container.visionExecutionPreferences.settings.value)
+
+    override suspend fun beginProgram(program: WorkflowProgram) {
+        if (ephemeral) return
+        resultProgram = program
+        resultProfiles = settings.apiProfiles.ifEmpty { container.apiProfiles.profiles.first() }
+        val identity = currentResultIdentity(program)
+        resultIdentity = identity
+        for ((id, input) in inputs) {
+            var saved = container.localPageTranslator.pageWriteMutex.withLock {
+                container.localPageTranslator.artifacts.current(id).also { current ->
+                    if (!restartConflictingPages && expectedRevisions.containsKey(id) && current?.revision != expectedRevisions[id]) throw PageTranslationRevisionConflict()
+                    publicationBases[id] = PublicationBase(current?.revision)
+                }
+            }
+            if(restartConflictingPages && saved != null &&
+                (expectedRevisions.containsKey(id) && saved.revision != expectedRevisions[id] ||
+                    !overwriteExisting && (!reusePages || !saved.matchesTask(settings.source, settings.target, identity)))) {
+                discardConflictingPage(id); saved = null
+            }
+            if (saved == null || overwriteExisting) continue
+            check(reusePages && saved.matchesTask(settings.source, settings.target, identity)) {
+                "已有成果与当前任务不匹配或缺少配置信息，原成果已保留；请在阅读器确认本页重译：${input.second.displayName}"
+            }
+            val verified = container.localPageTranslator.cached(input.first, input.second, settings.render)
+            if(verified?.revision != saved.revision && restartConflictingPages) { discardConflictingPage(id); continue }
+            check(verified?.revision == saved.revision) { "原图或成果已变化，原成果已保留；请确认本页重译：${input.second.displayName}" }
+            cached[id] = saved
+        }
+    }
+
+    /** Queue policy: clear only the conflicting page under the same generation/publication guard. */
+    private suspend fun discardConflictingPage(id: String) = commitGate {
+        container.localPageTranslator.pageWriteMutex.withLock {
+            container.localPageTranslator.artifacts.delete(id)
+            publicationBases[id] = PublicationBase(null)
+            cached.remove(id); published.remove(id); prepared.remove(id)
+            container.translationQueue.pageUpdates.emit(id)
+        }
+    }
+
+    private fun unchangedResult(id: String): Boolean = ephemeral || publicationBases[id]?.let { base ->
+        container.localPageTranslator.artifacts.current(id)?.revision == base.revision
+    } == true
+
     override suspend fun admitPage(frame: WorkflowFrame, job: Job): WorkflowPageAdmission {
         val id = requireNotNull(frame.identity(WorkflowSystem.PAGE))
         states[id]?.let { state -> state.mutex.withLock { state.prepared = false; state.lease?.setCanAdvance(true) } }
         prepared[id]?.let { frame.define(WorkflowSystem.PAGE, it, WorkflowSystem.pageType) }
+        val conflict = !ephemeral && container.localPageTranslator.pageWriteMutex.withLock { !unchangedResult(id) }
+        if(conflict) {
+            if(restartConflictingPages) { discardConflictingPage(id); throw TaskRequeue(resultConflict = true) }
+            throw PageTranslationRevisionConflict()
+        }
         if (reusePages) {
-            val (source, page) = inputs.getValue(id)
-            container.localPageTranslator.cached(source, page, settings.render)?.let { saved ->
-                cached[id] = saved
+            cached[id]?.let { saved ->
                 setRecords(frame, saved.regions.map { regionRecord(it, id, pageNumber(frame)) })
                 return WorkflowPageAdmission.CACHED
             }
@@ -191,7 +253,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                     val recognition = jobs.map { (key, language) ->
                         val input = mapOf("image" to WorkflowValue.Image(key), "language" to text(language))
                         val cacheKey = "$key:${LocalPageTranslator.ocrLanguage(LocalTranslationLanguage.fromTag(language)).name}"
-                        preparationScope.async(start = CoroutineStart.LAZY) {
+                        preparationScope.async(currentCoroutineContext().minusKey(Job), start = CoroutineStart.LAZY) {
                             permits.acquire()
                             val started = System.nanoTime()
                             try { requestEngine(WorkflowKind.OCR, input, frame) }
@@ -199,7 +261,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                         }.also { preparedOcr[cacheKey] = it; it.start() }
                     }
                     if (recognition.isEmpty()) visionPrepared(reference.pageId)
-                    else preparationScope.launch {
+                    else preparationScope.launch(currentCoroutineContext().minusKey(Job)) {
                         try { recognition.awaitAll(); visionPrepared(reference.pageId) }
                         catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) { /* The real OCR row observes the same deferred failure. */ }
@@ -238,7 +300,11 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 val input = value("text")
                 if (input.isBlank()) text("") else {
                     val source = LocalTranslationLanguage.fromTag(value("source")); val target = LocalTranslationLanguage.fromTag(value("target"))
-                    val engine = (inputs["engine"] as? WorkflowValue.Text)?.value?.let(TranslationModelEngine::valueOf) ?: TranslationModelEngine.BERGAMOT
+                    val engine = when (val selected = inputs["engine"]) {
+                        null -> TranslationModelEngine.BERGAMOT
+                        is WorkflowValue.Text -> TranslationModelEngine.requireSupported(selected.value)
+                        else -> throw IllegalArgumentException("机翻引擎必须明确选择")
+                    }
                     val result = container.localTranslator.translate(engine, source, target, kotlin.collections.listOf(LocalTranslationText("workflow", input))) { completed, total -> progress(frame, PageTranslationProgress(PageTranslationStage.TRANSLATING, completed, total)) }
                     text(result.items.single().translatedText)
                 }
@@ -252,12 +318,15 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
     private suspend fun apiRequest(call: WorkflowApiCall, frame: WorkflowFrame, item: (suspend (WorkflowValue, Int) -> Unit)? = null): WorkflowValue {
         val profiles = container.apiProfiles.profiles.first()
         val live = profiles.firstOrNull { it.id == call.profileId } ?: error("API 配置已删除，请重新选择")
-        container.apiClient.configureProfiles(if(settings.apiProfiles.isNotEmpty()) settings.apiProfiles else profiles)
-        val profile = settings.apiProfiles.firstOrNull { it.id == call.profileId }?.copy(apiKey = live.apiKey) ?: live
+        val captured = if (!ephemeral && resultProgram != null) resultProfiles else settings.apiProfiles.ifEmpty { profiles }
+        container.apiClient.configureProfiles(profiles)
+        val profile = captured.firstOrNull { it.id == call.profileId }?.copy(apiKey = live.apiKey)
+            ?: if (ephemeral) live else error("API 配置未在任务开始时绑定，请重新确认任务")
         val attachments = call.images.map { encodeImage(it) }
+        val audioAttachments = call.audios.map { encodeAudio(it) }
         (call.images.mapNotNull { images[it.key]?.pageId } + listOfNotNull(frame.identity(WorkflowSystem.PAGE))).distinct()
             .forEach { parkBitmap(it) }
-        require(attachments.sumOf { it.base64.length } <= 16_000_000) { "API 图片附件超过 16 MB，请分批处理" }
+        require(attachments.sumOf { it.base64.length.toLong() } + audioAttachments.sumOf { it.base64.length.toLong() } <= 16_000_000) { "API 附件超过 16 MB，请分批处理" }
         val example = schemaExample(call.resultType).let { structure ->
             call.expectedBubbleId?.let { structure.replace("\"bubbleId\":\"文本\"", "\"bubbleId\":" + org.json.JSONObject.quote(it)) } ?: structure
         }
@@ -270,14 +339,18 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         val emptyRegionHint = if(call.resultType == WorkflowType.GLOSSARY_ENTRY && call.images.singleOrNull()?.key?.startsWith("bubble:") == true)
             "如果附件只有图案而没有可辨认文字，返回 {\"source\":\"\",\"translation\":\"\"}。" else ""
         val imageHint = if(attachments.isEmpty()) "" else "\n本次消息已附带 ${attachments.size} 张实际图片，内容可能是气泡或游离文字区域。请直接读取图片，不要要求用户再次上传。$emptyRegionHint"
+        val audioHint = if(audioAttachments.isEmpty()) "" else "\n本次消息已附带 ${audioAttachments.size} 段当前字幕句子的原始录音。"
         val messages = call.messages.mapIndexed { index, message -> ApiMessage(message.role,
-            message.content + if (index == call.messages.lastIndex) imageHint + schema else "", if (index == call.messages.lastIndex) attachments else emptyList()) }
+            message.content + if (index == call.messages.lastIndex) imageHint + audioHint + schema else "",
+            if (index == call.messages.lastIndex) attachments else emptyList(),
+            if (index == call.messages.lastIndex) audioAttachments else emptyList()) }
         val result = StringBuilder()
         val bubbleId = call.expectedBubbleId ?: call.images.singleOrNull()?.key?.takeIf { it.startsWith("bubble:") }?.removePrefix("bubble:")
         val parser = if(item != null) WorkflowJsonStream(call.resultType, call.expectedItems, bubbleId) else null
         val trace = ApiTraceContext(mangaId, manga.string("name"),
             runCatching { frame.text(WorkflowSystem.CHAPTER, "name") }.getOrDefault(""),
-            runCatching { frame.text(WorkflowSystem.PAGE, "name") }.getOrDefault(""), listOf(requestOrigin, call.stepName).filter { it.isNotBlank() }.joinToString(" · "))
+            runCatching { frame.text(WorkflowSystem.PAGE, "name") }.getOrDefault(""), listOf(requestOrigin, call.stepName).filter { it.isNotBlank() }.joinToString(" · "),
+            publicationKey = if(call.wholeManga) "*" else frame.identity(WorkflowSystem.PAGE) ?: currentCoroutineContext()[TaskPublicationScope]?.scopeKey ?: "*")
         val capture = ApiTraceCapture()
         var transportComplete = false
         var outputFailed = false
@@ -294,7 +367,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
             val preparing = if (frame.identity(WorkflowSystem.PAGE) != null)
                 launch(Dispatchers.IO) { if(awaitPrefetchPermission(frame)) presegmentAhead(frame) } else null
             try { withContext(trace + capture) {
-            suspend fun collectResponse(requestProfile: ApiProfile) = container.apiClient.stream(requestProfile, messages).collect { event -> if(event is ApiStreamEvent.Text && !event.thinking) {
+            suspend fun collectResponse(requestProfile: ApiProfile) = container.apiClient.stream(requestProfile, messages, call.maxOutputLength).collect { event -> if(event is ApiStreamEvent.Text && !event.thinking) {
                 require(result.length + event.value.length <= 4_000_000) { "API 输出超过 4 MB" }; result.append(event.value)
                 if(parser != null) try { parser.append(event.value, requireNotNull(item)) }
                     catch(failure: IllegalArgumentException) { outputFailed = true; throw failure }
@@ -341,7 +414,7 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 currentCoroutineContext().ensureActive()
                 if (!canPrefetch(chapterId, page.pageId)) break
                 if (states.containsKey(page.pageId) || cached.containsKey(page.pageId) || published.containsKey(page.pageId)) continue
-                if (reusePages && container.localPageTranslator.artifacts.has(page.pageId)) continue
+                if (reusePages && cached.containsKey(page.pageId)) continue
                 // Admission waits for budget. The current page's SEG and OCR lease
                 // is never evicted to make space for speculative work.
                 var state: ImageState? = null
@@ -362,7 +435,8 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         catch(_: Exception) { /* A speculative failure is retried through the real SEG row. */ }
         finally { prefetchLock.unlock() }
     }
-    private suspend fun encodeImage(image: WorkflowValue.Image): ApiImage {
+    protected open suspend fun encodeAudio(audio: WorkflowValue.Audio): ApiAudio = error("当前输入没有可读取的句子录音")
+    protected open suspend fun encodeImage(image: WorkflowValue.Image): ApiImage {
         val reference = images[image.key] ?: error("图片引用不存在")
         val state = this.image(reference.pageId)
         return try {
@@ -431,11 +505,22 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         return state
     }
     override suspend fun publishPage(frame: WorkflowFrame) {
+        try { publishPageOnce(frame) }
+        catch(conflict: PageTranslationRevisionConflict) {
+            if(!restartConflictingPages) throw conflict
+            discardConflictingPage(requireNotNull(frame.identity(WorkflowSystem.PAGE)))
+            throw TaskRequeue(resultConflict = true)
+        }
+    }
+    private suspend fun publishPageOnce(frame: WorkflowFrame) {
         val id = requireNotNull(frame.identity(WorkflowSystem.PAGE))
         cached[id]?.let { saved ->
             container.localPageTranslator.pageWriteMutex.withLock {
                 if (!canPublish(frame)) throw WorkflowPageStopped()
-                published[id] = saved; pagePublished(frame, saved)
+                val latest = container.localPageTranslator.artifacts.current(id) ?: throw PageTranslationRevisionConflict()
+                if (latest.sourceSha256 != saved.sourceSha256 || !latest.matchesTask(settings.source, settings.target, requireNotNull(resultIdentity))) throw PageTranslationRevisionConflict()
+                setRecords(frame, latest.regions.map { regionRecord(it, id, pageNumber(frame)) })
+                published[id] = latest; pagePublished(frame, latest)
                 vision.preprocessingCache.commitPage(id)
             }
             return
@@ -445,23 +530,28 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         val regions = translatedRegions(frame, id)
         setRecords(frame, regions.map { regionRecord(it, id, pageNumber(frame)) })
         progress(frame, PageTranslationProgress(PageTranslationStage.SAVING))
-        container.localPageTranslator.pageWriteMutex.withLock {
+        commitGate { container.localPageTranslator.pageWriteMutex.withLock {
             if (!canPublish(frame)) throw WorkflowPageStopped()
+            if (!ephemeral && currentResultIdentity(requireNotNull(resultProgram)) != resultIdentity)
+                error("翻译配置在运行中变化，已有成果已保留；请重新确认任务")
             val job = currentCoroutineContext()
+            val base = publicationBases[id]
             val saved = if (ephemeral) ReaderPageTranslation(id, java.util.UUID.randomUUID().toString(), File(context.cacheDir, "screen-session"),
                 settings.source, settings.target, state.hash, state.width, state.height, regions, emptyList(),
                 (System.nanoTime() - state.started) / 1_000_000, settings.render) else container.localPageTranslator.artifacts.save(id, state.hash, settings.source, settings.target,
                 state.width, state.height, regions, emptyList(), (System.nanoTime() - state.started) / 1_000_000,
-                settings.render, checkCancelled = { job.ensureActive() })
+                settings.render, expectedRevision = base?.revision, requireAbsent = base?.revision == null,
+                resultIdentity = resultIdentity, producerTaskId = job[TaskContext]?.taskId, checkCancelled = { job.ensureActive() })
             published[id] = saved
             pagePublished(frame, saved)
+            if(!ephemeral) currentCoroutineContext()[TaskContext]?.onRemoteRequest?.invoke("", id, "COMMITTED")
             vision.preprocessingCache.commitPage(id)
-        }
+        } }
     }
     override suspend fun previewPage(frame: WorkflowFrame) = container.localPageTranslator.pageWriteMutex.withLock {
         val id = frame.identity(WorkflowSystem.PAGE) ?: return@withLock
         val state = states[id] ?: return@withLock
-        if(!canPublish(frame)) return@withLock
+        if(!canPublish(frame) || !unchangedResult(id)) return@withLock
         val saved = ReaderPageTranslation(id, java.util.UUID.randomUUID().toString(), File(container.localPageTranslator.artifacts.root, "preview"),
             settings.source, settings.target, state.hash, state.width, state.height,
             translatedRegions(frame, id), emptyList(),

@@ -36,7 +36,10 @@ data class ScreenTranslationState(val started: Boolean = false, val engine: Scre
 
 /** Two single-page temporary chapters share the ordinary workflow engines and cache budget. */
 class ScreenTranslationController(private val container: AppContainer) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + InferencePriority.SCREEN)
+    @Volatile private var taskContext: TaskContext? = null
+    @Volatile private var sessionTaskId: String? = null
+    private fun sessionContext(): kotlin.coroutines.CoroutineContext = taskContext ?: kotlin.coroutines.EmptyCoroutineContext
     val preferences = ScreenTranslationPreferences(container.application)
     @Volatile private var visionSettings = preferences.settings.value.vision
     val vision by lazy { LocalVisionEngine(container.application, "screen-vision-preprocessing") { visionSettings } }
@@ -79,7 +82,7 @@ class ScreenTranslationController(private val container: AppContainer) {
     private var videoCadence: ScreenVideoCadence? = null
     private val chapterJobs = linkedMapOf<Long, Job>()
     private val chapterRevision = MutableStateFlow(0L)
-    private val cacheBudget = TranslationCacheBudget(preferences.settings.value.cacheMegabytes.toLong() * 1_048_576)
+    private val cacheBudget = TranslationCacheBudget(preferences.settings.value.cacheMegabytes.toLong() * 1_048_576, container.imageCacheBudget)
     private val sessionGlossary = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val publicationOrder = ScreenPublicationOrder()
     private var frameFailure: String? = null
@@ -131,10 +134,30 @@ class ScreenTranslationController(private val container: AppContainer) {
     internal fun appliedEngineSettings() = configuration
     internal fun appliedEngineWorkflow() = workflow
     init {
+        container.taskScheduler.registerExternal("SCREEN", { service != null }) { execution ->
+            withContext(Dispatchers.Main.immediate) {
+                if(service == null) throw com.lmreader.tasks.TaskWaiting("ACCESS", "请重新从屏幕翻译入口启动并授权截屏")
+                sessionTaskId = execution.taskId
+                taskContext = currentCoroutineContext()[TaskContext]
+                try {
+                    execution.progress(0, 0, "屏幕翻译会话")
+                    prepareEngine()
+                    awaitCancellation()
+                } finally {
+                    withContext(NonCancellable) {
+                        stopInternal("屏幕翻译会话已停止", updateTask = false)
+                        joinRetired()
+                        resourceLifecycle.withLock { }
+                        taskContext = null
+                    }
+                }
+            }
+        }
         scope.launch {
             combine(preferences.settings, container.translationWorkflows.workflows, container.apiProfiles.profiles, engineRequest,
                 container.translationModels.installedPacks) { config, workflows, profiles, request, installed ->
-                val selected = workflows.firstOrNull { it.id == (config.translation.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
+                val selected = workflows.firstOrNull { it.id == config.translation.workflowId }
+                    ?: TranslationWorkflow.LOCAL_MACHINE.takeIf { TranslationWorkflow.isDefaultSelection(config.translation.workflowId) }
                 val ids = selected?.program?.withApiOverride(config.translation.apiProfileId)?.allNodes()
                     ?.filter { it.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM) }
                     ?.mapNotNull { (it.inputs["profile"] as? WorkflowExpression.Text)?.value }?.toSet().orEmpty()
@@ -166,7 +189,15 @@ class ScreenTranslationController(private val container: AppContainer) {
                 !ScreenAccessibilityService.instance?.contentOcclusions.isNullOrEmpty()) captureWakeups.trySend(Unit)
             else resetScene()
         }
-        state.update { it.copy(started = true) }; prepareEngine()
+        state.update { it.copy(started = true, status = "等待任务准入") }
+        val attachGeneration = generation
+        scope.launch {
+            val task = container.taskScheduler.submit("SCREEN", "屏幕翻译", "screen-session", "screen-session:$attachGeneration",
+                "{}", priority = ResourceGovernor.SCREEN, recoverable = false)
+            if(generation != attachGeneration || this@ScreenTranslationController.service == null)
+                container.taskScheduler.pause(task.taskId, cancel = true)
+            else { sessionTaskId = task.taskId; container.taskScheduler.poke() }
+        }
     }
     fun accessibilityChanged() {
         accessibilityAvailable.value = ScreenAccessibilityService.instance != null
@@ -187,6 +218,11 @@ class ScreenTranslationController(private val container: AppContainer) {
         return true
     }
     fun stop(reason: String = "") {
+        stopInternal(reason, updateTask = true)
+    }
+    private fun stopInternal(reason: String, updateTask: Boolean) {
+        val taskId = sessionTaskId; sessionTaskId = null
+        if(updateTask && taskId != null) container.backgroundScope.launch { container.taskScheduler.pause(taskId, cancel = true) }
         android.util.Log.i("ScreenTranslation", "STOP reason=$reason")
         waitReasons.clear()
         engineRequest.update { it.copy(wanted = false) }; resumeContinuous = false
@@ -272,7 +308,7 @@ class ScreenTranslationController(private val container: AppContainer) {
         preparedOwner?.let(container.localTranslator::unpin); preparedOwner = null
         configuration = null; workflow = null; program = null; textCache.clear(); apiResources.value = emptyList()
         state.update { it.copy(engine = ScreenEngineState.STOPPING, status = message(R.string.screen_translation_engine_unloading)) }; updateButton()
-        unloading = scope.launch(start = CoroutineStart.LAZY) {
+        unloading = scope.launch(sessionContext(), start = CoroutineStart.LAZY) {
             try {
                 joinRetired()
                 resourceLifecycle.withLock {
@@ -301,7 +337,7 @@ class ScreenTranslationController(private val container: AppContainer) {
         retire(warming); warming = null
         state.update { it.copy(engine = ScreenEngineState.LOADING, status = message(R.string.screen_translation_engine_loading)) }; updateButton()
         val pinOwner = "$owner:${UUID.randomUUID()}"
-        warming = scope.launch(start = CoroutineStart.LAZY) {
+        warming = scope.launch(sessionContext(), start = CoroutineStart.LAZY) {
             var ready = false
             try {
                 joinRetired()
@@ -390,7 +426,7 @@ class ScreenTranslationController(private val container: AppContainer) {
             stopContinuous()
             state.update { it.copy(status = "正在截取屏幕") }
             val epoch = generation
-            worker = scope.launch(start = CoroutineStart.LAZY) {
+            worker = scope.launch(sessionContext(), start = CoroutineStart.LAZY) {
                 try { joinRetired(); val startedAt = SystemClock.uptimeMillis(); val frame = capture().limited(config.maximumCaptureEdge); process(frame, listOf(frame.bounds), epoch,
                     startedAt = startedAt, captureMillis = SystemClock.uptimeMillis() - startedAt) }
                 catch (cancelled: CancellationException) { throw cancelled }
@@ -561,7 +597,7 @@ class ScreenTranslationController(private val container: AppContainer) {
 
     private fun followMotion() {
         if (configuration?.mode != ScreenTranslationMode.BROWSE || motionLoop?.isActive == true) return
-        motionLoop = scope.launch {
+        motionLoop = scope.launch(sessionContext()) {
             joinRetired()
             while (isActive && state.value.started && state.value.continuous) {
                 val config = configuration ?: break
@@ -604,7 +640,7 @@ class ScreenTranslationController(private val container: AppContainer) {
 
     private fun monitor() {
         if (captureLoop?.isActive == true) return
-        captureLoop = scope.launch {
+        captureLoop = scope.launch(sessionContext()) {
             joinRetired()
             val config = configuration ?: return@launch
             val cadence = ScreenFrameCadence(config.sampleIntervalMillis.toLong())
@@ -745,7 +781,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                         android.util.Log.d("ScreenVideo", "CAPTURE frame=${chapter.number} at=$captureStarted buffered=${chapterWindow.size}")
                     }
                     cadence.submitted(SystemClock.uptimeMillis()); held = null
-                    val job = scope.launch(start = CoroutineStart.LAZY) {
+                    val job = scope.launch(sessionContext(), start = CoroutineStart.LAZY) {
                         try { process(captured, processingAreas, epoch, chapter = chapter, startedAt = captureStarted,
                             captureMillis = captureMillis, browseFrame = browseFrame, scopeAreas = selectedAreas,
                             browseSources = browseSources, freshAreas = exposed) }
@@ -1251,7 +1287,7 @@ class ScreenTranslationController(private val container: AppContainer) {
         val saved = pending.latest() ?: return
         stopContinuous()
         val epoch = generation
-        worker = scope.launch(start = CoroutineStart.LAZY) {
+        worker = scope.launch(sessionContext(), start = CoroutineStart.LAZY) {
             var original: CapturedScreen? = null
             try {
                 val bitmap = withContext(Dispatchers.IO) { android.graphics.BitmapFactory.decodeFile(saved.image.path) ?: error("失败画面无法读取") }

@@ -40,7 +40,8 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
     val workflows by container.translationWorkflows.workflows.collectAsStateWithLifecycle()
     val installed by container.translationModels.installedPacks.collectAsStateWithLifecycle()
     val apiProfiles by container.apiProfiles.profiles.collectAsStateWithLifecycle(initialValue = emptyList())
-    val workflow = workflows.firstOrNull { it.id == (state.settings.workflowId ?: TranslationWorkflow.LOCAL_MACHINE_ID) }
+    val workflow = workflows.firstOrNull { it.id == state.settings.workflowId }
+        ?: TranslationWorkflow.LOCAL_MACHINE.takeIf { TranslationWorkflow.isDefaultSelection(state.settings.workflowId) }
     val catalog = remember(installed, workflow?.program) { TranslationModelCatalog.fromPacks(installed.values.toList()).forWorkflow(workflow?.program) }
     val usesLocal = workflow?.program?.uses(WorkflowKind.TRANSLATE) != false
     val apiLanguages = remember { translationLanguageChoices(java.util.Locale.getISOLanguages().asIterable()) }
@@ -96,7 +97,7 @@ fun TranslationOptionsScreen(container: AppContainer, mangaId: String, onBack: (
                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis); Icon(Icons.Default.ArrowDropDown, null)
                     }
                     DropdownMenu(workflowMenu, { workflowMenu = false }) {
-                        workflows.filter { !it.builtIn || it.id in setOf(TranslationWorkflow.LOCAL_MACHINE_ID, TranslationWorkflow.OPUS_MACHINE_ID) }.forEach { item -> DropdownMenuItem(text = { Text(item.name) }, onClick = {
+                        workflows.filter { it.program.inputScenario == com.lmreader.core.model.WorkflowInputScenario.IMAGE && (!it.builtIn || it.id == TranslationWorkflow.LOCAL_MACHINE_ID) }.forEach { item -> DropdownMenuItem(text = { Text(item.name) }, onClick = {
                             viewModel.setWorkflow(if (item.id == TranslationWorkflow.LOCAL_MACHINE_ID) null else item.id); workflowMenu = false
                         }) }
                     }

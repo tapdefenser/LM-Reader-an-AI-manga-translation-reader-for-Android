@@ -51,7 +51,31 @@ data class TranslationModelFile(
 
 enum class TranslationFileCompression { GZIP, NONE }
 
-enum class TranslationModelEngine { BERGAMOT, OPUS_MT }
+/**
+ * Engines implemented by this build. OPUS-MT was removed; [fromStoredValue] deliberately
+ * returns null for old names so callers can migrate preferences or reject old snapshots
+ * explicitly instead of silently loading a different model format.
+ */
+enum class TranslationModelEngine(val displayName: String) {
+    BERGAMOT("Bergamot");
+
+    companion object {
+        fun fromStoredValue(value: String?): TranslationModelEngine? =
+            entries.firstOrNull { it.name == value?.trim() }
+
+        /** A missing engine field means the legacy Bergamot default; an unknown name does not. */
+        fun isSupported(value: String?): Boolean = value == null || fromStoredValue(value) != null
+
+        fun fromStoredValueOrDefault(value: String?): TranslationModelEngine =
+            fromStoredValue(value) ?: BERGAMOT
+
+        fun requireSupported(value: String?): TranslationModelEngine =
+            fromStoredValue(value) ?: throw UnsupportedTranslationEngineException(value)
+    }
+}
+
+class UnsupportedTranslationEngineException(value: String?) : IllegalArgumentException(
+    "不支持机翻引擎 ${value?.trim()?.take(40)?.ifBlank { null } ?: "（空）"}；请选择 Bergamot，或重新创建本地机翻工作流")
 
 data class LocalTranslationRoute(val source: LocalTranslationLanguage, val target: LocalTranslationLanguage,
     val engine: TranslationModelEngine = TranslationModelEngine.BERGAMOT)
@@ -61,7 +85,6 @@ data class TranslationModelPack(
     val source: LocalTranslationLanguage, val target: LocalTranslationLanguage,
     val files: List<TranslationModelFile>,
     val engine: TranslationModelEngine = TranslationModelEngine.BERGAMOT,
-    val targetPrefix: String = "",
     val license: String = "",
     val repository: String = "",
 ) {
@@ -69,7 +92,7 @@ data class TranslationModelPack(
     val downloadBytes get() = files.sumOf { it.downloadSize }
     val installedBytes get() = files.sumOf { it.size }
     val identity get() = "$id@$version"
-    fun sameContents(other: TranslationModelPack) = id==other.id && version==other.version && engine==other.engine && targetPrefix==other.targetPrefix &&
+    fun sameContents(other: TranslationModelPack) = id==other.id && version==other.version && engine==other.engine &&
         files.map { listOf(it.role,it.name,it.size.toString(),it.gitBlobSha1 ?: it.sha256) }.sortedBy {it[0]} == other.files.map { listOf(it.role,it.name,it.size.toString(),it.gitBlobSha1 ?: it.sha256) }.sortedBy {it[0]}
 }
 

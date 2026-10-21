@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -36,7 +37,9 @@ import kotlinx.coroutines.launch
  *
  * 线程约定：容器构建本身不做 IO；数据库与 DataStore 都是惰性打开。
  */
-class AppContainer(val application: Application) {
+class AppContainer(val application: Application,
+    val videoResultUri: (java.io.File) -> android.net.Uri = { file -> androidx.core.content.FileProvider.getUriForFile(application, "${application.packageName}.updates", file) },
+    private val schedulerFactory: (AppContainer) -> com.lmreader.tasks.TaskScheduler = { com.lmreader.tasks.TaskScheduler(it) }) {
     val applicationContext: Context get() = application.applicationContext
 
     private val databaseComponents by lazy {
@@ -81,25 +84,45 @@ class AppContainer(val application: Application) {
     val visionExecutionPreferences by lazy { com.lmreader.core.storage.settings.VisionExecutionPreferences(application) }
     val localVision by lazy { com.lmreader.core.vision.LocalVisionEngine(application) { visionExecutionPreferences.settings.value } }
     val translationSources by lazy { com.lmreader.core.translation.TranslationSourceStore(application) }
-    val opusTranslationCatalog by lazy { com.lmreader.core.translation.TranslationModelCatalog(
-        application.assets.open("translation/opus_catalog.json").bufferedReader().use { it.readText() }) }
     val translationCatalog by lazy { com.lmreader.core.translation.TranslationModelCatalog(
-        application.assets.open("translation/catalog.json").bufferedReader().use { it.readText() }).withAdditionalPacks(opusTranslationCatalog.packs) }
+        application.assets.open("translation/catalog.json").bufferedReader().use { it.readText() }) }
     val translationInstaller by lazy { com.lmreader.core.translation.ModelPackageInstaller(
         java.io.File(application.noBackupFilesDir, "translation-models")) }
     val translationCatalogs by lazy { com.lmreader.core.translation.TranslationCatalogStore(
         translationCatalog, java.io.File(application.noBackupFilesDir,"translation-catalogs")) }
+    /**
+     * Unified admission for ASR/NMT installation tasks. Lazy on purpose: constructing it only
+     * registers the executor, and it must not resolve the model managers during registration.
+     */
+    val modelInstallationTasks by lazy { com.lmreader.tasks.ModelInstallationTasks(this) }
     val translationModels by lazy { com.lmreader.core.translation.TranslationModelManager(
-        application, translationCatalogs, translationInstaller, translationSources, translationCatalog) }
+        application, translationCatalogs, translationInstaller, translationSources, translationCatalog,
+        scheduler = modelInstallationTasks) }
     val machineTranslationPreferences by lazy { com.lmreader.core.storage.settings.MachineTranslationPreferences(application) }
     val localTranslator by lazy { com.lmreader.core.translation.BergamotTextTranslator({translationModels.installedCatalog()}, translationInstaller,
         { machineTranslationPreferences.settings.value }, {
             val info = android.app.ActivityManager.MemoryInfo()
             application.getSystemService(android.app.ActivityManager::class.java).getMemoryInfo(info); info.availMem
         }) }
+    val asrModels by lazy { com.lmreader.core.translation.asr.AsrModelManager(
+        application, backgroundScope, scheduler = modelInstallationTasks) }
+    val localAsr by lazy { com.lmreader.core.translation.asr.LocalAsrEngine(asrModels) }
     val loadedTranslationResources by lazy {
-        kotlinx.coroutines.flow.combine(localVision.loadedResources, localTranslator.loadedResources) { vision, translation -> vision + translation }
-            .stateIn(backgroundScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
+        kotlinx.coroutines.flow.combine(
+            localVision.loadedResources,
+            localTranslator.loadedResources,
+            localAsr.loadedResources,
+        ) { vision, translation, asr ->
+            vision + translation + asr.map { resource ->
+                com.lmreader.core.model.LoadedEngineResource(
+                    id = "asr:${resource.id}",
+                    kind = com.lmreader.core.model.InferenceEngineKind.TRANSLATION,
+                    name = resource.label,
+                    backend = "ASR · ${resource.threads} 线程",
+                    inUse = resource.inUse,
+                )
+            }
+        }.stateIn(backgroundScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, emptyList())
     }
     val bubbleRenderPreferences by lazy { com.lmreader.core.storage.settings.BubbleRenderPreferences(application) }
     val translationWorkflows by lazy { com.lmreader.ui.workflow.TranslationWorkflowStore(
@@ -107,8 +130,27 @@ class AppContainer(val application: Application) {
     val queueOrder by lazy { com.lmreader.ui.queue.QueueOrderStore(
         java.io.File(application.filesDir, "translation-queue-order.json")) }
     val translationCachePreferences by lazy { com.lmreader.core.storage.settings.TranslationCachePreferences(application) }
+    val imageCacheBudget by lazy {
+        com.lmreader.ui.queue.TranslationCacheBudget(translationCachePreferences.megabytes.value.toLong() * 1_048_576).also { budget ->
+            backgroundScope.launch { translationCachePreferences.megabytes.collect { budget.setLimit(it.toLong() * 1_048_576) } }
+        }
+    }
     val translationQueue by lazy { com.lmreader.ui.queue.TranslationQueueCoordinator(this) }
     val screenTranslation by lazy { com.lmreader.screen.ScreenTranslationController(this) }
+    val videoLibrary by lazy { com.lmreader.ui.video.VideoLibraryStore(java.io.File(application.filesDir, "videos")) }
+    val videoSessions = com.lmreader.ui.video.VideoSessions()
+    val taskScheduler by lazy { schedulerFactory(this) }
+    val workDatabase by lazy { com.lmreader.core.database.media.MediaTaskDatabase.build(application) }
+    val videoResults: com.lmreader.core.database.media.VideoResultDatabase get() = workDatabase
+    val readerPageTasks by lazy { com.lmreader.tasks.ReaderPageTasks(this) }
+    val sourceMaintenanceTasks by lazy { com.lmreader.tasks.SourceMaintenanceTasks(this) }
+    val metadataMaintenanceTasks by lazy { com.lmreader.tasks.MetadataMaintenanceTasks(this) }
+    val videoCatalog by lazy { com.lmreader.ui.video.catalog.VideoCatalogRepository(application, workDatabase) }
+    val videoMaintenance by lazy { com.lmreader.ui.video.catalog.VideoMaintenance(this) }
+    val videoTasks by lazy { com.lmreader.ui.video.VideoTasks(this) }
+    val videoAudio by lazy { com.lmreader.ui.video.VideoAudioSources(this) }
+    val videoExports by lazy { com.lmreader.ui.video.VideoExports(this) }
+    val videoResultImports by lazy { com.lmreader.ui.video.VideoResultImports(this) }
     val exportSettings by lazy { com.lmreader.ui.queue.ExportSettingsStore(application) }
     val exportQueue by lazy { com.lmreader.ui.queue.ExportQueueCoordinator(this) }
     val taskService by lazy { com.lmreader.tasks.TaskServiceController(this) }
@@ -158,6 +200,7 @@ class AppContainer(val application: Application) {
         MetadataBackfillWorker(
             treeAccess = treeAccess,
             mangaRepository = mangaRepository,
+            admission = { ids -> metadataMaintenanceTasks.admit(ids) },
         )
     }
 
@@ -228,6 +271,7 @@ class AppContainer(val application: Application) {
             scanner = structureScanner,
             mangaRepository = mangaRepository,
             sourceRepository = sourceRepository,
+            admission = { source, force, work -> sourceMaintenanceTasks.admit(source, force, work) },
         )
     }
 
@@ -250,8 +294,17 @@ class AppContainer(val application: Application) {
         // Launch only after every lazy delegate has been initialized.
         backgroundScope.launch { translationQueue }
         backgroundScope.launch { exportQueue }
+        // Register the model-install executor even when the model settings screens were never
+        // opened this process, so durable install rows can recover. Constructing the adapter
+        // only touches TaskScheduler; managers stay lazy until a task actually executes.
+        backgroundScope.launch { modelInstallationTasks }
+        backgroundScope.launch { sourceMaintenanceTasks }
         backgroundScope.launch {
-            try { backups.recoverPendingRestore(); startupReady.complete(Unit) }
+            try {
+                backups.recoverPendingRestore()
+                com.lmreader.ui.video.editor.recoverVideoEditorWrites(this@AppContainer)
+                startupReady.complete(Unit)
+            }
             catch (error: Exception) { startupReady.completeExceptionally(error) }
         }
         backgroundScope.launch {
