@@ -889,6 +889,18 @@ private fun VideoBubbleCanvas(
                 // Match the reader's zoom allowance so low-resolution frames fit the
                 // available video area instead of being capped at their native pixels.
                 setMinimumDpi(1)
+                // The reader preserves zoom when its viewport changes. Here the
+                // transport/cue panels can shrink a height-limited video after
+                // the first draw. Keep a fitted frame fitted, while preserving
+                // a deliberate user zoom during editing.
+                addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                    if (isReady && right > left && bottom > top && oldRight > oldLeft && oldBottom > oldTop &&
+                        (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop)
+                    ) {
+                        val oldFit = minOf((oldRight - oldLeft).toFloat() / sWidth, (oldBottom - oldTop).toFloat() / sHeight)
+                        if (kotlin.math.abs(scale - oldFit) < .03f) resetScaleAndCenter()
+                    }
+                }
                 setImage(ImageSource.bitmap(frame.bitmap))
                 showTranslation = true
                 editing = true

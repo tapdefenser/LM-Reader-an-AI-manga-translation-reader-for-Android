@@ -394,9 +394,17 @@ class VideoEditorUiTest {
 
     private fun awaitEditableRegions(): List<PageTranslatedRegion> {
         var regions: List<PageTranslatedRegion> = emptyList()
-        compose.waitUntil(TIMEOUT) {
-            regions = runCatching { readEditableRegions() }.getOrDefault(emptyList())
-            regions.size >= 2
+        var lastFailure: Throwable? = null
+        try {
+            compose.waitUntil(TIMEOUT) {
+                val attempt = runCatching { readEditableRegions() }
+                lastFailure = attempt.exceptionOrNull()
+                regions = attempt.getOrDefault(emptyList())
+                regions.size >= 2
+            }
+        } catch (failure: Throwable) {
+            runCatching { captureEditor("bubbles-failure") }
+            throw AssertionError("Editor not ready: regions=${regions.size}; last view failure=$lastFailure", failure)
         }
         return regions
     }
