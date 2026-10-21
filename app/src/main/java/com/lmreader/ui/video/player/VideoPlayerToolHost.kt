@@ -74,8 +74,9 @@ object VideoPlayerToolActions {
     const val EDIT = "EDIT"
     const val CLEAR = "CLEAR"
     const val SUBTITLES = "SUBTITLES"
+    const val TOGGLE_SUBTITLES = "TOGGLE_SUBTITLES"
 
-    val all: Set<String> = setOf(FRAME, TRANSLATE, OPTIONS, EDIT, CLEAR, SUBTITLES)
+    val all: Set<String> = setOf(FRAME, TRANSLATE, OPTIONS, EDIT, CLEAR, SUBTITLES, TOGGLE_SUBTITLES)
 }
 
 /**

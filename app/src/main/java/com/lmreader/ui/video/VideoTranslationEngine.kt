@@ -20,14 +20,19 @@ interface VideoFrameEngine {
     val identity: String
     suspend fun prepare()
     suspend fun frame(bitmap: Bitmap, positionMs: Long): ReaderPageTranslation
+    fun pageId(positionMs: Long): String = error("This frame engine does not expose offline page identity")
+    suspend fun detect(bitmap: Bitmap, positionMs: Long): WorkflowPageSegmentation? = null
+    suspend fun frame(bitmap: Bitmap, positionMs: Long, detection: WorkflowPageSegmentation?, retained: Set<String>): ReaderPageTranslation = frame(bitmap, positionMs)
     suspend fun close()
 }
 class VideoTranslationEngine(private val container: AppContainer, val project: VideoProject,
     val workflow: TranslationWorkflow, private val fixedProfiles: List<ApiProfile>? = null,
-    private val analysisIdentity: String = "legacy") : VideoFrameEngine {
+    private val analysisIdentity: String = "legacy",
+    private val textScope: SegTextScope = SegTextScope.ALL) : VideoFrameEngine {
     private val owner = "video:${project.id}:${UUID.randomUUID()}"
     private val visionSettings = container.visionExecutionPreferences.settings.value
-    val vision = LocalVisionEngine(container.application, "video-analysis-cache/${project.id}") { visionSettings }
+    // Use the same live session-pool settings as manga/screen translation.
+    val vision = LocalVisionEngine(container.application, "video-analysis-cache/${project.id}") { container.visionExecutionPreferences.settings.value }
     private lateinit var settings: WorkflowRunSettings
     override lateinit var identity: String; private set
     private val budget = TranslationCacheBudget(64L * 1_048_576, container.imageCacheBudget)
@@ -37,7 +42,7 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
         require(validation.valid) { validation.issues.joinToString("；") { it.message } }
         val from = LocalTranslationLanguage.fromTag(project.source); val to = LocalTranslationLanguage.fromTag(project.target)
         val profiles = fixedProfiles ?: container.apiProfiles.profiles.first()
-        // Literal node bindings are retained. A video selection never blindly overrides every API node.
+        // The captured program already contains the user's branch-wide API override.
         for (node in p.allNodes()) {
             try {
                 if (node.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM)) {
@@ -62,31 +67,62 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
             }
             LocalPageTranslator.ocrLanguage(lang)
         }.toSet()
-        settings = WorkflowRunSettings(from, to, "", container.bubbleRenderPreferences.settings.first(), .35f, profiles)
+        settings = WorkflowRunSettings(from, to, "", container.bubbleRenderPreferences.settings.first(), .35f, profiles,
+            segTextScope = textScope)
         identity = workflowResultIdentity(p, settings, container.translationModels.installedPacks.value.values.toList(),
-            vision.modelIdentities, visionSettings, "video-surface-v2:$analysisIdentity")
+            vision.modelIdentities, visionSettings, "video-surface-v3:$analysisIdentity")
         val routes = p.localTranslationRoutes(from, to)
         container.localTranslator.prepareEngineModels(owner, routes)
         if (p.inputScenario == WorkflowInputScenario.IMAGE) vision.reconfigure(p.uses(WorkflowKind.SEG), languages,
             needTextDetection = p.uses(WorkflowKind.SEG) || languages.isNotEmpty())
         vision.setPreprocessingCacheLimit(32L * 1_048_576)
     }
-    override suspend fun frame(bitmap: Bitmap, positionMs: Long): ReaderPageTranslation {
+    override fun pageId(positionMs: Long) = "video:${project.id}:${project.sha256}:$positionMs:$identity"
+    override suspend fun detect(bitmap: Bitmap, positionMs: Long): WorkflowPageSegmentation? {
+        if(!workflow.program.uses(WorkflowKind.SEG)) return null
+        val id = pageId(positionMs)
+        val result = vision.segment(id, bitmap, settings.segThreshold, settings.textDetectionThreshold,
+            sourceSha256 = bitmapHash(bitmap), scope = settings.segTextScope) {}
+        return WorkflowPageSegmentation(result, selectSegRegions(result, settings.segTextScope, settings.freeTextMergeGapRatio))
+    }
+    override suspend fun frame(bitmap: Bitmap, positionMs: Long) = frame(bitmap, positionMs, null, emptySet())
+    override suspend fun frame(bitmap: Bitmap, positionMs: Long, detection: WorkflowPageSegmentation?, retained: Set<String>): ReaderPageTranslation {
         require(workflow.program.inputScenario == WorkflowInputScenario.IMAGE)
-        val id = "video:${project.id}:${project.sha256}:$positionMs:$identity"
+        val id = pageId(positionMs)
+        if(detection != null && detection.regions.none { it.id !in retained }) {
+            return ReaderPageTranslation(id, UUID.randomUUID().toString(), java.io.File(container.applicationContext.cacheDir, "video-empty"),
+                settings.source, settings.target, bitmapHash(bitmap), bitmap.width, bitmap.height, emptyList(), emptyList(), 0,
+                settings.render, resultIdentity = identity)
+        }
         val page = ReaderPage(id, 0, "${positionMs}ms", id)
         val source = object : PageSource {
             override suspend fun pages() = listOf(page)
             override suspend fun probe(page: ReaderPage) = PageGeometry(bitmap.width, bitmap.height)
             override suspend fun open(page: ReaderPage): InputStream = error("视频帧只在内存中可用")
         }
-        val hash = bitmapHash(bitmap)
-        val host = host(listOf(WorkflowChapterInput("video-frame:${project.id}", "${positionMs}ms", source, listOf(page))),
-            mapOf(id to WorkflowPageImage(bitmap, hash)))
+        // Whole-page API/OCR nodes must not receive retained source text either.
+        val working = if(retained.isNotEmpty()) bitmap.copy(Bitmap.Config.ARGB_8888, true) else bitmap
+        if(working !== bitmap && detection != null) {
+            val remaining = detection.regions.filterNot { it.id in retained }
+            val excluded = detection.regions.filter { it.id in retained }.flatMap {
+                screenExposedRegions(it.bounds, remaining.map { region -> region.bounds })
+            }
+            val bounds = PixelRect(0f, 0f, working.width.toFloat(), working.height.toFloat())
+            com.lmreader.screen.maskedScreenCrop(working, bounds, screenExposedRegions(bounds, excluded), copy = false)
+        }
+        val hash = bitmapHash(working)
+        val host = object : AndroidWorkflowHost(container.application, container, owner, project.name,
+            listOf(WorkflowChapterInput("video-frame:${project.id}", "${positionMs}ms", source, listOf(page))), settings, budget,
+            reusePages = false, requestOrigin = "本地视频画面", vision = vision, ephemeral = true,
+            pageImages = mapOf(id to WorkflowPageImage(working, hash))) {
+            override suspend fun segmentPage(pageId: String, bitmap: Bitmap, sha256: String, frame: WorkflowFrame): WorkflowPageSegmentation =
+                detection?.copy(regions = detection.regions.filterNot { it.id in retained }, sha256 = hash)
+                    ?: super.segmentPage(pageId, bitmap, sha256, frame)
+        }
         try {
             WorkflowRuntime(workflow.parallelLimit, workflow.retries).execute(workflow.program, host)
             return host.published[id] ?: error("工作流没有生成画面成果")
-        } finally { host.close() }
+        } finally { host.close(); if(working !== bitmap) working.recycle() }
     }
     suspend fun subtitles(cues: List<VideoSubtitleCue>, resources: VideoSentenceResources? = null,
         progress: suspend (VideoSubtitleCue, Int, Int) -> Unit): List<VideoSubtitleCue> {

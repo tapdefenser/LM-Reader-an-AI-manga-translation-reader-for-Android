@@ -27,23 +27,29 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.lmreader.core.translation.asr.AsrBackend
 import com.lmreader.core.translation.asr.AsrModelDescriptor
 import com.lmreader.core.translation.asr.AsrModelManager
 import com.lmreader.core.translation.asr.AsrModelState
 import com.lmreader.core.translation.asr.AsrModelStatus
+import com.lmreader.core.translation.asr.AsrRuntimeCapabilities
 import com.lmreader.core.translation.asr.AsrSettings
 import com.lmreader.core.translation.asr.LoadedAsrResource
+import com.lmreader.core.translation.asr.LocalAsrEngine
 import com.lmreader.di.AppContainer
 import com.lmreader.ui.settings.api.ApiTopBar
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 // Root container wiring: AppContainer.asrModels: AsrModelManager and
@@ -58,10 +64,18 @@ fun LocalAsrScreen(container: AppContainer, onBack: () -> Unit) {
     val selectedId by manager.selectedId.collectAsStateWithLifecycle()
     val settings by manager.settings.collectAsStateWithLifecycle()
     val loaded by engine.loadedResources.collectAsStateWithLifecycle()
+    val capabilities by engine.capabilities.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var message by remember { mutableStateOf<String?>(null) }
     var deleteCandidate by remember { mutableStateOf<AsrModelDescriptor?>(null) }
     var importCandidate by remember { mutableStateOf<AsrModelDescriptor?>(null) }
+
+    LaunchedEffect(engine) {
+        runCatching { engine.refreshCapabilities() }.onFailure { failure ->
+            message = failure.message ?: "无法检测本地 ASR 后端"
+        }
+    }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val target = importCandidate
@@ -85,7 +99,14 @@ fun LocalAsrScreen(container: AppContainer, onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {
-                AsrSettingsCard(manager, settings, loaded)
+                AsrSettingsCard(
+                    manager = manager,
+                    engine = engine,
+                    settings = settings,
+                    loaded = loaded,
+                    capabilities = capabilities,
+                    onMessage = { message = it },
+                )
             }
             message?.let { text ->
                 item {
@@ -143,8 +164,10 @@ fun LocalAsrScreen(container: AppContainer, onBack: () -> Unit) {
                     },
                     onSelect = {
                         message = null
-                        runCatching { manager.select(model.id) }
-                            .onFailure { message = it.message ?: "无法选择模型" }
+                        scope.launch {
+                            runCatching { engine.selectModel(model.id) }
+                                .onFailure { message = it.message ?: "无法选择模型" }
+                        }
                     },
                     onDelete = { deleteCandidate = model },
                 )
@@ -191,13 +214,60 @@ fun LocalAsrScreen(container: AppContainer, onBack: () -> Unit) {
 @Composable
 private fun AsrSettingsCard(
     manager: AsrModelManager,
+    engine: LocalAsrEngine,
     settings: AsrSettings,
     loaded: List<LoadedAsrResource>,
+    capabilities: AsrRuntimeCapabilities?,
+    onMessage: (String?) -> Unit,
 ) {
     var threadsOpen by remember { mutableStateOf(false) }
+    var backendOpen by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("下载与运行", style = MaterialTheme.typography.titleMedium)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("推理后端")
+                    Text(
+                        "自动优先真实 GPU，初始化失败才回退 CPU；显式选择不可用后端会报错。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Box {
+                    OutlinedButton(onClick = { backendOpen = true }) {
+                        Text(settings.backend.label)
+                    }
+                    DropdownMenu(expanded = backendOpen, onDismissRequest = { backendOpen = false }) {
+                        AsrBackend.entries.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(option.label)
+                                        Text(option.description, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                },
+                                onClick = {
+                                    backendOpen = false
+                                    onMessage(null)
+                                    scope.launch {
+                                        runCatching { engine.selectBackend(option) }
+                                            .onFailure { onMessage(it.message ?: "无法切换 ASR 后端") }
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            Text(
+                backendStatus(capabilities, settings.backend),
+                style = MaterialTheme.typography.bodySmall,
+            )
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -220,7 +290,7 @@ private fun AsrSettingsCard(
                 Column(Modifier.weight(1f)) {
                     Text("推理线程")
                     Text(
-                        "范围 1–${manager.threadLimit}（当前设备可用核心数，最多 4）。修改在下次加载模型时生效。",
+                        "范围 1–${manager.threadLimit}（当前设备可用核心数，最多 4）。切换后端或线程会停止当前本地会话，下次转写重新加载。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -233,8 +303,12 @@ private fun AsrSettingsCard(
                             DropdownMenuItem(
                                 text = { Text("$count 线程") },
                                 onClick = {
-                                    manager.setThreads(count)
                                     threadsOpen = false
+                                    onMessage(null)
+                                    scope.launch {
+                                        runCatching { engine.selectThreads(count) }
+                                            .onFailure { onMessage(it.message ?: "无法修改推理线程") }
+                                    }
                                 },
                             )
                         }
@@ -243,8 +317,8 @@ private fun AsrSettingsCard(
             }
             if (loaded.isNotEmpty()) {
                 Text(
-                    "已加载：" + loaded.joinToString("；") { resource ->
-                        "${resource.label} · ${resource.threads} 线程" + if (resource.inUse) " · 推理中" else " · 空闲"
+                    "已加载：\n" + loaded.joinToString("\n") { resource ->
+                        loadedSummary(resource) + if (resource.inUse) " · 推理中" else " · 空闲"
                     },
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -252,6 +326,59 @@ private fun AsrSettingsCard(
                 Text("当前没有加载本地 ASR 会话；普通视频播放不会加载 ASR 模型。",
                     style = MaterialTheme.typography.bodySmall)
             }
+        }
+    }
+}
+
+private fun backendStatus(
+    capabilities: AsrRuntimeCapabilities?,
+    selected: AsrBackend,
+): String {
+    if (capabilities == null) return "正在检测本机后端能力…"
+    if (selected == AsrBackend.AUTO) {
+        val parts = listOf(AsrBackend.VULKAN, AsrBackend.OPENCL).map { backend ->
+            val capability = capabilities[backend]
+            val state = when {
+                capability == null -> "未报告"
+                !capability.compiled -> "未编译"
+                capability.available -> "可用"
+                else -> "不可用"
+            }
+            val device = capability?.devices?.firstOrNull()
+                ?.let { it.description?.takeIf(String::isNotBlank) ?: it.name }
+            val detail = when {
+                capability == null -> null
+                capability.available && device != null -> device
+                !capability.available -> capability.reason
+                else -> null
+            }
+            "${backend.label}：$state" + if (detail.isNullOrBlank()) "" else "（$detail）"
+        }
+        return "自动：" + parts.joinToString("；") + "。无可用 GPU 时回退 CPU。"
+    }
+    val capability = capabilities[selected]
+    if (capability == null) return "${selected.label}：当前构建未报告该后端"
+    if (!capability.compiled) {
+        return "${selected.label}：未编译（${capability.reason ?: "当前构建不包含该后端"}）"
+    }
+    if (!capability.available) {
+        return "${selected.label}：不可用（${capability.reason ?: "未检测到可用设备"}）"
+    }
+    val device = capability.devices.firstOrNull()
+        ?.let { it.description?.takeIf(String::isNotBlank) ?: it.name }
+    return "${selected.label}：可用" + if (device.isNullOrBlank()) "" else "（$device）"
+}
+
+private fun loadedSummary(resource: LoadedAsrResource): String {
+    val device = resource.deviceDescription?.takeIf(String::isNotBlank) ?: resource.device
+    return buildString {
+        append(resource.label)
+        append(" · ")
+        append(resource.backend.label)
+        if (!device.isNullOrBlank()) append(" · ").append(device)
+        append(" · ").append(resource.threads).append(" 线程")
+        if (!resource.fallbackReason.isNullOrBlank()) {
+            append(" · 回退：").append(resource.fallbackReason)
         }
     }
 }
@@ -318,7 +445,7 @@ private fun AsrModelCard(
             }
             if (loaded != null) {
                 Text(
-                    if (loaded.inUse) "本地 ASR 会话正在推理。" else "本地 ASR 会话已加载，当前空闲。",
+                    loadedSummary(loaded) + if (loaded.inUse) " · 推理中" else " · 空闲",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

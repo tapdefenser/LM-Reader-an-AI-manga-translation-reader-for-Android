@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 project(lmreader_translation LANGUAGES C CXX)
+option(LMREADER_ASR_OPENCL "Build ASR OpenCL with optional vendor driver loading" ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_BUILD_TYPE Release)
@@ -70,9 +71,106 @@ endfunction()
 allow_upstream_warnings("${CMAKE_CURRENT_SOURCE_DIR}/third_party/bergamot")
 allow_upstream_warnings("${CMAKE_CURRENT_SOURCE_DIR}/third_party/pcre2")
 
-# Pinned whisper.cpp CPU-only native ASR bridge. Source preparation is explicit.
+# Native ASR backend policy. The pinned whisper.cpp tree keeps the same GGML model format.
+# Both GPU backends are real upstream ggml implementations. OpenCL calls go through
+# an optional vendor loader, so the CPU runtime works on devices without OpenCL.
+set(LMREADER_ASR_VULKAN ON CACHE BOOL "Build the upstream ggml Vulkan backend for local ASR")
+set(LMREADER_ASR_HOST_TOOLCHAIN "" CACHE FILEPATH
+    "Optional CMake toolchain file for the host vulkan-shaders-gen build")
+
+# Pinned whisper.cpp native ASR bridge. Source preparation is explicit.
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper/.lmreader-source.json")
   message(FATAL_ERROR "Run python tools/fetch_asr_sources.py before building")
+endif()
+
+if(LMREADER_ASR_VULKAN)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan-headers/.lmreader-source.json")
+    message(FATAL_ERROR
+      "Run python tools/fetch_asr_sources.py before building: missing pinned Vulkan-Headers")
+  endif()
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/spirv-headers/.lmreader-source.json")
+    message(FATAL_ERROR
+      "Run python tools/fetch_asr_sources.py before building: missing pinned SPIRV-Headers")
+  endif()
+
+  set(_lmreader_ndk "${ANDROID_NDK}")
+  if(NOT _lmreader_ndk)
+    set(_lmreader_ndk "${CMAKE_ANDROID_NDK}")
+  endif()
+  if(NOT _lmreader_ndk)
+    set(_lmreader_ndk "$ENV{ANDROID_NDK_HOME}")
+  endif()
+  if(NOT _lmreader_ndk)
+    message(FATAL_ERROR "Vulkan ASR requires the Android NDK (ANDROID_NDK is not set)")
+  endif()
+
+  if(CMAKE_HOST_WIN32)
+    set(_lmreader_host_tag windows-x86_64)
+    set(_lmreader_glslc_suffix ".exe")
+  elseif(CMAKE_HOST_APPLE)
+    set(_lmreader_host_tag darwin-x86_64)
+    set(_lmreader_glslc_suffix "")
+  else()
+    set(_lmreader_host_tag linux-x86_64)
+    set(_lmreader_glslc_suffix "")
+  endif()
+
+  if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(_lmreader_android_triple aarch64-linux-android)
+  elseif(ANDROID_ABI STREQUAL "x86_64")
+    set(_lmreader_android_triple x86_64-linux-android)
+  else()
+    message(FATAL_ERROR "Unsupported Android ABI for Vulkan ASR: ${ANDROID_ABI}")
+  endif()
+
+  set(_lmreader_api "${ANDROID_PLATFORM_LEVEL}")
+  if(NOT _lmreader_api)
+    set(_lmreader_api "${CMAKE_SYSTEM_VERSION}")
+  endif()
+  set(_lmreader_vulkan_library
+      "${_lmreader_ndk}/toolchains/llvm/prebuilt/${_lmreader_host_tag}/sysroot/usr/lib/${_lmreader_android_triple}/${_lmreader_api}/libvulkan.so")
+  if(NOT EXISTS "${_lmreader_vulkan_library}")
+    file(GLOB _lmreader_vulkan_candidates
+         "${_lmreader_ndk}/toolchains/llvm/prebuilt/${_lmreader_host_tag}/sysroot/usr/lib/${_lmreader_android_triple}/*/libvulkan.so")
+    list(SORT _lmreader_vulkan_candidates)
+    list(LENGTH _lmreader_vulkan_candidates _lmreader_vulkan_count)
+    if(_lmreader_vulkan_count GREATER 0)
+      math(EXPR _lmreader_vulkan_last "${_lmreader_vulkan_count} - 1")
+      list(GET _lmreader_vulkan_candidates ${_lmreader_vulkan_last} _lmreader_vulkan_library)
+    endif()
+  endif()
+  if(NOT EXISTS "${_lmreader_vulkan_library}")
+    message(FATAL_ERROR "Unable to locate the NDK libvulkan.so stub")
+  endif()
+
+  set(_lmreader_glslc
+      "${_lmreader_ndk}/shader-tools/${_lmreader_host_tag}/glslc${_lmreader_glslc_suffix}")
+  if(NOT EXISTS "${_lmreader_glslc}")
+    message(FATAL_ERROR "Unable to locate the NDK glslc executable: ${_lmreader_glslc}")
+  endif()
+
+  set(Vulkan_INCLUDE_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan-headers/include"
+      CACHE PATH "Pinned Vulkan-Headers include directory" FORCE)
+  set(Vulkan_LIBRARY "${_lmreader_vulkan_library}"
+      CACHE FILEPATH "NDK libvulkan.so stub" FORCE)
+  set(Vulkan_GLSLC_EXECUTABLE "${_lmreader_glslc}"
+      CACHE FILEPATH "NDK glslc executable" FORCE)
+  set(SPIRV-Headers_DIR "${CMAKE_CURRENT_SOURCE_DIR}/asr_gpu/cmake"
+      CACHE PATH "Pinned SPIRV-Headers package config" FORCE)
+
+  if(LMREADER_ASR_HOST_TOOLCHAIN)
+    set(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN "${LMREADER_ASR_HOST_TOOLCHAIN}"
+        CACHE FILEPATH "Host toolchain for vulkan-shaders-gen" FORCE)
+  elseif(CMAKE_CROSSCOMPILING)
+    find_program(LMREADER_HOST_CXX NAMES clang++ g++ c++ NO_CMAKE_FIND_ROOT_PATH)
+    if(NOT LMREADER_HOST_CXX)
+      message(WARNING
+        "Vulkan ASR needs a host C++17 compiler to build vulkan-shaders-gen. None was found in "
+        "PATH; pass -DLMREADER_ASR_HOST_TOOLCHAIN=<host-toolchain.cmake> or install a host "
+        "clang/gcc, or configure with -DLMREADER_ASR_VULKAN=OFF for a CPU-only build.")
+    endif()
+  endif()
 endif()
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -103,18 +201,36 @@ set(GGML_LTO OFF CACHE BOOL "" FORCE)
 set(GGML_CCACHE OFF CACHE BOOL "" FORCE)
 set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(GGML_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
-# CPU-only: no accelerator backend may be configured at build time.
+# CPU, Vulkan and optional vendor OpenCL are configured. Other accelerators stay off.
 set(GGML_ACCELERATE OFF CACHE BOOL "" FORCE)
 set(GGML_BLAS OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 set(GGML_HIP OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_MUSA OFF CACHE BOOL "" FORCE)
-set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
+if(LMREADER_ASR_OPENCL)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/opencl-headers/.lmreader-source.json")
+    message(FATAL_ERROR "Run python tools/fetch_asr_sources.py: missing pinned OpenCL-Headers")
+  endif()
+  add_library(lmreader_opencl_loader STATIC asr_gpu/opencl_loader.cpp)
+  target_include_directories(lmreader_opencl_loader PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/opencl-headers")
+  target_link_libraries(lmreader_opencl_loader PRIVATE dl)
+  set_target_properties(lmreader_opencl_loader PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/asr_gpu/cmake")
+  set(GGML_OPENCL ON CACHE BOOL "" FORCE)
+  set(GGML_OPENCL_EMBED_KERNELS ON CACHE BOOL "" FORCE)
+  set(GGML_OPENCL_USE_ADRENO_KERNELS OFF CACHE BOOL "" FORCE)
+else()
+  set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
+endif()
 set(GGML_RPC OFF CACHE BOOL "" FORCE)
 set(GGML_SYCL OFF CACHE BOOL "" FORCE)
 set(GGML_VIRTGPU OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+if(LMREADER_ASR_VULKAN)
+  set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+else()
+  set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+endif()
 set(GGML_WEBGPU OFF CACHE BOOL "" FORCE)
 set(GGML_ET OFF CACHE BOOL "" FORCE)
 set(GGML_HEXAGON OFF CACHE BOOL "" FORCE)
@@ -122,12 +238,48 @@ set(GGML_ZDNN OFF CACHE BOOL "" FORCE)
 set(GGML_ZENDNN OFF CACHE BOOL "" FORCE)
 # No configure-time network: ggml/whisper are built only from the prepared tree.
 add_subdirectory(third_party/whisper EXCLUDE_FROM_ALL)
+if(LMREADER_ASR_VULKAN)
+  target_include_directories(ggml-vulkan PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party/spirv-headers/include")
+  # Android 26 exposes Vulkan 1.0 loader symbols. Upstream otherwise imports three
+  # Vulkan 1.1 calls directly, preventing even CPU ASR from loading on those devices.
+  # Use its existing instance dispatcher instead; unsupported GPUs remain optional.
+  set(_lmreader_vulkan_source_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper/ggml/src/ggml-vulkan")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_lmreader_vulkan_source_dir}/ggml-vulkan.cpp")
+  file(READ "${_lmreader_vulkan_source_dir}/ggml-vulkan.cpp" _lmreader_vulkan_cpp)
+  string(REGEX MATCHALL "vkGetPhysicalDeviceFeatures2\\(" _lmreader_vulkan_calls "${_lmreader_vulkan_cpp}")
+  list(LENGTH _lmreader_vulkan_calls _lmreader_vulkan_call_count)
+  if(NOT _lmreader_vulkan_call_count EQUAL 3)
+    message(FATAL_ERROR "Pinned ggml Vulkan source changed; review Android loader adaptation")
+  endif()
+  string(REPLACE "vkGetPhysicalDeviceFeatures2(" "VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2("
+         _lmreader_vulkan_cpp "${_lmreader_vulkan_cpp}")
+  string(REPLACE "uint32_t api_version = vk::enumerateInstanceVersion();"
+         "uint32_t api_version = VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion ? vk::enumerateInstanceVersion() : VK_API_VERSION_1_0;"
+         _lmreader_vulkan_cpp "${_lmreader_vulkan_cpp}")
+  set(_lmreader_vulkan_generated "${CMAKE_CURRENT_BINARY_DIR}/asr_gpu/ggml-vulkan-android.cpp")
+  if(EXISTS "${_lmreader_vulkan_generated}")
+    file(READ "${_lmreader_vulkan_generated}" _lmreader_vulkan_previous)
+  endif()
+  if(NOT _lmreader_vulkan_previous STREQUAL _lmreader_vulkan_cpp)
+    file(WRITE "${_lmreader_vulkan_generated}" "${_lmreader_vulkan_cpp}")
+  endif()
+  get_target_property(_lmreader_vulkan_sources ggml-vulkan SOURCES)
+  list(REMOVE_ITEM _lmreader_vulkan_sources "ggml-vulkan.cpp" "${_lmreader_vulkan_source_dir}/ggml-vulkan.cpp")
+  set_property(TARGET ggml-vulkan PROPERTY SOURCES "${_lmreader_vulkan_sources};${CMAKE_CURRENT_BINARY_DIR}/asr_gpu/ggml-vulkan-android.cpp")
+  target_include_directories(ggml-vulkan PRIVATE "${_lmreader_vulkan_source_dir}")
+endif()
 
-add_library(lmreader_asr SHARED asr_jni.cpp)
+add_library(lmreader_asr SHARED asr_jni.cpp asr_backend.cpp)
 target_include_directories(lmreader_asr PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper/ggml/include")
-target_link_libraries(lmreader_asr PRIVATE whisper)
+target_link_libraries(lmreader_asr PRIVATE whisper log)
+if(LMREADER_ASR_VULKAN)
+  target_compile_definitions(lmreader_asr PRIVATE LMREADER_ASR_HAS_VULKAN=1)
+endif()
+if(LMREADER_ASR_OPENCL)
+  target_compile_definitions(lmreader_asr PRIVATE LMREADER_ASR_HAS_OPENCL=1)
+endif()
 set_target_properties(lmreader_asr PROPERTIES
   CXX_VISIBILITY_PRESET hidden
   VISIBILITY_INLINES_HIDDEN ON)

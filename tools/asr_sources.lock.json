@@ -6,5 +6,44 @@
     "path": "whisper",
     "url": "https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/d1be6fde11ac6e0407606b4e42fe72d34add8037",
     "sha256": "645445da884df6dbd52b30f82d7be7c01d1767c938714e477e786b88d529e9f4"
+  },
+  {
+    "repo": "KhronosGroup/Vulkan-Headers",
+    "release": "vulkan-sdk-1.3.275.0",
+    "revision": "217e93c664ec6704ec2d8c36fa116c1a4a1e2d40",
+    "archive_root": "Vulkan-Headers-vulkan-sdk-1.3.275.0",
+    "path": "vulkan-headers",
+    "url": "https://codeload.github.com/KhronosGroup/Vulkan-Headers/tar.gz/refs/tags/vulkan-sdk-1.3.275.0",
+    "sha256": "fcd2136a9feb0402820b334d8242773462cc47ed397aa20c8f4d04f7ea18d810",
+    "license": {
+      "file": "LICENSE.md",
+      "target": "Vulkan-Headers-LICENSE.md"
+    }
+  },
+  {
+    "repo": "KhronosGroup/SPIRV-Headers",
+    "release": "vulkan-sdk-1.3.275.0",
+    "revision": "1c6bb2743599e6eb6f37b2969acc0aef812e32e3",
+    "archive_root": "SPIRV-Headers-vulkan-sdk-1.3.275.0",
+    "path": "spirv-headers",
+    "url": "https://codeload.github.com/KhronosGroup/SPIRV-Headers/tar.gz/refs/tags/vulkan-sdk-1.3.275.0",
+    "sha256": "d46b261f1fbc5e85022cb2fada9a6facb5b0c9932b45007a77fe05639a605bd1",
+    "license": {
+      "file": "LICENSE",
+      "target": "SPIRV-Headers-LICENSE.txt"
+    }
+  },
+  {
+    "repo": "KhronosGroup/OpenCL-Headers",
+    "release": "v2025.07.22",
+    "revision": "8a97ebc88daa3495d6f57ec10bb515224400186f",
+    "archive_root": "OpenCL-Headers-2025.07.22",
+    "path": "opencl-headers",
+    "url": "https://codeload.github.com/KhronosGroup/OpenCL-Headers/tar.gz/refs/tags/v2025.07.22",
+    "sha256": "98f0a3ea26b4aec051e533cb1750db2998ab8e82eda97269ed6efe66ec94a240",
+    "license": {
+      "file": "LICENSE",
+      "target": "OpenCL-Headers-LICENSE.txt"
+    }
   }
 ]

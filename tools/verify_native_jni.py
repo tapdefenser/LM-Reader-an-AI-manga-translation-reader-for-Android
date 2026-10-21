@@ -1,4 +1,4 @@
-"""Check JNI-only constructors in the actual APK, including R8 release builds."""
+"""Check JNI constructors and ASR native declarations in the actual APK, including R8."""
 import argparse
 from pathlib import Path
 import re
@@ -17,9 +17,20 @@ REQUIRED = {
     "ca.mpreg.imagedecoder.ImageDecoder$DecodeException": ("java.lang.String",),
 }
 
+ASR_CLASS = "com.lmreader.core.translation.asr.WhisperNative"
+ASR_METHODS = {
+    "capabilities": ("java.lang.String", ()),
+    "create": ("long", ("java.lang.String", "java.lang.String")),
+    "describe": ("java.lang.String", ("long",)),
+    "transcribe": ("java.lang.String", ("long", "float[]", "java.lang.String", "int")),
+    "abort": ("void", ("long",)),
+    "release": ("void", ("long",)),
+}
+
 
 def verify(apk, dexdump):
     found = set()
+    asr_found = set()
     with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="lmreader-jni-") as folder:
         for name in archive.namelist():
             if not re.fullmatch(r"classes(?:\d+)?\.dex", name):
@@ -41,10 +52,19 @@ def verify(apk, dexdump):
                             parameters = tuple(p.get("type") for p in constructor.findall("parameter"))
                             if constructor.get("static") == "false" and parameters == REQUIRED[class_name]:
                                 found.add(class_name)
+                    if class_name == ASR_CLASS:
+                        for method in element.findall("method"):
+                            method_name = method.get("name")
+                            signature = (method.get("return"), tuple(p.get("type") for p in method.findall("parameter")))
+                            if method.get("native") == "true" and ASR_METHODS.get(method_name) == signature:
+                                asr_found.add(method_name)
                     element.clear()
     missing = sorted(set(REQUIRED) - found)
     if missing:
         raise RuntimeError("APK is missing JNI constructors; check engine R8 rules: " + ", ".join(missing))
+    missing_asr = sorted(set(ASR_METHODS) - asr_found)
+    if missing_asr:
+        raise RuntimeError("APK is missing ASR JNI declarations; check bridge signatures/R8 rules: " + ", ".join(missing_asr))
     return sorted(found)
 
 

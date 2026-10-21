@@ -37,6 +37,7 @@ import com.lmreader.MainActivity
 import com.lmreader.core.model.ApiProfile
 import com.lmreader.core.model.ApiProfileKind
 import com.lmreader.core.model.LocalTranslationLanguage
+import com.lmreader.core.model.SegTextScope
 import com.lmreader.core.model.TranslationWorkflow
 import com.lmreader.core.model.VideoSamplingPlan
 import com.lmreader.core.model.VideoSamplingRate
@@ -85,6 +86,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     var endText by rememberSaveable(videoId) { mutableStateOf("") }
     var maxDimensionText by rememberSaveable(videoId) { mutableStateOf("1280") }
     var audioTrack by rememberSaveable(videoId) { mutableStateOf(-1) }
+    var segTextScopeKey by rememberSaveable(videoId) { mutableStateOf(SegTextScope.ALL.name) }
     var frameApiProfileId by rememberSaveable(videoId) { mutableStateOf("") }
     var subtitleApiProfileId by rememberSaveable(videoId) { mutableStateOf("") }
     var frameExpanded by rememberSaveable(videoId) { mutableStateOf(false) }
@@ -131,6 +133,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                 endText = (loaded.endMs.takeIf { it > 0 } ?: durationMs.takeIf { it > 0 })?.let(::formatTimecode).orEmpty()
                 maxDimensionText = loaded.maxDimension.coerceAtLeast(1).toString()
                 audioTrack = loaded.audioTrack
+                segTextScopeKey = loaded.segTextScope.name
                 frameApiProfileId = loaded.frameApiProfileId.orEmpty()
                 subtitleApiProfileId = loaded.subtitleApiProfileId.orEmpty()
                 initialized = true
@@ -165,15 +168,15 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     val frameNeeded = mode != "SUBTITLE"
     val subtitleNeeded = mode != "FRAME"
     val rate = FPS_CHOICES.firstOrNull { it.key == fpsKey }?.rate ?: VideoSamplingRate.ONE_FPS
+    val segTextScope = SegTextScope.entries.firstOrNull { it.name == segTextScopeKey } ?: SegTextScope.ALL
 
     val sourceLanguage = parseLanguage(source)
     val targetLanguage = parseLanguage(target)
     val startMs = parseTimecode(startText)
-    val endParsed = parseTimecode(endText)
-    val endMs = if (endText.isBlank()) durationMs.takeIf { it > 0 } else endParsed
+    val endMs = parseTimecode(endText)
     val rangeError = when {
-        startMs == null -> "开始时间格式应为 HH:MM:SS.mmm"
-        endMs == null -> if (endText.isBlank()) "视频时长未知，请填写明确的结束时间" else "结束时间格式应为 HH:MM:SS.mmm"
+        startMs == null -> "开始时间格式无效，可填秒、分:秒或时:分:秒"
+        endMs == null -> "结束时间格式无效，可填秒、分:秒或时:分:秒"
         endMs <= startMs -> "结束时间必须晚于开始时间"
         durationMs > 0 && endMs > durationMs -> "结束时间不能超过视频时长 ${formatTimecode(durationMs)}"
         else -> null
@@ -220,6 +223,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
         maxDimension = maxDimension ?: 1280,
         frameApiProfileId = frameApiProfileId.takeIf { frameUsesApi && it.isNotBlank() },
         subtitleApiProfileId = subtitleApiProfileId.takeIf { subtitleUsesApi && it.isNotBlank() },
+        segTextScope = segTextScope,
     )
     val draftCanonical = canonicalOptions(draftOptions, durationMs)
     val savedCanonical = savedOptions?.let { canonicalOptions(it, durationMs) }
@@ -229,7 +233,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
         schedulerTasks.filter { isVideoOwner(it.ownerKey, videoId) && it.state !in TaskScheduler.TERMINAL }
     }
     val hasActiveTasks = activeTasks.isNotEmpty()
-    val primaryLabel = if (hasActiveTasks && changed) "更新并重新排队" else "加入队列"
+    val primaryLabel = if (hasActiveTasks && (changed || activeTasks.any { it.waitingReason == "CONFIG_CHANGED" })) "更新并重新排队" else "加入队列"
 
     fun requestSubmit() {
         if (submitting) return
@@ -259,7 +263,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                 val active = container.taskScheduler.tasks.value.filter {
                     isVideoOwner(it.ownerKey, videoId) && it.state !in TaskScheduler.TERMINAL
                 }
-                if (active.isNotEmpty() && (latest == null || latestCanonical != draftCanonical ||
+                if (active.isNotEmpty() && (active.any { it.waitingReason == "CONFIG_CHANGED" } || latest == null || latestCanonical != draftCanonical ||
                     subtitleNeeded && latest.asrModelId != selectedAsrModel)) {
                     pendingReplaceOptions = draftOptions
                     confirmReplace = true
@@ -344,6 +348,17 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
 
                         if (frameNeeded) {
                             Text("画面", style = MaterialTheme.typography.titleMedium)
+                            Text("画面识别范围", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                SegTextScope.entries.forEach { scope ->
+                                    FilterChip(segTextScope == scope, { segTextScopeKey = scope.name },
+                                        label = { Text(segTextScopeLabel(scope)) })
+                                }
+                            }
+                            Text("选择画面工作流要识别的文字范围；此设置只影响本视频后续的画面任务。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                             OutlinedCard(Modifier.fillMaxWidth()) {
                                 Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                                     if (frameUsesApi) {
@@ -380,6 +395,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             TextButton(onClick = { startSettingsActivity(context, "asr") }) { Text("本地 ASR 设置") }
                         }
+                        VideoSubtitleDisplaySettings(container, videoId)
 
                         if (frameNeeded) {
                             CollapsibleSection(
@@ -433,8 +449,8 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                             TimecodeField("开始时间", startText, { startText = it.take(16) }, startMs == null)
                             TimecodeField("结束时间", endText, { endText = it.take(16) },
                                 endError(endText, endMs, startMs, durationMs))
-                            Text(if (durationMs > 0) "结束时间留空表示到视频结尾，格式为 HH:MM:SS.mmm。"
-                                else "格式为 HH:MM:SS.mmm；时长未知时不能留空。",
+                            Text(if (durationMs > 0) "结束时间必须填写且不超过视频时长；可填秒、分:秒或时:分:秒。"
+                                else "视频时长未知，结束时间必须明确填写；可填秒、分:秒或时:分:秒。",
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             if (durationMs > 0) {
                                 TextButton(onClick = {
@@ -697,7 +713,7 @@ private fun TimecodeField(label: String, value: String, onValueChange: (String) 
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
-        placeholder = { Text("HH:MM:SS.mmm", localize = false) },
+        placeholder = { Text("例如 5、1:20、1:00:00", localize = false) },
         isError = isError,
         singleLine = true,
         textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
@@ -728,6 +744,11 @@ private val MAX_DIMENSION_RANGE = 128..2048
 private fun modeLabel(value: String) = when (value.uppercase(Locale.ROOT)) {
     "FRAME" -> "仅画面"; "SUBTITLE" -> "仅字幕"; "BOTH" -> "两者"; else -> value
 }
+private fun segTextScopeLabel(scope: SegTextScope) = when (scope) {
+    SegTextScope.BUBBLES -> "气泡"
+    SegTextScope.FREE_TEXT -> "游离文字"
+    SegTextScope.ALL -> "气泡和游离文字"
+}
 private fun languageLabel(value: String, locale: Locale): String {
     val language = parseLanguage(value) ?: return "无效代码 · $value"
     return "${language.localizedName(locale)} · ${language.tag}"
@@ -756,31 +777,13 @@ private fun startSettingsActivity(context: Context, section: String) {
     try { context.startActivity(intent) } catch (_: Exception) { /* keep the dialog open */ }
 }
 
-private val TIMECODE = Regex("""^(\d{1,6}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$""")
-private fun parseTimecode(value: String): Long? {
-    val match = TIMECODE.matchEntire(value.trim()) ?: return null
-    val hours = match.groupValues[1].toLongOrNull() ?: return null
-    val minutes = match.groupValues[2].toLongOrNull() ?: return null
-    val seconds = match.groupValues[3].toLongOrNull() ?: return null
-    if (minutes !in 0L..59L || seconds !in 0L..59L) return null
-    val fraction = match.groupValues[4]
-    val millis = when (fraction.length) {
-        0 -> 0L; 1 -> fraction.toLong() * 100L; 2 -> fraction.toLong() * 10L; 3 -> fraction.toLong(); else -> return null
-    }
-    val totalSeconds = hours * 3600L + minutes * 60L + seconds
-    if (totalSeconds > Long.MAX_VALUE / 1000L) return null
-    return totalSeconds * 1000L + millis
-}
-private fun formatTimecode(value: Long): String {
-    val safe = value.coerceAtLeast(0L)
-    return String.format(Locale.ROOT, "%02d:%02d:%02d.%03d",
-        safe / 3_600_000L, safe / 60_000L % 60L, safe / 1_000L % 60L, safe % 1_000L)
-}
+private fun parseTimecode(value: String): Long? = parseVideoTimecode(value)
+private fun formatTimecode(value: Long): String = formatVideoTimecode(value)
 private fun endError(value: String, endMs: Long?, startMs: Long?, durationMs: Long) = when {
     endMs == null -> true
+    value.isBlank() -> true
     startMs != null && endMs <= startMs -> true
     durationMs > 0 && endMs > durationMs -> true
-    value.isBlank() && durationMs <= 0 -> true
     else -> false
 }
 private fun isVideoOwner(ownerKey: String, videoId: String) =
@@ -800,5 +803,7 @@ private fun canonicalOptions(value: VideoWorkOptions, durationMs: Long): VideoWo
         audioApiEndpoint = value.audioApiEndpoint.trim(),
         frameApiProfileId = value.frameApiProfileId?.takeIf { it.isNotBlank() },
         subtitleApiProfileId = value.subtitleApiProfileId?.takeIf { it.isNotBlank() },
+        // Recognition scope is task semantics; keep it in the saved/draft comparison.
+        segTextScope = value.segTextScope,
     )
 }

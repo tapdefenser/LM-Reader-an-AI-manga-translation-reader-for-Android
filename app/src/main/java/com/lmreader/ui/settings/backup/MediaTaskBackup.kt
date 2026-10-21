@@ -10,6 +10,7 @@ import com.lmreader.ui.video.VideoLibraryStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.Base64
 import java.util.UUID
 
 /**
@@ -20,7 +21,7 @@ import java.util.UUID
  * validates the document against the live `PRAGMA` schema before touching the
  * destination. `restored = true` merges incoming rows (local primary keys and local
  * newer/human data win); `restored = false` is the local rollback path and replaces
- * exactly the seven fixed tables.
+ * exactly the fixed tables.
  *
  * MediaStore ids are not portable. Every incoming catalog row is marked inaccessible;
  * a row whose URI/locator conflicts with a different local `videoId` keeps its stable
@@ -29,17 +30,25 @@ import java.util.UUID
  */
 object MediaTaskBackup {
     const val FILE = "media-work.json"
-    const val SCHEMA = 1
+    const val SCHEMA = 2
     const val RESTORE_ACCESS_REASON = "从备份恢复，请重新定位或授权原视频"
     const val UNRESOLVED_URI_PREFIX = "content://com.lmreader.unresolved/"
 
+    private const val LEGACY_SCHEMA = 1
+    private const val OBSERVATIONS = "video_region_observations"
     private const val TASK_PAUSE_REASON = "RESTORE"
     private const val MAX_TEXT = 8_000_000
     private const val MAX_TASK_JSON = 4_000_000
     private const val MAX_TOTAL_ROWS = 3_000_000L
+    private const val MAX_CONTOUR_POINTS = 2_048
+    private const val APPEARANCE_BYTES = 32 * 32
+    private const val MAX_APPEARANCE_BASE64 = 1_368 // 4 * ceil(1024 / 3), padded standard Base64.
+    private const val MAX_APPEARANCE_TEXT = 2_048 // Tolerate whitespace from MIME-style encoders.
     private val UUID_VALUE = Regex("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
     private val SHA256_VALUE = Regex("[a-f0-9]{64}")
     private val TERMINAL_STATES = setOf("CANCELLED", "SUCCEEDED", "FAILED")
+    /** Kept in sync with the tracked picture regions accepted by `RegionKind`. */
+    private val REGION_KINDS = setOf("BUBBLE", "FREE_TEXT")
 
     private val TABLES = listOf(
         "tasks",
@@ -48,9 +57,17 @@ object MediaTaskBackup {
         "video_watermarks",
         "video_frames",
         "video_regions",
+        OBSERVATIONS,
         "video_cues",
         "video_settings",
     )
+
+    /**
+     * Schema 1 archived every table except observations; it is accepted only by adding an
+     * empty in-memory observation table. Missing/extra tables in any other combination are
+     * rejected rather than silently normalized.
+     */
+    private val LEGACY_TABLES = (TABLES - OBSERVATIONS).toSet()
 
     /** Fixed projection of the current exported Room schema. Extra/missing columns fail validation. */
     private val COLUMNS = mapOf(
@@ -73,7 +90,11 @@ object MediaTaskBackup {
         ),
         "video_regions" to listOf(
             "intervalId", "videoId", "sourceHash", "pageId", "regionId", "startMs", "endMs",
-            "observedStartMs", "observedEndMs", "manualTiming", "deleted", "revision", "trackId",
+            "observedStartMs", "observedEndMs", "manualTiming", "deleted", "revision", "trackId", "anchorUs",
+        ),
+        OBSERVATIONS to listOf(
+            "videoId", "sourceHash", "identity", "sampleIndex", "trackId", "targetUs", "ptsUs", "untilUs",
+            "width", "height", "kind", "left", "top", "right", "bottom", "contour", "appearance",
         ),
         "video_cues" to listOf(
             "videoId", "cueId", "sourceHash", "trackId", "startMs", "endMs", "source", "translation",
@@ -90,6 +111,7 @@ object MediaTaskBackup {
         "video_watermarks" to 10_000,
         "video_frames" to 2_000_000,
         "video_regions" to 2_000_000,
+        OBSERVATIONS to 2_000_000,
         "video_cues" to 2_000_000,
         "video_settings" to 500_000,
     )
@@ -119,13 +141,70 @@ object MediaTaskBackup {
     }
 
     fun validate(db: SupportSQLiteDatabase, root: File, videos: File?, semantic: Boolean = true) {
+        validateDocument(db, readDocument(root), videos, semantic)
+    }
+
+    /** Incoming result rows are merged only when their formal video/header/artifact exists after file merge. */
+    fun restore(db: SupportSQLiteDatabase, root: File, restored: Boolean, videos: File) {
+        val file = File(root, FILE)
+        if (!file.isFile) return // Old archive without media-work.json keeps the whole local work database.
+        // Structural validation only: incoming semantic checks already ran before application,
+        // and the rollback path must restore captured rows exactly, including odd local states.
+        val document = readDocument(root)
+        validateDocument(db, document, null, semantic = false)
+        if (restored) merge(db, document, videos) else replace(db, document)
+    }
+
+    /**
+     * Parses the archive and normalizes a schema-1 document in memory by inserting the one
+     * table that version never exported. The archive file itself is never rewritten.
+     */
+    private fun readDocument(root: File): JSONObject {
         val file = File(root, FILE)
         require(file.isFile && file.length() in 1..BackupArchive.MAX_ENTRY) { "媒体任务备份缺失或超过大小上限" }
         val document = JSONObject(file.readText())
         require(document.keys().asSequence().toSet() == setOf("schema", "tables")) { "媒体任务备份包含未知字段" }
-        require(document.get("schema") is Number && document.getInt("schema") == SCHEMA) { "不支持的媒体任务备份版本" }
+        val savedSchema = document.get("schema")
+        require(savedSchema is Number) { "不支持的媒体任务备份版本" }
+        val schemaVersion = savedSchema.toInt()
+        require(savedSchema.toDouble() == schemaVersion.toDouble()) { "不支持的媒体任务备份版本" }
+        require(schemaVersion == SCHEMA || schemaVersion == LEGACY_SCHEMA) { "不支持的媒体任务备份版本" }
         val tables = document.getJSONObject("tables")
-        require(tables.keys().asSequence().toSet() == TABLES.toSet()) { "媒体任务备份包含未知表或缺少表" }
+        if (schemaVersion == LEGACY_SCHEMA) {
+            // Only the exact legacy table set is accepted; schema 1 cannot carry observations.
+            require(tables.keys().asSequence().toSet() == LEGACY_TABLES) { "媒体任务备份包含未知表或缺少表" }
+            require(!tables.has(OBSERVATIONS)) { "媒体任务备份版本与数据表不匹配" }
+            val regions = tables.getJSONObject("video_regions")
+            val oldColumns = regions.getJSONArray("columns")
+            require((0 until oldColumns.length()).map { oldColumns.getString(it) } == COLUMNS.getValue("video_regions").dropLast(1)) {
+                "旧媒体任务备份列不匹配：video_regions"
+            }
+            val rows = regions.getJSONArray("rows")
+            for(index in 0 until rows.length()) {
+                val row = rows.getJSONArray(index)
+                require(row.length() == oldColumns.length()) { "旧气泡区间行宽不匹配" }
+                row.put(JSONObject.NULL)
+            }
+            oldColumns.put("anchorUs")
+            tables.put(
+                OBSERVATIONS,
+                JSONObject()
+                    .put("columns", JSONArray(COLUMNS.getValue(OBSERVATIONS)))
+                    .put("rows", JSONArray()),
+            )
+        } else {
+            require(tables.keys().asSequence().toSet() == TABLES.toSet()) { "媒体任务备份包含未知表或缺少表" }
+        }
+        return document
+    }
+
+    private fun validateDocument(
+        db: SupportSQLiteDatabase,
+        document: JSONObject,
+        videos: File?,
+        semantic: Boolean,
+    ) {
+        val tables = document.getJSONObject("tables")
         val schemas = TABLES.associateWith { schema(db, it) }
         val documents = mutableMapOf<String, JSONObject>()
         var totalRows = 0L
@@ -181,20 +260,9 @@ object MediaTaskBackup {
                 require(row.getLong(requestColumns.indexOf("generation")) >= 0) { "请求执行代次无效" }
                 require(row.getString(requestColumns.indexOf("status")) in setOf("PREPARED", "SENT", "RECEIVED", "UNKNOWN", "REJECTED", "PUBLISHED", "RETRY_AUTHORIZED")) { "请求状态无效" }
             }
-            validateVideoValues(documents, COLUMNS)
+            validateVideoValues(documents, COLUMNS, videos)
             if (videos != null) validateReferences(documents, videos)
         }
-    }
-
-    /** Incoming result rows are merged only when their formal video/header/artifact exists after file merge. */
-    fun restore(db: SupportSQLiteDatabase, root: File, restored: Boolean, videos: File) {
-        val file = File(root, FILE)
-        if (!file.isFile) return // Old archive without media-work.json keeps the whole local work database.
-        // Structural validation only: incoming semantic checks already ran before application,
-        // and the rollback path must restore captured rows exactly, including odd local states.
-        validate(db, root, null, semantic = false)
-        val document = JSONObject(file.readText())
-        if (restored) merge(db, document, videos) else replace(db, document)
     }
 
     /** Validates headers, referenced formal frame documents and optional manual proofs. */
@@ -267,6 +335,7 @@ object MediaTaskBackup {
         mergeWatermarks(db, tables.getJSONObject("video_watermarks"))
         mergeFrames(db, tables.getJSONObject("video_frames"), videos)
         mergeRegions(db, tables.getJSONObject("video_regions"), videos)
+        mergeObservations(db, tables.getJSONObject(OBSERVATIONS), videos)
         mergeCues(db, tables.getJSONObject("video_cues"), videos)
         mergeSettings(db, tables.getJSONObject("video_settings"))
     }
@@ -412,6 +481,26 @@ object MediaTaskBackup {
         }
     }
 
+    /**
+     * Observations only need a formal project/source header: an uncommitted track may not
+     * have an interval yet while its track workflow is still running, so interval existence
+     * is deliberately not required here.
+     */
+    private fun mergeObservations(db: SupportSQLiteDatabase, entry: JSONObject, videos: File) {
+        val columns = columns(entry)
+        val rows = entry.getJSONArray("rows")
+        if (rows.length() == 0) return
+        val store = runCatching { VideoLibraryStore(videos) }.getOrNull() ?: return
+        for (index in 0 until rows.length()) {
+            val values = rowValues(columns, rows.getJSONArray(index))
+            val videoId = values["videoId"] as? String ?: continue
+            val sourceHash = values["sourceHash"] as? String ?: continue
+            if (!headerExists(videos, videoId)) continue
+            if (runCatching { store.sourceHeader(videoId, sourceHash) }.getOrNull() == null) continue
+            insert(db, OBSERVATIONS, columns, values)
+        }
+    }
+
     private fun mergeCues(db: SupportSQLiteDatabase, entry: JSONObject, videos: File) {
         val columns = columns(entry)
         val rows = entry.getJSONArray("rows")
@@ -524,7 +613,20 @@ object MediaTaskBackup {
         }
     }
 
-    private fun validateVideoValues(documents: Map<String, JSONObject>, columns: Map<String, List<String>>) {
+    private fun validateVideoValues(
+        documents: Map<String, JSONObject>,
+        columns: Map<String, List<String>>,
+        videos: File?,
+    ) {
+        // A source hash is known when either a formal frame row, the project/catalog row or
+        // the formal project header names it. This allows an observation captured before its
+        // first frame is published.
+        val knownSources = mutableSetOf<Pair<String, String>>()
+        if (videos != null) {
+            runCatching { VideoLibraryStore(videos).projects.value }.getOrNull()?.forEach { project ->
+                knownSources += project.id to project.sha256
+            }
+        }
         val catalog = documents.getValue("video_catalog")
         val catalogColumns = columns.getValue("video_catalog")
         for (index in 0 until catalog.getJSONArray("rows").length()) {
@@ -548,33 +650,97 @@ object MediaTaskBackup {
             require(row.getLong(catalogColumns.indexOf("positionMs")) >= 0L) { "视频播放位置无效" }
             require(row.getLong(catalogColumns.indexOf("playCount")) >= 0L) { "视频播放次数无效" }
             if (!row.isNull(catalogColumns.indexOf("sourceHash"))) {
-                require(row.getString(catalogColumns.indexOf("sourceHash")).matches(SHA256_VALUE)) { "视频源摘要无效" }
+                val sourceHash = row.getString(catalogColumns.indexOf("sourceHash"))
+                require(sourceHash.matches(SHA256_VALUE)) { "视频源摘要无效" }
+                knownSources += videoId to sourceHash
             }
         }
 
         val frames = documents.getValue("video_frames")
         val frameColumns = columns.getValue("video_frames")
+        val frameIdentities = mutableMapOf<Pair<String, String>, String>()
         for (index in 0 until frames.getJSONArray("rows").length()) {
             val row = frames.getJSONArray("rows").getJSONArray(index)
             val videoId = row.getString(frameColumns.indexOf("videoId"))
             require(videoId.matches(UUID_VALUE)) { "画面视频编号无效" }
-            require(row.getString(frameColumns.indexOf("sourceHash")).matches(SHA256_VALUE)) { "画面源摘要无效" }
-            require(row.getString(frameColumns.indexOf("identity")).matches(SHA256_VALUE)) { "画面身份无效" }
-            require(row.getString(frameColumns.indexOf("pageId")).startsWith("video:$videoId:")) { "画面编号无效" }
+            val sourceHash = row.getString(frameColumns.indexOf("sourceHash"))
+            require(sourceHash.matches(SHA256_VALUE)) { "画面源摘要无效" }
+            knownSources += videoId to sourceHash
+            val identity = row.getString(frameColumns.indexOf("identity"))
+            require(identity.matches(SHA256_VALUE)) { "画面身份无效" }
+            val pageId = row.getString(frameColumns.indexOf("pageId"))
+            require(pageId.startsWith("video:$videoId:")) { "画面编号无效" }
+            frameIdentities[videoId to pageId] = identity
             require(row.getInt(frameColumns.indexOf("noText")) in 0..1) { "画面无文字标记无效" }
         }
 
         val regions = documents.getValue("video_regions")
         val regionColumns = columns.getValue("video_regions")
+        // Only tracks that already have an anchored interval are cross-checked. A track that
+        // is still being tracked may legitimately have observations before any interval exists.
+        val anchoredTrackIdentities = mutableMapOf<Triple<String, String, String>, MutableSet<String>>()
         for (index in 0 until regions.getJSONArray("rows").length()) {
             val row = regions.getJSONArray("rows").getJSONArray(index)
             val videoId = row.getString(regionColumns.indexOf("videoId"))
             require(videoId.matches(UUID_VALUE)) { "区域视频编号无效" }
-            require(row.getString(regionColumns.indexOf("pageId")).startsWith("video:$videoId:")) { "区域画面编号无效" }
-            require(row.getString(regionColumns.indexOf("sourceHash")).matches(SHA256_VALUE)) { "区域源摘要无效" }
+            val pageId = row.getString(regionColumns.indexOf("pageId"))
+            require(pageId.startsWith("video:$videoId:")) { "区域画面编号无效" }
+            val sourceHash = row.getString(regionColumns.indexOf("sourceHash"))
+            require(sourceHash.matches(SHA256_VALUE)) { "区域源摘要无效" }
+            val trackId = row.getString(regionColumns.indexOf("trackId"))
+            require(trackId.isNotBlank() && trackId.length <= 200) { "区域轨道编号无效" }
+            frameIdentities[videoId to pageId]?.takeIf { row.getInt(regionColumns.indexOf("manualTiming")) == 0 }?.let { identity ->
+                anchoredTrackIdentities.getOrPut(Triple(videoId, sourceHash, trackId)) { mutableSetOf() }
+                    .add(identity)
+            }
             require(row.getLong(regionColumns.indexOf("endMs")) > row.getLong(regionColumns.indexOf("startMs"))) { "区域时间无效" }
             require(row.getInt(regionColumns.indexOf("manualTiming")) in 0..1) { "区域人工时间标记无效" }
             require(row.getInt(regionColumns.indexOf("deleted")) in 0..1) { "区域删除标记无效" }
+            val anchor = regionColumns.indexOf("anchorUs")
+            require(row.isNull(anchor) || row.getLong(anchor) >= 0) { "气泡几何基准时间无效" }
+        }
+
+        val observations = documents.getValue(OBSERVATIONS)
+        val observationColumns = columns.getValue(OBSERVATIONS)
+        for (index in 0 until observations.getJSONArray("rows").length()) {
+            val row = observations.getJSONArray("rows").getJSONArray(index)
+            val videoId = row.getString(observationColumns.indexOf("videoId"))
+            require(videoId.matches(UUID_VALUE)) { "区域观察视频编号无效" }
+            val sourceHash = row.getString(observationColumns.indexOf("sourceHash"))
+            require(sourceHash.matches(SHA256_VALUE)) { "区域观察源摘要无效" }
+            require((videoId to sourceHash) in knownSources) { "区域观察缺少对应源版本" }
+            val identity = row.getString(observationColumns.indexOf("identity"))
+            require(identity.matches(SHA256_VALUE)) { "区域观察身份无效" }
+            // Single-frame work encodes its target as a negative sample index, so the sign is
+            // deliberately not constrained here.
+            val trackId = row.getString(observationColumns.indexOf("trackId"))
+            require(trackId.isNotBlank() && trackId.length <= 200) { "区域观察轨道编号无效" }
+            // If an interval is already anchored for this stable track, the observation must
+            // name that anchor identity. A track with no interval yet is intentionally allowed.
+            anchoredTrackIdentities[Triple(videoId, sourceHash, trackId)]?.let { anchored ->
+                require(identity in anchored) { "区域观察轨道锚点不匹配" }
+            }
+            val targetUs = row.getLong(observationColumns.indexOf("targetUs"))
+            val ptsUs = row.getLong(observationColumns.indexOf("ptsUs"))
+            val untilUs = row.getLong(observationColumns.indexOf("untilUs"))
+            require(targetUs >= 0L && ptsUs >= 0L) { "区域观察时间无效" }
+            require(untilUs > ptsUs) { "区域观察时间无效" }
+            val width = row.getInt(observationColumns.indexOf("width"))
+            val height = row.getInt(observationColumns.indexOf("height"))
+            require(width in 1..32_768 && height in 1..32_768) { "区域观察尺寸无效" }
+            require(row.getString(observationColumns.indexOf("kind")) in REGION_KINDS) { "区域观察类别无效" }
+            val left = row.getDouble(observationColumns.indexOf("left"))
+            val top = row.getDouble(observationColumns.indexOf("top"))
+            val right = row.getDouble(observationColumns.indexOf("right"))
+            val bottom = row.getDouble(observationColumns.indexOf("bottom"))
+            require(left.isFinite() && top.isFinite() && right.isFinite() && bottom.isFinite()) {
+                "区域观察坐标无效"
+            }
+            require(left >= 0.0 && top >= 0.0 && right <= width && bottom <= height &&
+                right > left && bottom > top) { "区域观察坐标超出画面" }
+            validateObservationContour(row.getString(observationColumns.indexOf("contour")))
+            val appearance = observationColumns.indexOf("appearance")
+            if (!row.isNull(appearance)) validateObservationAppearance(row.getString(appearance))
         }
 
         val cues = documents.getValue("video_cues")
@@ -604,6 +770,28 @@ object MediaTaskBackup {
             require(isJsonDocument(row.getString(settingColumns.indexOf("style")))) { "视频样式内容损坏" }
             require(row.getInt(settingColumns.indexOf("migrated")) in 0..1) { "视频设置迁移标记无效" }
         }
+    }
+
+    private fun validateObservationContour(text: String) {
+        val contour = runCatching { JSONArray(text) }.getOrNull()
+            ?: throw IllegalArgumentException("区域观察轮廓损坏")
+        require(contour.length() <= MAX_CONTOUR_POINTS) { "区域观察轮廓点数超过上限" }
+        for (index in 0 until contour.length()) {
+            val point = contour.optJSONArray(index)
+                ?: throw IllegalArgumentException("区域观察轮廓损坏")
+            require(point.length() == 2) { "区域观察轮廓损坏" }
+            val x = point.opt(0) as? Number ?: throw IllegalArgumentException("区域观察轮廓损坏")
+            val y = point.opt(1) as? Number ?: throw IllegalArgumentException("区域观察轮廓损坏")
+            require(x.toDouble().isFinite() && y.toDouble().isFinite()) { "区域观察轮廓坐标无效" }
+        }
+    }
+
+    private fun validateObservationAppearance(value: String) {
+        require(value.length <= MAX_APPEARANCE_TEXT) { "区域观察外观采样超过上限" }
+        val compact = value.filterNot { it.isWhitespace() }
+        require(compact.length <= MAX_APPEARANCE_BASE64) { "区域观察外观采样超过上限" }
+        val decoded = runCatching { Base64.getDecoder().decode(compact) }.getOrNull()
+        require(decoded != null && decoded.size == APPEARANCE_BYTES) { "区域观察外观采样无效" }
     }
 
     private fun validateReferences(documents: Map<String, JSONObject>, videos: File) {
@@ -644,6 +832,16 @@ object MediaTaskBackup {
             require(loadArtifact(videos, videoId, pageId, sourceHash) != null) { "视频区域成果缺失：$videoId" }
         }
 
+        val observations = documents.getValue(OBSERVATIONS)
+        val observationColumns = columns(observations)
+        for (index in 0 until observations.getJSONArray("rows").length()) {
+            val row = observations.getJSONArray("rows").getJSONArray(index)
+            val videoId = row.getString(observationColumns.indexOf("videoId"))
+            val sourceHash = row.getString(observationColumns.indexOf("sourceHash"))
+            // Removed projects can leave orphan index rows; like frames/regions, skip those.
+            val project = projects[videoId] ?: continue
+            require(store.sourceHeader(videoId, sourceHash) != null) { "区域观察缺少对应源版本" }
+        }
     }
 
     private fun schema(db: SupportSQLiteDatabase, table: String): TableSchema {

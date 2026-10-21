@@ -48,6 +48,7 @@ data class AsrSettings(
     val wifiOnly: Boolean = true,
     val threads: Int = asrThreadLimit(),
     val selectedId: String? = null,
+    val backend: AsrBackend = AsrBackend.AUTO,
 )
 
 /** whisper.cpp keeps at most four CPU workers useful on the currently supported phone ABIs. */
@@ -239,8 +240,9 @@ internal class AsrSettingsStore(
         val storedThreads = preferences.getInt(KEY_THREADS, threadLimit)
         val threads = storedThreads.coerceIn(1, threadLimit)
         val selectedId = preferences.getString(KEY_SELECTED_ID, null)?.takeIf { it.isNotBlank() }
+        val backend = AsrBackend.fromWire(preferences.getString(KEY_BACKEND, null))
         if (storedThreads != threads) preferences.edit().putInt(KEY_THREADS, threads).apply()
-        return AsrSettings(wifiOnly, threads, selectedId)
+        return AsrSettings(wifiOnly, threads, selectedId, backend)
     }
 
     fun saveWifiOnly(value: Boolean) {
@@ -257,10 +259,15 @@ internal class AsrSettingsStore(
         }.apply()
     }
 
+    fun saveBackend(value: AsrBackend) {
+        preferences.edit().putString(KEY_BACKEND, value.wireId).apply()
+    }
+
     companion object {
         const val PREFERENCES_NAME = "local-asr-settings"
         private const val KEY_WIFI_ONLY = "wifi_only"
         private const val KEY_THREADS = "threads"
         private const val KEY_SELECTED_ID = "selected_model_id"
+        private const val KEY_BACKEND = "backend"
     }
 }

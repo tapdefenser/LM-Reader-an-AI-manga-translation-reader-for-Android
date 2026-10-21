@@ -15,6 +15,7 @@ import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.Base64
 import java.util.UUID
 import java.util.zip.ZipInputStream
 
@@ -52,9 +53,10 @@ class VideoResultImports(private val container: AppContainer) {
                 } catch(error: Throwable) { staging.deleteRecursively(); throw error }
             }
         }
-        require(manifestFile.length() in 1..16_000_000) { "成果包清单缺失或过大" }
+        require(manifestFile.length() in 1..64_000_000) { "成果包清单缺失或过大" }
         val manifest = JSONObject(manifestFile.readText())
-        require(manifest.getString("format") == "LMReaderVideoResults" && manifest.getInt("schema") == 1) { "不支持的成果包版本" }
+        val schema = manifest.getInt("schema")
+        require(manifest.getString("format") == "LMReaderVideoResults" && schema in 1..2) { "不支持的成果包版本" }
         require(manifest.getString("sourceSha256") == project.sha256 && manifest.getLong("durationMs") == project.durationMs) {
             "成果包与原视频内容不匹配，请先在信息中定位对应原视频"
         }
@@ -67,6 +69,11 @@ class VideoResultImports(private val container: AppContainer) {
         val frames = rows(manifest.getJSONArray("frames"))
         val regions = rows(manifest.getJSONArray("regions"))
         val cues = rows(manifest.getJSONArray("cues"))
+        // Schema 1 packages predate observations entirely; schema 2 must carry the array.
+        val observations = if(schema >= 2) {
+            require(manifest.has("observations")) { "成果包缺少区域观测数据" }
+            rows(manifest.getJSONArray("observations")).also { require(it.size <= 100_000) { "成果包区域观测过多" } }
+        } else emptyList()
         val sourceStore = ReaderPageArtifactStore(File(staging, "pages"))
         val oldPages = (frames.map { it.getString("pageId") } + regions.map { it.getString("pageId") }).distinct()
         val pages = oldPages.associateWith { old ->
@@ -87,6 +94,7 @@ class VideoResultImports(private val container: AppContainer) {
             time(r, project.durationMs)
             require(r.getLong("observedStartMs") >= 0 && r.getLong("observedEndMs") > r.getLong("observedStartMs") && r.getLong("observedEndMs") <= project.durationMs)
             listOf("intervalId", "regionId", "revision", "trackId").forEach { require(r.getString(it).length in 1..500) }
+            if(!r.isNull("anchorUs")) require(r.getLong("anchorUs") in 0 until project.durationMs * 1000) { "成果包区域锚点时间无效" }
             retargetVideoRegionId(r.getString("regionId"), r.getString("pageId"), pageId(r.getString("pageId")))
             require(r.getBoolean("deleted") || saved.regions.any { it.region.id == r.getString("regionId") })
         }
@@ -95,6 +103,10 @@ class VideoResultImports(private val container: AppContainer) {
             listOf("cueId", "trackId", "revision").forEach { require(c.getString(it).length in 1..500) }
             require(c.getString("source").length <= 20_000 && c.getString("translation").length <= 20_000)
             c.getBoolean("deleted"); c.getBoolean("manuallyEdited")
+        }
+        val mappedObservations = observations.map { observation(it, id, project.sha256, project.durationMs * 1000) { key -> mapped(key) } }
+        require(mappedObservations.map { Triple(it.identity, it.sampleIndex, it.trackId) }.toSet().size == mappedObservations.size) {
+            "成果包区域观测重复"
         }
         require(regions.map { it.getString("intervalId") }.distinct().size == regions.size)
         require(cues.map { it.getString("cueId") }.distinct().size == cues.size)
@@ -147,7 +159,19 @@ class VideoResultImports(private val container: AppContainer) {
                 }
                 for(r in regions) if(r.getString("pageId") !in protectedPages) dao.addRegion(VideoRegionInterval(mapped(r.getString("intervalId")), id, project.sha256, pageId(r.getString("pageId")),
                     retargetVideoRegionId(r.getString("regionId"), r.getString("pageId"), pageId(r.getString("pageId"))), r.getLong("startMs"), r.getLong("endMs"), r.getLong("observedStartMs"), r.getLong("observedEndMs"),
-                    r.getBoolean("manualTiming"), r.getBoolean("deleted"), r.getString("revision"), mapped(r.getString("trackId"))))
+                    r.getBoolean("manualTiming"), r.getBoolean("deleted"), r.getString("revision"), mapped(r.getString("trackId")),
+                    if(r.isNull("anchorUs")) null else r.getLong("anchorUs")))
+                // putObservations uses REPLACE, so merge one primary key at a time and never touch local samples.
+                val protectedSamples = frames.filter { it.getString("pageId") in protectedPages }
+                    .map { it.getString("identity") to it.getLong("sampleIndex") }.toSet()
+                val knownTracks = mutableMapOf<Pair<String, Long>, MutableSet<String>>()
+                val incomingObservations = mappedObservations.filter { (it.identity to it.sampleIndex) !in protectedSamples }.filter { row ->
+                    val key = row.identity to row.sampleIndex
+                    knownTracks.getOrPut(key) {
+                        dao.sampleObservations(id, project.sha256, row.identity, row.sampleIndex).mapTo(mutableSetOf()) { it.trackId }
+                    }.add(row.trackId)
+                }
+                if(incomingObservations.isNotEmpty()) dao.putObservations(incomingObservations)
                 for(c in cues) dao.addCue(VideoCueRecord(id, c.getString("cueId"), project.sha256, c.getString("trackId"), c.getLong("startMs"), c.getLong("endMs"),
                     c.getString("source"), c.getString("translation"), c.getBoolean("deleted"), c.getBoolean("manuallyEdited"), c.getString("revision"),
                     c.optString("identity").takeUnless { it.isBlank() || it == "null" }, execution.taskId))
@@ -184,6 +208,41 @@ class VideoResultImports(private val container: AppContainer) {
         require("manifest.json" in seen)
     }
     private fun rows(array: JSONArray): List<JSONObject> { require(array.length() <= 100_000); return List(array.length()) { array.getJSONObject(it) } }
+    private fun observation(row: JSONObject, videoId: String, sourceHash: String, durationUs: Long,
+        mapped: (String) -> String): VideoRegionObservation {
+        val identity = row.getString("identity")
+        require(identity.matches(SHA)) { "成果包区域观测标识无效" }
+        val sample = row.getLong("sampleIndex")
+        val track = row.getString("trackId")
+        require(track.length in 1..500) { "成果包区域观测轨道无效" }
+        val targetUs = row.getLong("targetUs"); val ptsUs = row.getLong("ptsUs"); val untilUs = row.getLong("untilUs")
+        require(targetUs in 0 until durationUs && ptsUs >= 0 && untilUs > ptsUs && untilUs <= durationUs) { "成果包区域观测时间无效" }
+        val width = row.getInt("width"); val height = row.getInt("height")
+        require(width in 1..32768 && height in 1..32768) { "成果包区域观测尺寸无效" }
+        val kind = row.getString("kind")
+        require(kind == "BUBBLE" || kind == "FREE_TEXT") { "成果包区域观测类型无效" }
+        val left = row.getDouble("left"); val top = row.getDouble("top")
+        val right = row.getDouble("right"); val bottom = row.getDouble("bottom")
+        require(left >= 0 && top >= 0 && right <= width && bottom <= height && right > left && bottom > top) {
+            "成果包区域观测范围无效"
+        }
+        val contour = row.getString("contour")
+        val points = JSONArray(contour)
+        require(points.length() <= 2048) { "成果包区域观测轮廓过大" }
+        for(index in 0 until points.length()) {
+            val point = points.getJSONArray(index)
+            require(point.length() == 2) { "成果包区域观测轮廓无效" }
+            val x = point.getDouble(0); val y = point.getDouble(1)
+            require(x >= 0 && y >= 0 && x <= width && y <= height) { "成果包区域观测轮廓越界" }
+        }
+        require(row.has("appearance")) { "成果包区域观测缺少外观" }
+        val appearance = if(row.isNull("appearance")) null else row.getString("appearance").also { text ->
+            require(text.length <= 2048) { "成果包区域观测外观过大" }
+            require(runCatching { Base64.getDecoder().decode(text) }.getOrNull()?.size == 1024) { "成果包区域观测外观无效" }
+        }
+        return VideoRegionObservation(videoId, sourceHash, identity, sample, mapped(track), targetUs, ptsUs, untilUs,
+            width, height, kind, left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat(), contour, appearance)
+    }
     private fun time(row: JSONObject, duration: Long) { require(row.getLong("startMs") >= 0 && row.getLong("endMs") > row.getLong("startMs") && row.getLong("endMs") <= duration) }
     companion object { private val SHA = Regex("[a-f0-9]{64}") }
 }

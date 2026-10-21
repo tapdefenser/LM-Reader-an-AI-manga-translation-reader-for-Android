@@ -21,6 +21,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.security.MessageDigest
+import java.util.Base64
 import java.util.UUID
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -39,6 +40,7 @@ class VideoResultPackageTest {
     private lateinit var sourceArtifact: ReaderPageTranslation
     private lateinit var regionIds: List<String>
     private lateinit var cueIds: List<String>
+    private lateinit var observationTrackId: String
 
     @Before fun setup() = runBlocking {
         val base = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -88,10 +90,14 @@ class VideoResultPackageTest {
         val dao = container.videoResults.results()
         dao.putFrame(VideoFrameIndex(project.id, project.sha256, identity, 0, 1_000_000, 1_000_000, 1_400_000,
             sourcePage, sourceArtifact.revision, false, UUID.randomUUID().toString()))
+        observationTrackId = UUID.randomUUID().toString()
         dao.addRegion(VideoRegionInterval(UUID.randomUUID().toString(), project.id, project.sha256, sourcePage,
-            regionIds[0], 1000, 1400, revision = "r-a"))
+            regionIds[0], 1000, 1400, revision = "r-a", trackId = observationTrackId, anchorUs = 1_050_000))
         dao.addRegion(VideoRegionInterval(UUID.randomUUID().toString(), project.id, project.sha256, sourcePage,
             regionIds[1], 2000, 2500, 1900, 2600, manualTiming = true, revision = "r-b", trackId = "track-b"))
+        dao.putObservations(listOf(VideoRegionObservation(project.id, project.sha256, identity, 0, observationTrackId,
+            1_000_000, 1_000_000, 1_400_000, 160, 120, "FREE_TEXT", 10f, 10f, 80f, 40f,
+            "[[10,10],[80,10],[80,40],[10,40]]", Base64.getEncoder().encodeToString(ByteArray(1024)))))
         dao.addRegion(VideoRegionInterval(UUID.randomUUID().toString(), project.id, project.sha256, sourcePage,
             "$sourcePage:tombstone", 3000, 3500, 3000, 3500, deleted = true, revision = "r-deleted"))
         cueIds = listOf("cue-manual", "cue-deleted")
@@ -115,6 +121,12 @@ class VideoResultPackageTest {
         val manifestText = entries.getValue("manifest.json").toString(Charsets.UTF_8)
         val manifest = JSONObject(manifestText)
         assertEquals("LMReaderVideoResults", manifest.getString("format"))
+        assertEquals(2, manifest.getInt("schema"))
+        val exportedRegions = manifest.getJSONArray("regions")
+        val exportedPlain = (0 until exportedRegions.length()).map { exportedRegions.getJSONObject(it) }
+            .single { it.getString("regionId") == regionIds[0] }
+        assertEquals(1_050_000L, exportedPlain.getLong("anchorUs"))
+        assertEquals(1, manifest.getJSONArray("observations").length())
         assertTrue("unexpected export member: ${entries.keys}", entries.keys.all {
             it == "manifest.json" || Regex("(pages|proofs)/[a-f0-9]{64}\\.json").matches(it)
         })
@@ -146,6 +158,7 @@ class VideoResultPackageTest {
         assertEquals(newPage, plain.pageId)
         assertEquals(1000L, plain.startMs)
         assertEquals(1400L, plain.endMs)
+        assertEquals(1_050_000L, plain.anchorUs)
         val timed = regions.single { it.regionId == targetRegionId(regionIds[1]) }
         assertEquals(newPage, timed.pageId)
         assertTrue(timed.manualTiming)
@@ -155,6 +168,23 @@ class VideoResultPackageTest {
         val tombstone = regions.single { it.regionId == "$newPage:tombstone" }
         assertTrue(tombstone.deleted)
         assertEquals("r-deleted", tombstone.revision)
+        val observation = dao.observations(target.id, target.sha256).single()
+        assertEquals(VideoTasks.stableId("${target.id}:import:$observationTrackId"), observation.trackId)
+        assertEquals(plain.trackId, observation.trackId)
+        assertEquals(sha("frame-${source.id}"), observation.identity)
+        assertEquals(0L, observation.sampleIndex)
+        assertEquals(1_000_000L, observation.targetUs)
+        assertEquals(1_000_000L, observation.ptsUs)
+        assertEquals(1_400_000L, observation.untilUs)
+        assertEquals(160, observation.width)
+        assertEquals(120, observation.height)
+        assertEquals("FREE_TEXT", observation.kind)
+        assertEquals(10f, observation.left, 0f)
+        assertEquals(10f, observation.top, 0f)
+        assertEquals(80f, observation.right, 0f)
+        assertEquals(40f, observation.bottom, 0f)
+        assertEquals("[[10,10],[80,10],[80,40],[10,40]]", observation.contour)
+        assertEquals(1024, Base64.getDecoder().decode(observation.appearance!!).size)
         val cues = dao.cues(target.id)
         assertTrue(cues.single { it.cueId == cueIds[0] }.manuallyEdited)
         assertTrue(cues.single { it.cueId == cueIds[1] }.deleted)
@@ -165,6 +195,7 @@ class VideoResultPackageTest {
         dao.saveCue(localCue, cues.single { it.cueId == cueIds[0] }.revision)
         val edited = container.videoLibrary.artifacts(target.id).saveEdits(restored,
             restored.regions.map { it.copy(translatedText = it.translatedText + "·本地") })
+        dao.putObservations(listOf(observation.copy(left = 12f, right = 82f)))
         val second = File(app.cacheDir, "second-${UUID.randomUUID()}.lmvideo.zip")
         bundle.copyTo(second)
         await(container.videoResultImports.submit(target.id, Uri.fromFile(second)))
@@ -174,6 +205,25 @@ class VideoResultPackageTest {
         assertEquals(edited.regions.map { it.translatedText }, merged.regions.map { it.translatedText })
         assertEquals("本地人工", dao.cue(target.id, cueIds[0])!!.translation)
         assertTrue(dao.cue(target.id, cueIds[0])!!.manuallyEdited)
+        val mergedObservation = dao.observations(target.id, target.sha256).single()
+        assertEquals(observation.trackId, mergedObservation.trackId)
+        assertEquals(12f, mergedObservation.left, 0f)
+        assertEquals(82f, mergedObservation.right, 0f)
+
+        // A schema 1 package has no observation array or anchor and must still import.
+        val legacyManifest = JSONObject(manifestText).put("schema", 1).apply {
+            remove("observations")
+            val rows = getJSONArray("regions")
+            for(index in 0 until rows.length()) rows.getJSONObject(index).remove("anchorUs")
+        }
+        val legacy = File(app.cacheDir, "legacy-${UUID.randomUUID()}.lmvideo.zip").also { file ->
+            zip(file, entries.mapValues { (name, bytes) ->
+                if(name == "manifest.json") legacyManifest.toString().toByteArray() else bytes
+            }.toList())
+        }
+        assertTrue(JSONObject(await(container.videoResultImports.submit(target.id, Uri.fromFile(legacy))).checkpoint)
+            .getBoolean("imported"))
+        assertEquals(1, dao.observations(target.id, target.sha256).size)
 
         // Malicious packages fail before publication and never touch the source or existing rows.
         val sourceHash = ReaderPageArtifactStore.hashFile(sourceFile)

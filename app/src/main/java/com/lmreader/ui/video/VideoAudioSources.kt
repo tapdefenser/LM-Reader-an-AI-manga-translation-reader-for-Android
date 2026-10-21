@@ -23,6 +23,10 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 data class VideoTrackDescription(val index: Int, val mime: String, val language: String, val type: String)
+internal data class VideoSourceUpdates(
+    val onBatch: suspend (List<VideoCueRecord>) -> Unit,
+    val onProgress: suspend (stage: String, checkpoint: String?) -> Unit,
+)
 
 /** Text tracks and true audio transcription routes. A text-only API is never sent audio implicitly. */
 class VideoAudioSources(private val container: AppContainer) {
@@ -45,7 +49,7 @@ class VideoAudioSources(private val container: AppContainer) {
             } finally { extractor.release() }
         }
     }
-    suspend fun importSrt(id: String, uri: Uri) {
+    suspend fun importSrt(id: String, uri: Uri): String {
         val p = container.videoTasks.ensureProject(id)
         val bytes = ResourceGovernor.shared.use("io") {
             requireNotNull(container.applicationContext.contentResolver.openInputStream(uri)).use { input ->
@@ -56,22 +60,25 @@ class VideoAudioSources(private val container: AppContainer) {
             }
         }
         val cues = VideoSubtitles.parse(bytes, p.durationMs)
-        container.videoTasks.withEditBarrier(id) { container.workDatabase.withTransaction {
+        val trackId = "external:${VideoTasks.hash(bytes.decodeToString())}"
+        container.videoTasks.snapshot(id) { container.workDatabase.withTransaction {
             cues.forEach { c -> dao.addCue(VideoCueRecord(id, VideoTasks.stableId("${p.sha256}:${c.id}"), p.sha256,
-                "external:${VideoTasks.hash(bytes.decodeToString())}", c.startMs, c.endMs, c.source, revision = UUID.randomUUID().toString())) }
+                trackId, c.startMs, c.endMs, c.source, revision = UUID.randomUUID().toString())) }
         } }
+        return trackId
     }
-    suspend fun prepareSource(execution: TaskExecution, project: VideoProject, options: VideoWorkOptions) {
+    internal suspend fun prepareSource(execution: TaskExecution, project: VideoProject, options: VideoWorkOptions,
+        updates: VideoSourceUpdates? = null) {
         container.videoTasks.validateSource(JSONObject(execution.payload))
         val checkpoint = JSONObject(execution.initial.checkpoint)
         if(checkpoint.optBoolean("sourcePrepared")) return
         when(options.subtitleSource) {
-            "EMBEDDED" -> embedded(execution, project, options)
-            "ASR_LOCAL", "ASR_API" -> speech(execution, project, options)
+            "EMBEDDED" -> embedded(execution, project, options, updates)
+            "ASR_LOCAL", "ASR_API" -> speech(execution, project, options, updates)
             else -> throw TaskWaiting("CAPABILITY", "请选择字幕或语音文字来源")
         }
     }
-    private suspend fun embedded(execution: TaskExecution, p: VideoProject, options: VideoWorkOptions) {
+    private suspend fun embedded(execution: TaskExecution, p: VideoProject, options: VideoWorkOptions, updates: VideoSourceUpdates?) {
         val metadata = tracks(p.uri)
         val selected = metadata.firstOrNull { it.index == options.subtitleTrack }
             ?: metadata.firstOrNull { options.subtitleTrack < 0 && it.type == "TEXT" }
@@ -109,10 +116,14 @@ class VideoAudioSources(private val container: AppContainer) {
         execution.publish { container.workDatabase.withTransaction {
             container.videoTasks.validateSource(JSONObject(execution.payload))
             cues.forEach { cue -> dao.addCue(VideoCueRecord(p.id, cue.id, p.sha256, "embedded:${selected.index}", cue.startMs, cue.endMs, cue.source, revision = UUID.randomUUID().toString(), producerTaskId = execution.taskId)) }
-            execution.progress(cues.size.toLong(), 0, "已读取文字字幕", JSONObject().put("sourcePrepared", true).toString())
         } }
+        val checkpoint = JSONObject(execution.initial.checkpoint).put("sourcePrepared", true).put("sourceTrackId", "embedded:${selected.index}").toString()
+        if(updates != null) {
+            updates.onProgress("已读取文字字幕", checkpoint)
+            updates.onBatch(dao.cuesInRange(p.id, p.sha256, "embedded:${selected.index}", options.startMs, options.endMs))
+        } else execution.progress(cues.size.toLong(), 0, "已读取文字字幕", checkpoint)
     }
-    private suspend fun speech(execution: TaskExecution, p: VideoProject, options: VideoWorkOptions) {
+    private suspend fun speech(execution: TaskExecution, p: VideoProject, options: VideoWorkOptions, updates: VideoSourceUpdates?) {
         var checkpoint = JSONObject(execution.initial.checkpoint)
         val modelId = checkpoint.optString("asrModelId").takeIf { it.isNotBlank() }
             ?: options.asrModelId ?: container.asrModels.selectedId.value
@@ -126,11 +137,13 @@ class VideoAudioSources(private val container: AppContainer) {
             decoder.decode { chunk ->
                 if(chunk.index <= committed) return@decode
                 execution.checkActive()
-                execution.progress(chunk.index, 0, "语音识别 · ${chunk.startMs / 1000} 秒")
+                val stage = "语音识别 · ${chunk.startMs / 1000} 秒"
+                if(updates != null) updates.onProgress(stage, null) else execution.progress(chunk.index, 0, stage)
                 val language = options.source.substringBefore('-').substringBefore('_')
                 val segments = if(options.subtitleSource == "ASR_LOCAL") container.localAsr.transcribe(chunk.samples, language, modelId)
                     else transcribeApi(execution, chunk.samples, language, options)
-                val existing = dao.cues(p.id).filter { it.trackId == trackId && it.sourceHash == p.sha256 }
+                val existing = dao.cuesInRange(p.id, p.sha256, trackId, chunk.startMs, chunk.startMs + chunk.samples.size * 1000L / 16000)
+                val batch = mutableListOf<VideoCueRecord>()
                 execution.publish { container.workDatabase.withTransaction {
                     container.videoTasks.validateSource(JSONObject(execution.payload))
                     for(segment in segments) {
@@ -139,16 +152,22 @@ class VideoAudioSources(private val container: AppContainer) {
                         val duplicate = existing.any { row -> row.source.trim() == segment.text.trim() && minOf(row.endMs, end) > maxOf(row.startMs, start) }
                         if(duplicate) continue
                         val cueId = VideoTasks.stableId("${p.sha256}:${options.audioTrack}:$modelId:$start:$end:${segment.text}")
-                        dao.addCue(VideoCueRecord(p.id, cueId, p.sha256, trackId, start, end, segment.text,
-                            revision = UUID.randomUUID().toString(), producerTaskId = execution.taskId))
+                        val row = VideoCueRecord(p.id, cueId, p.sha256, trackId, start, end, segment.text,
+                            revision = UUID.randomUUID().toString(), producerTaskId = execution.taskId)
+                        if(dao.addCue(row) != -1L) batch += row
                     }
                     checkpoint = JSONObject().put("asrCommitted", chunk.index).put("asrModelId", modelId).put("sourceTrackId", trackId)
-                    execution.progress(chunk.index + 1, 0, "语音识别 · ${chunk.startMs / 1000} 秒", checkpoint.toString())
                     execution.remoteOutcome(false)
                 } }
+                // Never block the bounded downstream channel while holding a publication/Room lock.
+                if(updates != null) {
+                    updates.onProgress(stage, checkpoint.toString())
+                    updates.onBatch(batch)
+                } else execution.progress(chunk.index + 1, 0, stage, checkpoint.toString())
             }
             checkpoint.put("sourcePrepared", true)
-            execution.progress(0, 0, "语音识别完成", checkpoint.toString())
+            if(updates != null) updates.onProgress("语音识别完成", checkpoint.toString())
+            else execution.progress(0, 0, "语音识别完成", checkpoint.toString())
         } finally { decoder.close(); if(options.subtitleSource == "ASR_LOCAL") container.localAsr.release() }
     }
     private suspend fun transcribeApi(execution: TaskExecution, samples: FloatArray, language: String, options: VideoWorkOptions): List<AsrSegment> {

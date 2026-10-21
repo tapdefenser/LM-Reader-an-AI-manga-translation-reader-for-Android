@@ -2,6 +2,8 @@
 
 #include <whisper.h>
 
+#include "asr_backend.h"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -25,10 +27,6 @@ constexpr jsize kMaxSamples = 35 * kSampleRate;
 constexpr std::size_t kMaxJsonBytes = 8 * 1024 * 1024;
 constexpr int kMaxSegments = 100000;
 
-void silentLog(enum ggml_log_level, const char*, void*) {}
-
-std::once_flag logOnce;
-
 struct Context {
     Context() = default;
     ~Context() {
@@ -41,6 +39,7 @@ struct Context {
     Context& operator=(const Context&) = delete;
 
     whisper_context* ctx = nullptr;
+    std::string backendInfoJson;
     std::mutex inference;
     std::atomic<bool> abortRequested{false};
 };
@@ -408,8 +407,19 @@ bool abortCallback(void* userData) {
 
 }  // namespace
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_lmreader_core_translation_asr_WhisperNative_capabilities(JNIEnv* env, jobject) {
+    try {
+        return stringToJava(env, lmreader_asr::capabilitiesJson());
+    } catch (...) {
+        reportException(env, std::current_exception());
+    }
+    return nullptr;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_lmreader_core_translation_asr_WhisperNative_create(JNIEnv* env, jobject, jstring modelPath) {
+Java_com_lmreader_core_translation_asr_WhisperNative_create(
+    JNIEnv* env, jobject, jstring modelPath, jstring backend) {
     try {
         const std::string path = stringFromJava(env, modelPath, 4096);
         if (path.empty() || path.size() > 4096 || path.find('\0') != std::string::npos) {
@@ -421,22 +431,37 @@ Java_com_lmreader_core_translation_asr_WhisperNative_create(JNIEnv* env, jobject
         }
         modelFile.close();
 
-        std::call_once(logOnce, [] { whisper_log_set(silentLog, nullptr); });
-        whisper_context_params params = whisper_context_default_params();
-        params.use_gpu = false;
-        whisper_context* raw = whisper_init_from_file_with_params(path.c_str(), params);
-        if (raw == nullptr) {
+        const lmreader_asr::Backend requested =
+            lmreader_asr::parseBackendOrThrow(stringFromJava(env, backend, 16));
+        lmreader_asr::CreateResult created = lmreader_asr::create(path, requested);
+        if (created.context == nullptr) {
             throw std::runtime_error("Unable to load ASR model");
         }
-        std::unique_ptr<whisper_context, decltype(&whisper_free)> owner(raw, &whisper_free);
+        std::unique_ptr<whisper_context, decltype(&whisper_free)> owner(
+            created.context, &whisper_free);
         auto context = std::make_shared<Context>();
-        context->ctx = raw;
+        context->ctx = created.context;
         owner.release();
+        context->backendInfoJson = created.info.toJson();
         return addContext(context);
     } catch (...) {
         reportException(env, std::current_exception());
     }
     return 0;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_lmreader_core_translation_asr_WhisperNative_describe(JNIEnv* env, jobject, jlong handle) {
+    try {
+        const std::shared_ptr<Context> context = findContext(handle);
+        if (!context) {
+            throw std::invalid_argument("Invalid ASR handle");
+        }
+        return stringToJava(env, context->backendInfoJson);
+    } catch (...) {
+        reportException(env, std::current_exception());
+    }
+    return nullptr;
 }
 
 extern "C" JNIEXPORT jstring JNICALL

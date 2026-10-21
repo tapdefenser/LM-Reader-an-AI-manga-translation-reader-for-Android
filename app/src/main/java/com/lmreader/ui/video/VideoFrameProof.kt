@@ -13,7 +13,7 @@ import java.util.Base64
 /** Only tiny source-stroke samples are retained, never full decoded frames. */
 class VideoFrameProof(private val samples: Map<String, String>) {
     fun retarget(fromPage: String, toPage: String) = VideoFrameProof(samples.mapKeys { (id, _) -> retargetVideoRegionId(id, fromPage, toPage) })
-    fun matches(bitmap: Bitmap, saved: ReaderPageTranslation): Boolean {
+    fun matches(bitmap: Bitmap, saved: ReaderPageTranslation, similarityPercent: Int = 94): Boolean {
         if (saved.regions.isEmpty()) return false
         val previous = saved.regions.map { row ->
             val bytes = samples[row.region.id]?.let { Base64.getDecoder().decode(it) } ?: return false
@@ -23,7 +23,7 @@ class VideoFrameProof(private val samples: Map<String, String>) {
         }
         val fresh = saved.regions.map { row -> ScreenVideoRegion(row.region.id, row.region.kind, row.region.bounds,
             ScreenVideoAppearance.capture { x, y -> sample(bitmap, saved, row.region, x, y) }, row.region.contour) }
-        return screenVideoRegionMatches(previous, fresh, 94).size == previous.size
+        return screenVideoRegionMatches(previous, fresh, similarityPercent).size == previous.size
     }
     fun save(root: File, pageId: String) {
         val j = JSONObject(samples)

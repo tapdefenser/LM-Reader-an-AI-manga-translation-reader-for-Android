@@ -141,6 +141,16 @@ class AsrModelManager(
     }
 
     /**
+     * Persists the requested acceleration backend. Availability is checked by
+     * [LocalAsrEngine.selectBackend] before this is called, so an unavailable explicit backend
+     * cannot be silently stored as if it were usable.
+     */
+    fun setBackend(value: AsrBackend) {
+        settingsStore.saveBackend(value)
+        mutableSettings.update { it.copy(backend = value) }
+    }
+
+    /**
      * Re-reads the ASR preferences from disk (backup restore replaces the XML file behind the
      * already created SharedPreferences instance). A restored selection is accepted only when
      * that model is installed on this device; the stored thread count is clamped by the store.

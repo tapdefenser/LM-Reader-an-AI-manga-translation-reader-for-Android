@@ -26,15 +26,15 @@ import org.json.JSONObject
 object VideoPlayerTools : VideoPlayerToolHost {
     @Composable override fun Content(container: AppContainer, videoId: String, positionMs: Long, player: Player,
         request: VideoPlayerToolRequest?, showTranslation: Boolean, onDismiss: () -> Unit) {
-        VideoSavedOverlays(container, videoId, positionMs, player, showTranslation)
         val activity = LocalActivity.current
         var initial by remember(videoId) { mutableStateOf(activity?.intent?.getStringExtra("initial-tool")?.let { VideoPlayerToolRequest(videoId, positionMs, it) }) }
         LaunchedEffect(videoId) { activity?.intent?.removeExtra("initial-tool") }
         val current = request ?: initial
+        if(current?.action != "EDIT") VideoSavedOverlays(container, videoId, positionMs, player, showTranslation)
         if(current != null) {
-            LaunchedEffect(current) { if(current.action in setOf("EDIT", "SUBTITLES", "FRAME")) player.pause() }
+            LaunchedEffect(current) { if(current.action in setOf("EDIT", "FRAME")) player.pause() }
             VideoActionDialog(container, current.videoId, current.action, current.positionMs, current.presentationTimeUs,
-                onSeek = { player.seekTo(it) }, onDismiss = { initial = null; onDismiss() })
+                onSeek = { player.seekTo(it) }, onDismiss = { initial = null; onDismiss() }, player = player)
         }
     }
 }
@@ -42,7 +42,7 @@ object VideoPlayerTools : VideoPlayerToolHost {
 private data class TimedMask(val overlay: BubbleOverlay, val width: Int, val height: Int, val start: Long, val end: Long)
 private data class PreparedScene(val videoId: String, val atMs: Long, val masks: List<TimedMask>, val luma: FloatArray?)
 
-@Composable private fun VideoSavedOverlays(container: AppContainer, id: String, positionMs: Long, player: Player, enabled: Boolean) {
+@Composable internal fun VideoSavedOverlays(container: AppContainer, id: String, positionMs: Long, player: Player, enabled: Boolean) {
     val projects by container.videoLibrary.projects.collectAsStateWithLifecycle()
     val rows by container.videoCatalog.entries.collectAsStateWithLifecycle(emptyList())
     val project = projects.firstOrNull { it.id == id }
@@ -50,37 +50,54 @@ private data class PreparedScene(val videoId: String, val atMs: Long, val masks:
     val catalog = rows.firstOrNull { it.videoId == id }
     val settings by container.videoResults.results().observeSettings(id).collectAsStateWithLifecycle(null)
     val cues by container.videoResults.results().observeCues(id).collectAsStateWithLifecycle(emptyList())
+    val regionRows by remember(id, project?.sha256) {
+        container.videoResults.results().observeRegions(id, project?.sha256.orEmpty())
+    }.collectAsStateWithLifecycle(emptyList())
+    val tasks by container.taskScheduler.tasks.collectAsStateWithLifecycle(emptyList())
     val globalStyle by container.preferences.videoSubtitleStyle.collectAsStateWithLifecycle("{}")
-    val style = remember(settings?.style, globalStyle) { resolveVideoSubtitleStyle(globalStyle, settings?.style ?: "{}") }
+    val generatedTrack = generatedVideoTrack(id, tasks)
+    val style = remember(settings?.style, globalStyle, generatedTrack, cues) {
+        resolveVideoSubtitleStyle(globalStyle, settings?.style ?: "{}").apply {
+            put("generatedTrackId", generatedTrack); put("trackId", resolvedVideoSubtitleTrack(this, cues))
+        }
+    }
     val ready = player.playbackState == Player.STATE_READY && catalog?.accessible == true && catalog.sourceHash == project?.sha256 && project != null && verified[id] == catalog.sourceRevision
     val decoder = remember(id, catalog?.uri) { catalog?.uri?.let { VideoFrameDecoder(container.applicationContext, it, 960) } }
     var scene by remember(id) { mutableStateOf<PreparedScene?>(null) }
     DisposableEffect(decoder) { onDispose { container.backgroundScope.launch { decoder?.close() } } }
     LaunchedEffect(id) { container.videoTasks.existingProject(id) }
     LaunchedEffect(id, catalog?.sourceRevision, project?.sha256) { if(project != null) container.videoTasks.verifyForPlayback(id) }
-    LaunchedEffect(id, positionMs / 400, enabled, ready, settings?.revision, project?.revision) {
+    LaunchedEffect(id, positionMs / 400, enabled, ready, settings?.revision, project?.revision, regionRows) {
         if(!ready || decoder == null || project == null) { scene = null; return@LaunchedEffect }
         val now = VideoFrameStamp.capture(id, positionMs)?.div(1000) ?: positionMs
         val resultDao = container.videoResults.results()
         val candidates = if(enabled) resultDao.framesAt(id, project.sha256, now * 1000) else emptyList()
         val preferred = JSONObject(settings?.json ?: "{}").optString("frameIdentity")
         val chosen = candidates.firstOrNull { it.identity == preferred } ?: candidates.firstOrNull()
-        val intervals = if(enabled) resultDao.regionsAt(id, project.sha256, now)
-            .filter { it.manualTiming || it.pageId == chosen?.pageId }
+        val identity = preferred.ifBlank { chosen?.identity.orEmpty() }
+        val similarity = container.screenTranslation.preferences.settings.value.videoSimilarityPercent
+        val intervals = if(enabled) resultDao.regionsAtIdentity(id, project.sha256, identity, now)
             .sortedWith(compareByDescending<com.lmreader.core.database.media.VideoRegionInterval> { it.manualTiming }.thenByDescending { it.startMs })
             .distinctBy { it.trackId } else emptyList()
         if(intervals.isEmpty() && !style.optBoolean("smartColor")) { scene = PreparedScene(id, now, emptyList(), null); return@LaunchedEffect }
         val frame = try { decoder.frameAt(now * 1000) } catch(e: CancellationException) { throw e }
             catch(_: Exception) { scene = null; return@LaunchedEffect } ?: return@LaunchedEffect
         try {
+            val observations = intervals.associate { time -> time.intervalId to
+                resultDao.observationAt(id, project.sha256, identity, time.trackId, now * 1000) }
+            val anchors = intervals.associate { time -> time.intervalId to
+                resultDao.observationAt(id, project.sha256, identity, time.trackId, time.anchorUs ?: (time.observedStartMs * 1000 + 999)) }
             val masks = withContext(Dispatchers.Default) {
                 intervals.groupBy { it.pageId }.flatMap { (pageId, times) ->
                     val saved = container.videoLibrary.artifacts(id).current(pageId) ?: return@flatMap emptyList()
                     val proof = VideoFrameProof.load(container.videoLibrary.proofs(id), pageId)
                     val scaled = if(frame.bitmap.width == saved.width && frame.bitmap.height == saved.height) frame.bitmap else Bitmap.createScaledBitmap(frame.bitmap, saved.width, saved.height, true)
                     try { times.mapNotNull { time ->
-                        val region = saved.regions.firstOrNull { it.region.id == time.regionId } ?: return@mapNotNull null
-                        if(!saved.manuallyEdited && !time.manualTiming && proof?.matches(frame.bitmap, saved.copy(regions = listOf(region))) != true) return@mapNotNull null
+                        val original = saved.regions.firstOrNull { it.region.id == time.regionId } ?: return@mapNotNull null
+                        val observation = observations[time.intervalId]
+                        if(!time.manualTiming && (observation?.matches(frame.bitmap, similarity)
+                                ?: proof?.matches(frame.bitmap, saved.copy(regions = listOf(original)), similarity)) != true) return@mapNotNull null
+                        val region = if(observation != null) moveVideoRegion(original, anchors[time.intervalId], observation, saved.width, saved.height) else original
                         TimedMask(BubbleMaskRenderer().prepare(scaled, listOf(region), saved.renderSettings), saved.width, saved.height, time.startMs, time.endMs)
                     } } finally { if(scaled !== frame.bitmap) scaled.recycle() }
                 }
@@ -132,7 +149,9 @@ private class VideoResultOverlayView(context: Context) : View(context) {
     private fun drawSubtitles(canvas: Canvas, video: RectF, time: Long) {
         val offset = style.optLong("offsetMs")
         val track = style.optString("trackId", "all")
-        val active = cues.filter { !it.deleted && (track == "all" || it.trackId == track) && time >= it.startMs + offset && time < it.endMs + offset }
+        val generated = style.optString("generatedTrackId").takeUnless { it.isBlank() || it == "null" }
+        val active = cues.filter { !it.deleted && videoSubtitleMatchesTrack(it.trackId, track, generated) &&
+            time >= it.startMs + offset && time < it.endMs + offset }
         if(active.isEmpty()) return
         val display = style.optString("display", "TRANSLATED")
         val text = active.joinToString("\n") { cue -> when(display) {

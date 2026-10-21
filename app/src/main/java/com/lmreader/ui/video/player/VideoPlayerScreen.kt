@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,10 +26,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
@@ -55,7 +56,6 @@ import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -77,6 +77,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -101,6 +102,8 @@ import androidx.core.os.bundleOf
 import com.lmreader.di.AppContainer
 import com.lmreader.ui.i18n.Icon
 import com.lmreader.ui.i18n.Text
+import com.lmreader.ui.video.catalog.videoTaskState
+import com.lmreader.ui.video.catalog.videoTranslationStatus
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -194,10 +197,13 @@ private fun PlayerSurface(
     rotationGeneration: Int,
 ) {
     val context = LocalContext.current
+    val activity = LocalActivity.current
     val scope = rememberCoroutineScope()
     val snapshot = rememberPlayerSnapshot(controller, active)
     val currentVideoId = snapshot.currentMediaId?.takeIf { it.isNotBlank() } ?: state.currentId
     val currentItem = viewModel.itemFor(currentVideoId)
+    val tasks by container.taskScheduler.tasks.collectAsStateWithLifecycle()
+    val projects by container.videoLibrary.projects.collectAsStateWithLifecycle()
     val host = VideoPlayerToolRegistry.host
     val prefs = remember(context) {
         context.getSharedPreferences(VideoPlayerPreferences.NAME, Context.MODE_PRIVATE)
@@ -216,7 +222,11 @@ private fun PlayerSurface(
     var mode by remember { mutableStateOf(PlayerPlaybackMode.LIST_LOOP) }
     var dialog by remember { mutableStateOf<PlayerDialog?>(null) }
     var translateMenu by remember { mutableStateOf(false) }
-    var request by remember { mutableStateOf<VideoPlayerToolRequest?>(null) }
+    var playlistOpen by remember { mutableStateOf(false) }
+    var request by remember { mutableStateOf(activity?.intent?.getStringExtra("initial-tool")?.let {
+        VideoPlayerToolRequest(currentVideoId, snapshot.positionMs.coerceAtLeast(0), it)
+    }) }
+    LaunchedEffect(Unit) { activity?.intent?.removeExtra("initial-tool") }
     var notice by remember { mutableStateOf<String?>(null) }
     var gestureHint by remember { mutableStateOf<PlayerGestureHint?>(null) }
     var dragPosition by remember { mutableStateOf<Float?>(null) }
@@ -237,8 +247,19 @@ private fun PlayerSurface(
     fun openDialog(next: PlayerDialog) {
         actions.onTemporarySpeedEnd()
         gestureHint = null
+        playlistOpen = false
         dialog = next
         touch()
+    }
+
+    fun openPlaylist() {
+        actions.onTemporarySpeedEnd()
+        gestureHint = null
+        dialog = null
+        translateMenu = false
+        playlistOpen = true
+        controlsVisible = true
+        lastInteraction += 1
     }
 
     fun requestTool(action: String) {
@@ -258,6 +279,7 @@ private fun PlayerSurface(
         )
         controlsVisible = false
         translateMenu = false
+        playlistOpen = false
         dialog = null
         actions.onTemporarySpeedEnd()
         lastInteraction += 1
@@ -271,6 +293,7 @@ private fun PlayerSurface(
         }
         showTranslation = !showTranslation
         translateMenu = false
+        playlistOpen = false
         touch()
     }
 
@@ -341,7 +364,7 @@ private fun PlayerSurface(
         if (gestureHint == current) gestureHint = null
     }
     LaunchedEffect(currentVideoId) {
-        request = null
+        if(request?.videoId != currentVideoId) request = null
         if (!locked) controlsVisible = true
         lastInteraction += 1
     }
@@ -356,6 +379,7 @@ private fun PlayerSurface(
             actions.onTemporarySpeedEnd()
             dialog = null
             translateMenu = false
+            playlistOpen = false
             dragPosition = null
             gestureHint = null
             notice = null
@@ -368,6 +392,7 @@ private fun PlayerSurface(
             actions.onTemporarySpeedEnd()
             dialog = null
             translateMenu = false
+            playlistOpen = false
             request = null
             gestureHint = null
             notice = null
@@ -388,6 +413,7 @@ private fun PlayerSurface(
         locked,
         dialog,
         translateMenu,
+        playlistOpen,
         request,
         inPip,
         dragPosition,
@@ -395,7 +421,7 @@ private fun PlayerSurface(
         errorActive,
     ) {
         if (active && controlsVisible && snapshot.isPlaying && !locked &&
-            dialog == null && !translateMenu && request == null &&
+            dialog == null && !translateMenu && !playlistOpen && request == null &&
             !inPip && dragPosition == null && !errorActive
         ) {
             delay(3_000L)
@@ -408,6 +434,7 @@ private fun PlayerSurface(
             locked = false
             dialog = null
             translateMenu = false
+            playlistOpen = false
             request = null
             notice = null
             gestureHint = null
@@ -443,6 +470,10 @@ private fun PlayerSurface(
 
     BackHandler(enabled = active && !inPip) {
         when {
+            playlistOpen -> {
+                playlistOpen = false
+                lastInteraction += 1
+            }
             locked -> {
                 locked = false
                 controlsVisible = true
@@ -477,7 +508,7 @@ private fun PlayerSurface(
                 }
             },
             update = { view ->
-                val wanted = if (!active || errorActive) null else controller
+                val wanted = if (!active || errorActive || request?.action == VideoPlayerToolActions.EDIT) null else controller
                 if (view.player !== wanted) view.setPlayer(wanted)
             },
             modifier = Modifier.fillMaxSize(),
@@ -490,7 +521,7 @@ private fun PlayerSurface(
                 .playerGestures(
                     player = controller,
                     enabled = active && !locked && !inPip && !errorActive &&
-                        request == null && dialog == null && !translateMenu,
+                        request == null && dialog == null && !translateMenu && !playlistOpen,
                     onTap = {
                         if (!errorActive) {
                             controlsVisible = !controlsVisible
@@ -579,7 +610,9 @@ private fun PlayerSurface(
             )
         }
 
-        if (active && !inPip && !errorActive && !locked && controlsVisible && request == null) {
+        if (active && !inPip && !errorActive && !locked && controlsVisible &&
+            request == null && !playlistOpen
+        ) {
             TopControls(
                 title = currentItem?.name ?: "视频",
                 onBack = {
@@ -624,7 +657,7 @@ private fun PlayerSurface(
                     controller.seekToNext()
                     touch()
                 },
-                onPlaylist = { openDialog(PlayerDialog.PLAYLIST) },
+                onPlaylist = { openPlaylist() },
             )
             LockButton(
                 locked = false,
@@ -634,6 +667,7 @@ private fun PlayerSurface(
                     controlsVisible = false
                     dialog = null
                     translateMenu = false
+                    playlistOpen = false
                     request = null
                     notice = null
                     gestureHint = null
@@ -785,29 +819,6 @@ private fun PlayerSurface(
                         lastInteraction += 1
                     },
                 )
-                PlayerDialog.PLAYLIST -> PlaylistDialog(
-                    items = state.items,
-                    currentId = currentVideoId,
-                    onDismiss = {
-                        dialog = null
-                        lastInteraction += 1
-                    },
-                    onSelect = { item ->
-                        dialog = null
-                        lastInteraction += 1
-                        if (item.videoId != currentVideoId) {
-                            actions.onSavePosition()
-                            scope.launch {
-                                val fresh = viewModel.freshPosition(item.videoId)
-                                val index = (0 until controller.mediaItemCount)
-                                    .firstOrNull { controller.getMediaItemAt(it).mediaId == item.videoId }
-                                    ?: return@launch
-                                controller.seekTo(index, startPosition(fresh, item.durationMs))
-                                controller.play()
-                            }
-                        }
-                    },
-                )
                 null -> Unit
             }
 
@@ -822,10 +833,42 @@ private fun PlayerSurface(
                     onTranslate = { requestTool(VideoPlayerToolActions.TRANSLATE) },
                     onOptions = { requestTool(VideoPlayerToolActions.OPTIONS) },
                     onEdit = { requestTool(VideoPlayerToolActions.EDIT) },
+                    onToggleSubtitles = { requestTool(VideoPlayerToolActions.TOGGLE_SUBTITLES) },
                     onToggleOriginal = ::changeTranslationVisibility,
                     onClear = { requestTool(VideoPlayerToolActions.CLEAR) },
                 )
             }
+
+            VideoPlaylistDrawer(
+                visible = playlistOpen,
+                playlist = state.items,
+                currentId = currentVideoId,
+                statusFor = { id ->
+                    videoTranslationStatus(
+                        taskState = videoTaskState(tasks, id),
+                        hasProject = projects.any { it.id == id },
+                    )
+                },
+                onDismiss = {
+                    playlistOpen = false
+                    lastInteraction += 1
+                },
+                onSelect = { item ->
+                    playlistOpen = false
+                    lastInteraction += 1
+                    if (item.videoId != currentVideoId) {
+                        actions.onSavePosition()
+                        scope.launch {
+                            val fresh = viewModel.freshPosition(item.videoId)
+                            val index = (0 until controller.mediaItemCount)
+                                .firstOrNull { controller.getMediaItemAt(it).mediaId == item.videoId }
+                                ?: return@launch
+                            controller.seekTo(index, startPosition(fresh, item.durationMs))
+                            controller.play()
+                        }
+                    }
+                },
+            )
         }
     }
 }
@@ -835,7 +878,6 @@ private enum class PlayerDialog {
     SPEED,
     AUDIO,
     MODE,
-    PLAYLIST,
 }
 
 private data class AudioTrackUi(
@@ -1337,7 +1379,7 @@ private fun PlayerMenuDialog(
         onDismissRequest = onDismiss,
         title = { Text("播放菜单") },
         text = {
-            Column {
+            ScrollableMenu {
                 MenuAction(Icons.Filled.Share, "分享", onClick = onShare)
                 if (pipSupported) {
                     MenuAction(
@@ -1383,7 +1425,7 @@ private fun SpeedDialog(
         onDismissRequest = onDismiss,
         title = { Text("播放速度") },
         text = {
-            Column {
+            ScrollableMenu {
                 speeds.forEach { speed ->
                     DialogChoice(
                         label = "${formatSpeed(speed)}×",
@@ -1411,7 +1453,7 @@ private fun AudioTrackDialog(
         onDismissRequest = onDismiss,
         title = { Text("音轨") },
         text = {
-            Column {
+            ScrollableMenu {
                 Text(
                     if (options.isEmpty()) {
                         "当前没有可用的音轨（可能是无声视频，或音轨尚未加载）。"
@@ -1457,7 +1499,7 @@ private fun ModeDialog(
         onDismissRequest = onDismiss,
         title = { Text("播放模式") },
         text = {
-            Column {
+            ScrollableMenu {
                 PlayerPlaybackMode.entries.forEach { mode ->
                     DialogChoice(
                         label = mode.label,
@@ -1477,54 +1519,22 @@ private fun ModeDialog(
     )
 }
 
+/**
+ * Bounds dialog content to the short side of the current window and scrolls it, so a
+ * landscape phone with hidden system bars can still reach every menu item.
+ */
 @Composable
-private fun PlaylistDialog(
-    items: List<VideoPlayerItem>,
-    currentId: String,
-    onDismiss: () -> Unit,
-    onSelect: (VideoPlayerItem) -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("播放列表") },
-        text = {
-            LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                items(items, key = { it.videoId }) { item ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(item) }
-                            .padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                item.name,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                localize = false,
-                            )
-                            Text(
-                                formatTime(item.durationMs) + " · " + item.videoId.take(8),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                localize = false,
-                            )
-                        }
-                        if (item.videoId == currentId) {
-                            Icon(
-                                Icons.Filled.Check,
-                                contentDescription = "当前视频",
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                    }
-                    HorizontalDivider()
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
-    )
+private fun ScrollableMenu(content: @Composable () -> Unit) {
+    val maxHeight = (LocalConfiguration.current.screenHeightDp.dp - 192.dp)
+        .coerceAtLeast(72.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = maxHeight)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        content()
+    }
 }
 
 @Composable
@@ -1535,6 +1545,7 @@ private fun TranslateMenu(
     onTranslate: () -> Unit,
     onOptions: () -> Unit,
     onEdit: () -> Unit,
+    onToggleSubtitles: () -> Unit,
     onToggleOriginal: () -> Unit,
     onClear: () -> Unit,
 ) {
@@ -1542,10 +1553,11 @@ private fun TranslateMenu(
         onDismissRequest = onDismiss,
         title = { Text("画面翻译") },
         text = {
-            Column {
+            ScrollableMenu {
                 MenuAction(Icons.Filled.Translate, "翻译本画面", onClick = onFrame)
                 MenuAction(Icons.Filled.PlayArrow, "开始 / 暂停翻译", onClick = onTranslate)
                 MenuAction(Icons.Filled.Speed, "翻译选项", onClick = onOptions)
+                MenuAction(Icons.Filled.Subtitles, "显示 / 关闭字幕", onClick = onToggleSubtitles)
                 MenuAction(Icons.Filled.Subtitles, "编辑译文", onClick = onEdit)
                 MenuAction(
                     Icons.Filled.Repeat,
@@ -1553,12 +1565,6 @@ private fun TranslateMenu(
                     onClick = onToggleOriginal,
                 )
                 MenuAction(Icons.Filled.ErrorOutline, "清除译文", onClick = onClear)
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "工具栏仅在已安装翻译宿主时可用；播放器本身从不捕获或伪造译文。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },

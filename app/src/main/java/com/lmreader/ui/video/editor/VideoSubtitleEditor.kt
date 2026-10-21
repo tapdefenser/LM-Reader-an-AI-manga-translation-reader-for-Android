@@ -55,6 +55,8 @@ import com.lmreader.core.database.media.VideoSettingsRecord
 import com.lmreader.di.AppContainer
 import com.lmreader.ui.i18n.Text
 import com.lmreader.ui.video.VideoProject
+import com.lmreader.ui.video.formatVideoTimecode
+import com.lmreader.ui.video.parseVideoTimecode
 import com.lmreader.ui.video.resolveVideoSubtitleStyle
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CancellationException
@@ -251,33 +253,6 @@ fun VideoSubtitleEditor(
                                 )
                             }
                         }
-                        item(key = "section:style") {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = { scope.launch {
-                                    val global = VideoEditorSubtitleStyle.parse(container.preferences.videoSubtitleStyle.first())
-                                    style = global.copy(offsetMs = style.offsetMs, enabled = style.enabled, trackId = style.trackId, overrideStyle = false)
-                                } }) { Text("使用全局样式") }
-                                TextButton(onClick = { scope.launch {
-                                    val global = JSONObject(style.encode(null)).apply { listOf("offsetMs", "enabled", "trackId", "overrideStyle").forEach(::remove) }
-                                    container.preferences.setVideoSubtitleStyle(global.toString())
-                                } }) { Text("设为全局默认") }
-                            }
-                            Text(if(style.overrideStyle) "当前视频使用独立样式" else "当前视频跟随全局样式", style = MaterialTheme.typography.labelSmall)
-                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-                                (listOf("all") + current.cues.map { it.trackId }.distinct().sorted()).forEach { track ->
-                                    FilterChip(selected = style.trackId == track, onClick = { style = style.copy(trackId = track) },
-                                        label = { Text(if(track == "all") "全部字幕轨" else track) })
-                                }
-                            }
-                            SubtitleStyleCard(
-                                style = style,
-                                dirty = style != baselineStyle,
-                                saving = saving,
-                                enabled = !saving,
-                                onChange = { style = it.copy(overrideStyle = true); saveError = null },
-                                onSave = { persistSettings() },
-                            )
-                        }
                         if (current.cues.isEmpty()) {
                             item(key = "section:empty") {
                                 Text("数据库中还没有字幕。可在播放器导入 SRT，或在此新增一条字幕后保存。")
@@ -318,10 +293,10 @@ fun VideoSubtitleEditor(
     if (showExit) {
         AlertDialog(
             onDismissRequest = { if (!saving) showExit = false },
-            title = { Text("保存字幕与显示设置？") },
+            title = { Text("保存字幕？") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("字幕或显示设置尚未保存。保存后继续、不保存退出，或取消继续校对。")
+                    Text("字幕尚未保存。保存后继续、不保存退出，或取消继续校对。显示样式已移到视频翻译选项。")
                     saveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
             },
@@ -369,8 +344,8 @@ private fun SubtitleTransportCard(
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("当前位置 ${formatBubbleTime(current)}", style = MaterialTheme.typography.labelMedium)
-                Text("总时长 ${formatBubbleTime(durationMs)}", style = MaterialTheme.typography.labelSmall)
+                Text("当前位置 ${formatVideoTimecode(current)}", style = MaterialTheme.typography.labelMedium)
+                Text("总时长 ${formatVideoTimecode(durationMs)}", style = MaterialTheme.typography.labelSmall)
             }
             Slider(
                 value = (dragMs ?: playheadMs).toFloat().coerceIn(0f, durationMs.toFloat()),
@@ -471,14 +446,14 @@ private fun CueDetailCard(
 ) {
     var source by remember(cue.cueId) { mutableStateOf(cue.source) }
     var translation by remember(cue.cueId) { mutableStateOf(cue.translation) }
-    var startText by remember(cue.cueId) { mutableStateOf(formatBubbleTime(cue.startMs)) }
-    var endText by remember(cue.cueId) { mutableStateOf(formatBubbleTime(cue.endMs)) }
+    var startText by remember(cue.cueId) { mutableStateOf(formatVideoTimecode(cue.startMs)) }
+    var endText by remember(cue.cueId) { mutableStateOf(formatVideoTimecode(cue.endMs)) }
     var validation by remember(cue.cueId) { mutableStateOf<String?>(null) }
     LaunchedEffect(cue.cueId, cue.startMs, cue.endMs, cue.source, cue.translation) {
         source = cue.source
         translation = cue.translation
-        startText = formatBubbleTime(cue.startMs)
-        endText = formatBubbleTime(cue.endMs)
+        startText = formatVideoTimecode(cue.startMs)
+        endText = formatVideoTimecode(cue.endMs)
     }
     val enabled = !saving && !cue.deleted
     Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
@@ -534,20 +509,20 @@ private fun CueDetailCard(
                         modifier = Modifier.weight(1f),
                     )
                 }
-                Text("时间格式 HH:MM:SS.mmm；有效范围 0 ≤ 起点 < 终点 ≤ ${formatBubbleTime(durationMs)}",
+                Text("时间格式：秒 / 分:秒 / 时:分:秒（留空为 0）；有效范围 0 ≤ 起点 < 终点 ≤ ${formatVideoTimecode(durationMs)}",
                     style = MaterialTheme.typography.labelSmall)
                 validation?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall) }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(
                         enabled = enabled,
                         onClick = {
-                            val start = parseBubbleTime(startText)
-                            val end = parseBubbleTime(endText)
+                            val start = parseVideoTimecode(startText)
+                            val end = parseVideoTimecode(endText)
                             validation = when {
                                 source.length > 20_000 || translation.length > 20_000 -> "原文或译文过长"
                                 Regex("\\n\\s*\\n").containsMatchIn(source) || Regex("\\n\\s*\\n").containsMatchIn(translation) ->
                                     "字幕内不能包含空白行（会破坏 SRT 分段）"
-                                start == null || end == null -> "时间格式必须是 HH:MM:SS.mmm"
+                                start == null || end == null -> "时间格式应为秒 / 分:秒 / 时:分:秒"
                                 !validBubbleTimeRange(start, end, durationMs) -> "必须满足 0 ≤ 起点 < 终点 ≤ 视频总时长"
                                 else -> null
                             }
@@ -598,7 +573,7 @@ private fun CueRow(
         Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "${formatBubbleTime(cue.startMs)} → ${formatBubbleTime(cue.endMs)}",
+                    "${formatVideoTimecode(cue.startMs)} → ${formatVideoTimecode(cue.endMs)}",
                     style = MaterialTheme.typography.labelMedium,
                     textDecoration = if (cue.deleted) TextDecoration.LineThrough else null,
                     modifier = Modifier.weight(1f),
@@ -629,7 +604,7 @@ private fun CueRow(
 }
 
 @Composable
-private fun SubtitleStyleCard(
+internal fun SubtitleStyleCard(
     style: VideoEditorSubtitleStyle,
     dirty: Boolean,
     saving: Boolean,
@@ -765,106 +740,9 @@ private fun ColorChoiceRow(label: String, selected: Int, enabled: Boolean, onSel
     }
 }
 
-private data class SubtitleEditorSnapshot(val cues: List<VideoCueRecord>, val selectedId: String?)
-
-private data class SubtitleEditorDraft(
-    val cues: List<VideoCueRecord>,
-    val selectedId: String?,
-    val undo: List<SubtitleEditorSnapshot> = emptyList(),
-) {
-    val selected get() = cues.firstOrNull { it.cueId == selectedId }
-
-    fun select(id: String?) = copy(selectedId = id?.takeIf { candidate -> cues.any { it.cueId == candidate } })
-
-    fun addCue(cue: VideoCueRecord): SubtitleEditorDraft =
-        change(cues + cue, cue.cueId)
-
-    fun editSelected(source: String, translation: String, startMs: Long, endMs: Long): SubtitleEditorDraft {
-        val item = selected ?: return this
-        return change(cues.map {
-            if (it.cueId == item.cueId) it.copy(
-                source = source,
-                translation = translation,
-                startMs = startMs,
-                endMs = endMs,
-                manuallyEdited = true,
-                deleted = false,
-            ) else it
-        }, item.cueId)
-    }
-
-    fun deleteSelected(): SubtitleEditorDraft {
-        val item = selected ?: return this
-        return change(cues.map { if (it.cueId == item.cueId) it.copy(deleted = true, manuallyEdited = true) else it }, item.cueId)
-    }
-
-    fun restoreSelected(): SubtitleEditorDraft {
-        val item = selected ?: return this
-        return change(cues.map { if (it.cueId == item.cueId) it.copy(deleted = false, manuallyEdited = true) else it }, item.cueId)
-    }
-
-    fun clearTranslation(): SubtitleEditorDraft {
-        val item = selected ?: return this
-        return change(cues.map { if (it.cueId == item.cueId) it.copy(translation = "", manuallyEdited = true) else it }, item.cueId)
-    }
-
-    fun undoChange(): SubtitleEditorDraft {
-        val before = undo.lastOrNull() ?: return this
-        val selected = before.selectedId?.takeIf { id -> before.cues.any { it.cueId == id } }
-        return copy(cues = before.cues, selectedId = selected, undo = undo.dropLast(1))
-    }
-
-    private fun change(next: List<VideoCueRecord>, selection: String?): SubtitleEditorDraft {
-        val sorted = sortCues(next)
-        if (sorted == cues) return this
-        return copy(
-            cues = sorted,
-            selectedId = selection?.takeIf { id -> sorted.any { it.cueId == id } },
-            undo = (undo + SubtitleEditorSnapshot(cues, selectedId)).takeLast(50),
-        )
-    }
-}
-
-private fun sortCues(cues: List<VideoCueRecord>) =
-    cues.sortedWith(compareBy<VideoCueRecord> { it.startMs }.thenBy { it.trackId }.thenBy { it.cueId })
-
 private fun midpoint(cue: VideoCueRecord): Long = cue.startMs + (cue.endMs - cue.startMs) / 2
 
-private suspend fun persistCues(
-    container: AppContainer,
-    dao: VideoResultDao,
-    project: VideoProject,
-    draft: SubtitleEditorDraft,
-    baseline: List<VideoCueRecord>,
-): List<VideoCueRecord> = withContext(Dispatchers.IO) {
-    require(draft.cues.size <= 20_000) { "字幕数量已达上限" }
-    draft.cues.forEach { cue ->
-        require(cue.startMs >= 0 && cue.endMs > cue.startMs && cue.endMs <= project.durationMs) {
-            "字幕时间必须满足 0 ≤ 起点 < 终点 ≤ 视频总时长"
-        }
-        require(cue.source.length <= 4 * 1024 * 1024 && cue.translation.length <= 4 * 1024 * 1024) {
-            "字幕文本过长"
-        }
-        require(!Regex("\\n\\s*\\n").containsMatchIn(cue.source) && !Regex("\\n\\s*\\n").containsMatchIn(cue.translation)) {
-            "字幕内不能包含空白行（会破坏 SRT 分段）"
-        }
-    }
-    val expected = baseline.associateBy { it.cueId }
-    val changed = draft.cues.filter { current -> expected[current.cueId] != current }
-    if (changed.isNotEmpty()) {
-        container.videoTasks.withEditBarrier(project.id) {
-            container.videoResults.withTransaction {
-                for (current in changed) {
-                    val previous = expected[current.cueId]
-                    dao.saveCue(current, previous?.revision)
-                }
-            }
-        }
-    }
-    dao.cues(project.id)
-}
-
-private suspend fun persistStyle(
+internal suspend fun persistStyle(
     container: AppContainer,
     dao: VideoResultDao,
     videoId: String,
@@ -880,7 +758,7 @@ private suspend fun persistStyle(
     saved ?: error("显示设置未保存")
 }
 
-private data class VideoEditorSubtitleStyle(
+internal data class VideoEditorSubtitleStyle(
     val fontSizeSp: Int = 22,
     val lineSpacing: Float = 1.1f,
     val x: Float = .5f,

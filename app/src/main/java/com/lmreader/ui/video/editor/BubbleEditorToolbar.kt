@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +23,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -80,12 +91,39 @@ fun BubbleEditorToolbar(
     onDecreaseFont: () -> Unit,
     modifier: Modifier = Modifier,
     maxWidth: Dp = 240.dp,
+    compact: Boolean = false,
     extra: @Composable ColumnScope.() -> Unit = {},
 ) {
     if (!state.editing) return
     var editingText by remember { mutableStateOf<Pair<String, String>?>(null) }
     val enabled = !state.saving && !state.creating && !state.busy
-    Surface(
+    if(compact) {
+        var menu by remember { mutableStateOf(false) }
+        Surface(color = Color.Black.copy(alpha = .58f), contentColor = Color.White, shape = RoundedCornerShape(12.dp), modifier = modifier.widthIn(max = maxWidth)) {
+            Row(Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
+                Icon(Icons.Default.DragHandle, "拖动工具栏", Modifier.size(24.dp).padding(top = 8.dp), tint = if(state.dirty) Color(0xFFFFD54F) else Color.White)
+                IconButton(onClick = onAdd, enabled = enabled && state.canAdd, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.Add, stringResource(R.string.reader_bubble_add))
+                }
+                IconButton(onClick = { editingText = state.selectedSource to state.selectedText }, enabled = enabled && state.hasSelection, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.Edit, stringResource(R.string.reader_bubble_text))
+                }
+                IconButton(onClick = onSave, enabled = enabled && state.dirty, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Default.Save, stringResource(R.string.reader_bubble_save))
+                }
+                androidx.compose.foundation.layout.Box {
+                    IconButton(onClick = { menu = true }, modifier = Modifier.size(40.dp)) { Icon(Icons.Default.MoreVert, "气泡工具") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.reader_bubble_undo)) }, onClick = { menu = false; onUndo() }, enabled = enabled && state.canUndo)
+                        DropdownMenuItem(text = { Text(stringResource(R.string.reader_bubble_delete)) }, onClick = { menu = false; onDelete() }, enabled = enabled && state.hasSelection)
+                        DropdownMenuItem(text = { Text(stringResource(R.string.reader_bubble_font_increase)) }, onClick = { menu = false; onIncreaseFont() }, enabled = enabled && state.hasSelection)
+                        DropdownMenuItem(text = { Text(stringResource(R.string.reader_bubble_font_decrease)) }, onClick = { menu = false; onDecreaseFont() }, enabled = enabled && state.hasSelection)
+                        DropdownMenuItem(text = { Text(stringResource(R.string.reader_bubble_exit)) }, onClick = { menu = false; onExit() }, enabled = !state.saving)
+                    }
+                }
+            }
+        }
+    } else Surface(
         color = Color.Black.copy(alpha = .58f),
         contentColor = Color.White,
         shape = RoundedCornerShape(12.dp),

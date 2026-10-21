@@ -79,6 +79,8 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.LmReader">
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libGLES_mali.so" android:required="false" />
 
         <service android:name=".tasks.QueueTaskService" android:exported="false"
             android:foregroundServiceType="dataSync|mediaProcessing" android:stopWithTask="false" />

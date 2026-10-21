@@ -34,7 +34,8 @@ fun openVideoPlayer(context: Context, id: String, ids: List<String>, action: Str
 
 @Composable
 fun VideoActionDialog(container: AppContainer, id: String, action: String, positionMs: Long = 0,
-    frameAtUs: Long? = null, onSeek: (Long) -> Unit = {}, onDismiss: () -> Unit) {
+    frameAtUs: Long? = null, onSeek: (Long) -> Unit = {}, onDismiss: () -> Unit,
+    player: androidx.media3.common.Player? = null) {
     var active by remember(id, action) { mutableStateOf(action) }
     var project by remember(id) { mutableStateOf<VideoProject?>(null) }
     var error by remember(id, action) { mutableStateOf<String?>(null) }
@@ -56,9 +57,9 @@ fun VideoActionDialog(container: AppContainer, id: String, action: String, posit
         }
     }
     LaunchedEffect(id, active) {
-        if(active in setOf("EDIT", "SUBTITLES", "CLEAR", "EXPORT", "INFO")) {
+        if(active in setOf("EDIT", "CLEAR", "EXPORT", "INFO")) {
             loading = true
-            try { project = if(active in setOf("EDIT", "SUBTITLES")) container.videoTasks.ensureProject(id) else container.videoTasks.existingProject(id) }
+            try { project = if(active == "EDIT") container.videoTasks.ensureProject(id) else container.videoTasks.existingProject(id) }
             catch(e: CancellationException) { throw e } catch(e: Exception) { error = e.message }
             finally { loading = false }
         }
@@ -80,8 +81,12 @@ fun VideoActionDialog(container: AppContainer, id: String, action: String, posit
         confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } })
     else when(active) {
         "OPTIONS" -> VideoTranslationOptionsDialog(container, id, onDismiss)
-        "EDIT" -> project?.let { VideoBubbleEditor(container, it, positionMs, onSeek, onDismiss) }
-        "SUBTITLES" -> project?.let { VideoSubtitleEditor(container, it, positionMs, onSeek, onDismiss) }
+        "EDIT" -> project?.let { VideoBubbleEditor(container, it, positionMs, onSeek, onDismiss, player = player) }
+        "SUBTITLES" -> VideoSubtitleSourceDialog(container, id, onDismiss)
+        "TOGGLE_SUBTITLES" -> LaunchedEffect(id) {
+            try { changeVideoSubtitleSource(container, id) { put("enabled", !optBoolean("enabled", true)) }; onDismiss() }
+            catch(e: CancellationException) { throw e } catch(e: Exception) { error = e.message }
+        }
         "CLEAR" -> project?.let { p ->
             var frames by remember { mutableStateOf(true) }; var subtitles by remember { mutableStateOf(true) }
             var start by remember { mutableStateOf("00:00:00.000") }
@@ -137,9 +142,7 @@ fun VideoActionDialog(container: AppContainer, id: String, action: String, posit
 
 /** Kept independent from SRT parser sequence numbers. */
 object VideoSubtitlesTime {
-    fun format(ms: Long) = "%02d:%02d:%02d.%03d".format(ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
-    fun parse(value: String): Long {
-        val match = Regex("(\\d{2,}):([0-5]\\d):([0-5]\\d)[.,](\\d{3})").matchEntire(value.trim()) ?: error("时间格式应为 HH:MM:SS.mmm")
-        return Math.addExact(Math.multiplyExact(match.groupValues[1].toLong(), 3_600_000), match.groupValues[2].toLong() * 60_000 + match.groupValues[3].toLong() * 1000 + match.groupValues[4].toLong())
-    }
+    fun format(ms: Long) = formatVideoTimecode(ms)
+    fun parse(value: String): Long = parseVideoTimecode(value.replace(',', '.'))
+        ?: error("时间格式应为秒 / 分:秒 / 时:分:秒")
 }

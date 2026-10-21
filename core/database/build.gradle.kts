@@ -22,10 +22,10 @@ val syncMigrationSchemas by tasks.registering(Sync::class) {
     from(layout.projectDirectory.dir("schemas"))
     into(layout.projectDirectory.dir("src/androidTest/assets"))
 }
+syncMigrationSchemas.configure { dependsOn("kspDebugKotlin") }
 
 tasks.matching { it.name.startsWith("pre") && it.name.endsWith("AndroidTestBuild") }
     .configureEach { dependsOn(syncMigrationSchemas) }
-tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(syncMigrationSchemas) }
 
 dependencies {
     api(project(":core:model"))
