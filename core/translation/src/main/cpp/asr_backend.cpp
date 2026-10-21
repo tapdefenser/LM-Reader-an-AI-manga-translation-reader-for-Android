@@ -274,20 +274,6 @@ void appendNullableJsonField(std::string& out, const char* key, const std::strin
     }
 }
 
-std::string joinReasons(const std::vector<std::string>& reasons) {
-    std::string result;
-    for (const std::string& reason : reasons) {
-        if (reason.empty()) {
-            continue;
-        }
-        if (!result.empty()) {
-            result += "；";
-        }
-        result += reason;
-    }
-    return result;
-}
-
 std::string cpuDescription(const std::vector<DeviceEntry>& devices) {
     const std::vector<DeviceEntry> cpu = devicesFor(devices, Backend::Cpu);
     if (!cpu.empty() && !cpu.front().description.empty()) {
@@ -547,33 +533,8 @@ CreateResult create(const std::string& modelPath, Backend requested) {
     const std::vector<DeviceEntry> devices = allDevices();
 
     if (requested == Backend::Auto) {
-        std::vector<std::string> fallbackReasons;
-        for (const Backend candidate : {Backend::Vulkan, Backend::OpenCl}) {
-            if (!isCompiled(candidate)) {
-                fallbackReasons.push_back(std::string(backendRegName(candidate)) + "：当前构建未包含");
-                continue;
-            }
-            const GpuSelection selection = findGpu(devices, candidate);
-            if (!selection.found) {
-                fallbackReasons.push_back(std::string(backendRegName(candidate)) + "：未检测到可用 GPU");
-                continue;
-            }
-            const Attempt attempt = createAttempt(modelPath, true, selection.gpuIndex, candidate);
-            if (attempt.ok) {
-                LoadInfo info;
-                info.requested = Backend::Auto;
-                info.actual = candidate;
-                info.device = attempt.capture.usedBackend.empty()
-                    ? selection.name
-                    : attempt.capture.usedBackend;
-                info.deviceDescription = selection.description;
-                info.fallbackReason = joinReasons(fallbackReasons);
-                logSelected(info);
-                return CreateResult{attempt.context, info};
-            }
-            fallbackReasons.push_back(std::string(backendRegName(candidate)) + "：初始化失败");
-        }
-
+        // 自动后端只走 CPU。GPU 后端在推理阶段的原生崩溃无法被捕获：一旦厂商驱动
+        // 段错误，整个进程会直接消失，回退逻辑来不及执行。GPU 只能显式手动选择。
         const Attempt cpu = createAttempt(modelPath, false, 0, Backend::Cpu);
         if (!cpu.ok) {
             throw std::runtime_error("无法加载 ASR 模型");
@@ -583,10 +544,6 @@ CreateResult create(const std::string& modelPath, Backend requested) {
         info.actual = Backend::Cpu;
         info.device = "CPU";
         info.deviceDescription = cpuDescription(devices);
-        info.fallbackReason = joinReasons(fallbackReasons);
-        if (info.fallbackReason.empty()) {
-            info.fallbackReason = "未检测到可用 GPU，使用 CPU";
-        }
         logSelected(info);
         return CreateResult{cpu.context, info};
     }

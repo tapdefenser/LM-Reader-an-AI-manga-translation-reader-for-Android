@@ -121,8 +121,10 @@ class LocalAsrEngine(private val manager: AsrModelManager) {
         val settings = manager.settings.value
         val threads = settings.threads.coerceIn(1, manager.threadLimit)
         val backend = settings.backend
-        val resources = if(backend == AsrBackend.CPU) mapOf("asr" to 1L, "nmt" to 1L, "compute" to 2L)
-            else mapOf("asr" to 1L, "nmt" to 1L, "vision" to 1L, "compute" to 1L)
+        // 自动后端固定走 CPU，只有显式选择 GPU 后端时才占用视觉资源。
+        val usesGpu = backend == AsrBackend.VULKAN || backend == AsrBackend.OPENCL
+        val resources = if(usesGpu) mapOf("asr" to 1L, "nmt" to 1L, "vision" to 1L, "compute" to 1L)
+            else mapOf("asr" to 1L, "nmt" to 1L, "compute" to 2L)
         return ResourceGovernor.shared.use(resources) {
             nativeMutex.withLock {
                 val handle = ensureSession(descriptor, backend, threads)

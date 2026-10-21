@@ -354,7 +354,7 @@ private fun backendStatus(
             }
             "${backend.label}：$state" + if (detail.isNullOrBlank()) "" else "（$detail）"
         }
-        return "自动：" + parts.joinToString("；") + "。无可用 GPU 时回退 CPU。"
+        return "自动：" + parts.joinToString("；") + "。默认使用 CPU，GPU 需手动选择。"
     }
     val capability = capabilities[selected]
     if (capability == null) return "${selected.label}：当前构建未报告该后端"
