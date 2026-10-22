@@ -60,15 +60,7 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
                 }
             } catch (error: Exception) { throw IllegalStateException("${node.label.ifBlank { WorkflowLabels.kind(node.kind) }}：${error.message}", error) }
         }
-        val languages = p.allNodes().filter { it.kind == WorkflowKind.OCR }.map { n ->
-            val lang = when (val value = n.inputs["language"]) {
-                WorkflowSystem.ref(WorkflowSystem.SOURCE) -> from
-                WorkflowSystem.ref(WorkflowSystem.TARGET) -> to
-                is WorkflowExpression.Text -> LocalTranslationLanguage.fromTag(value.value)
-                else -> error("${n.label.ifBlank { "OCR" }}：语言需明确绑定")
-            }
-            LocalPageTranslator.ocrLanguage(lang)
-        }.toSet()
+        val visionDemand = p.visionModelDemand(textScope, from, to)
         val frame = frameSettings ?: VideoFrameSettings(render = container.bubbleRenderPreferences.settings.first(),
             similarityPercent = container.screenTranslation.preferences.settings.value.videoSimilarityPercent)
         settings = WorkflowRunSettings(from, to, "", frame.render, frame.segThreshold, profiles,
@@ -82,14 +74,7 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
             vision.modelIdentities, visionSettings, trackingIdentity)
         val routes = p.localTranslationRoutes(from, to)
         container.localTranslator.prepareEngineModels(owner, routes)
-        val imageInput = p.inputScenario == WorkflowInputScenario.IMAGE
-        val regions = imageInput && p.uses(WorkflowKind.SEG)
-        // A SEG node also performs text detection. FREE_TEXT needs that detector,
-        // but never the bubble segmentation model. Reconcile this owner's exact
-        // demand; the shared pools preserve models still needed by other owners.
-        vision.reconfigure(regions && textScope != SegTextScope.FREE_TEXT,
-            if (imageInput) languages else emptySet(),
-            needTextDetection = regions || (imageInput && languages.isNotEmpty()))
+        vision.reconfigure(visionDemand)
         vision.setPreprocessingCacheLimit(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576)
     }
     override fun pageId(positionMs: Long) = "video:${project.id}:${project.sha256}:$positionMs:$identity"

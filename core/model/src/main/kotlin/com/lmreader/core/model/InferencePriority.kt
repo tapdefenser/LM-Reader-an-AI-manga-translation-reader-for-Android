@@ -16,9 +16,9 @@ class InferencePriority(val rank: Int) : AbstractCoroutineContextElement(Key) {
 }
 
 /** Higher priority takes the next free session; an admitted native call is never interrupted. */
-class PrioritySessionPool(private val maximum: Int = 8) {
+class PrioritySessionPool(private val maximum: Int = 8, private val globalLimit: () -> Int = { maximum }) {
     init { require(maximum > 0) }
-    private data class Waiting(val order: Long, val priority: Int, val limit: Int, val preferred: List<Int>)
+    private data class Waiting(val order: Long, val priority: Int, val limit: Int, val preferred: List<Int>, val liveLimit: (() -> Int)?)
     private val lock = Mutex()
     private val revision = MutableStateFlow(0L)
     private val occupied = BooleanArray(maximum)
@@ -27,25 +27,27 @@ class PrioritySessionPool(private val maximum: Int = 8) {
     private val activeCount = MutableStateFlow(0)
     val active = activeCount.asStateFlow()
 
-    suspend fun <T> use(limit: Int, preferred: List<Int> = occupied.indices.toList(), action: suspend (Int) -> T): T {
+    suspend fun <T> use(limit: Int, preferred: List<Int> = occupied.indices.toList(), liveLimit: (() -> Int)? = null, action: suspend (Int) -> T): T {
         require(limit in 1..maximum)
-        val priority = currentCoroutineContext()[InferencePriority]?.rank ?: 0
+        val priority = currentCoroutineContext()[TaskContext]?.priority ?: currentCoroutineContext()[InferencePriority]?.rank ?: 0
         val choices = (preferred.filter { it in occupied.indices } + occupied.indices).distinct()
-        val ticket = lock.withLock { Waiting(sequence++, priority, limit, choices).also { waiting += it; revision.update { v -> v + 1 } } }
+        val ticket = lock.withLock { Waiting(sequence++, priority, limit, choices, liveLimit).also { waiting += it; revision.update { v -> v + 1 } } }
         var slot = -1
         try {
             while (slot < 0) {
                 currentCoroutineContext().ensureActive()
                 val before = revision.value
                 slot = lock.withLock {
-                    val next = waiting.filter { active.value < it.limit }.maxWithOrNull(compareBy<Waiting> { it.priority }.thenBy { -it.order })
+                    val ceiling = globalLimit().coerceIn(1, maximum)
+                    val next = waiting.filter { active.value < minOf((it.liveLimit?.invoke() ?: it.limit).coerceIn(1, maximum), ceiling) }
+                        .maxWithOrNull(compareBy<Waiting> { it.priority }.thenBy { -it.order })
                     val free = ticket.preferred.firstOrNull { it in occupied.indices && !occupied[it] }
                     if (next === ticket && free != null) {
                         waiting.remove(ticket); occupied[free] = true; activeCount.update { it + 1 }
                         revision.update { it + 1 }; free
                     } else -1
                 }
-                if (slot < 0) revision.first { it != before }
+                if (slot < 0) withTimeoutOrNull(1000) { revision.first { it != before } }
             }
             return action(slot)
         } finally {

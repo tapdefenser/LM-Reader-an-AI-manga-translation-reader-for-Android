@@ -198,7 +198,7 @@ class WorkflowHostIntegrationTest {
         repository.editGlossary("Akira", GlossaryEntry(mangaId, "Akira", "明确编辑后的译名", true, 50))
         assertEquals("明确编辑后的译名", repository.glossary(mangaId).single().target)
     }
-    @Test fun visionOnlyWorkflowDetectsTextForAllThreeScopesWithoutLoadingRecognition() = runBlocking<Unit> {
+    @Test fun visionOnlyWorkflowLoadsOnlyBlockModelsForEachScopeWithoutRecognition() = runBlocking<Unit> {
         val server = ImageApiFixture()
         container.apiProfiles.save(ApiProfile(profileId,ApiProfileKind.LLM,"Loopback image fixture",
             "http://127.0.0.1:${server.port}/v1",apiKey="fixture",model="fixture",retryCount=0))
@@ -226,7 +226,10 @@ class WorkflowHostIntegrationTest {
         val program = WorkflowProgramCodec.decode(WorkflowProgramCodec.encode(WorkflowTemplates.visionApi(profileId)))
         assertFalse(program.uses(WorkflowKind.OCR))
         try { for (scope in SegTextScope.entries) {
+            container.localPageTranslator.artifacts.delete(page.pageId)
             container.localVision.releaseModels()
+            container.localVision.reconfigure(program.visionModelDemand(scope,
+                LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED))
             val cache = TranslationCacheBudget(32L * 1_048_576)
             val kinds = java.util.Collections.synchronizedList(mutableListOf<RegionKind>())
             val settings = WorkflowRunSettings(LocalTranslationLanguage.ENGLISH, LocalTranslationLanguage.CHINESE_SIMPLIFIED,
@@ -239,9 +242,12 @@ class WorkflowHostIntegrationTest {
                     val kind = RegionKind.valueOf((bubble.fields.getValue("kind") as WorkflowValue.Text).value)
                     assertEquals("bubble:$id", call.images.single().key)
                     assertEquals(WorkflowType.GLOSSARY_ENTRY, call.resultType)
-                    val loaded = withTimeout(5000) { container.localVision.loadedResources.first { it.any { resource -> resource.id.endsWith(":det") } } }
-                    assertTrue(loaded.any { it.kind == InferenceEngineKind.SEG })
-                    assertTrue(loaded.any { it.kind == InferenceEngineKind.OCR && it.id.endsWith(":det") })
+                    val expected = buildSet { if (scope != SegTextScope.FREE_TEXT) add("seg"); if (scope != SegTextScope.BUBBLES) add("det") }
+                    val loaded = withTimeout(5000) { container.localVision.loadedResources.first {
+                        it.map { resource -> resource.id.substringAfterLast(":") }.toSet() == expected
+                    } }
+                    assertEquals(scope != SegTextScope.FREE_TEXT, loaded.any { it.kind == InferenceEngineKind.SEG })
+                    assertEquals(scope != SegTextScope.BUBBLES, loaded.any { it.id.endsWith(":det") })
                     assertFalse(loaded.any { it.id.endsWith(":rec") || it.id.endsWith(":ko") })
                     assertEquals(0, container.localVision.activeOcr.value)
                     kinds += kind

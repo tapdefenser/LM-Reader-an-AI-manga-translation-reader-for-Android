@@ -9,14 +9,22 @@ import org.json.JSONObject
 import org.json.JSONArray
 
 class ScreenTranslationPreferences(private val context: Context) {
-    val settings = context.preferenceStore.data.map { decode(it[KEY]) }.stateIn(
+    private fun read(p: Preferences): ScreenTranslationSettings {
+        val screen = decode(p[KEY])
+        val global = VisionExecutionPreferences.read(p)
+        return screen.copy(vision = screen.vision.copy(segConcurrency = global.segConcurrency, ocrConcurrency = global.ocrConcurrency))
+    }
+    val settings = context.preferenceStore.data.map { read(it) }.stateIn(
         CoroutineScope(SupervisorJob() + Dispatchers.IO), SharingStarted.Eagerly, ScreenTranslationSettings())
-    suspend fun current() = decode(context.preferenceStore.data.first()[KEY])
-    suspend fun update(change: (ScreenTranslationSettings) -> ScreenTranslationSettings) = context.preferenceStore.edit {
-        it[KEY] = encode(change(decode(it[KEY])))
+    suspend fun current() = read(context.preferenceStore.data.first())
+    suspend fun update(change: (ScreenTranslationSettings) -> ScreenTranslationSettings) = context.preferenceStore.edit { p ->
+        val next = change(read(p))
+        val global = VisionExecutionPreferences.read(p)
+        VisionExecutionPreferences.write(p, global.copy(segConcurrency = next.vision.segConcurrency, ocrConcurrency = next.vision.ocrConcurrency))
+        p[KEY] = encode(next)
     }
     companion object {
-        private val KEY = stringPreferencesKey("screen_translation_options_v1")
+        internal val KEY = stringPreferencesKey("screen_translation_options_v1")
         fun encodeRegions(selection: ScreenRegionSelection): JSONObject {
             fun array(regions: List<ScreenNormalizedRegion>) = JSONArray().also { values -> regions.forEach { region ->
                 values.put(JSONArray().put(region.left).put(region.top).put(region.right).put(region.bottom))

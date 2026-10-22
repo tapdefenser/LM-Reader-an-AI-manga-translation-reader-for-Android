@@ -7,6 +7,52 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PrioritySessionPoolTest {
+    @Test fun reducingGlobalLimitDrainsAdmittedWorkBeforeQueuedWorkStarts() = runTest {
+        var limit = 3
+        val pool = PrioritySessionPool(8) { limit }
+        val releases = List(3) { CompletableDeferred<Unit>() }
+        val holders = releases.map { release -> launch { pool.use(8) { release.await() } } }
+        runCurrent()
+        assertEquals(3, pool.active.value)
+        val entered = mutableListOf<Int>()
+        val queuedRelease = CompletableDeferred<Unit>()
+        val queued = List(2) { launch { pool.use(8) { entered += pool.active.value; queuedRelease.await() } } }
+        runCurrent(); limit = 1
+        releases[0].complete(Unit); runCurrent()
+        assertEquals(2, pool.active.value); assertTrue(entered.isEmpty())
+        releases[1].complete(Unit); runCurrent()
+        assertEquals(1, pool.active.value); assertTrue(entered.isEmpty())
+        releases[2].complete(Unit); runCurrent()
+        assertEquals(listOf(1), entered)
+        queuedRelease.complete(Unit); (holders + queued).joinAll()
+        assertEquals(listOf(1, 1), entered); assertEquals(0, pool.active.value)
+    }
+
+    @Test fun increasingGlobalLimitAdmitsExistingWaitersWithoutFinishingTheHolder() = runTest {
+        var limit = 1
+        val pool = PrioritySessionPool(8) { limit }
+        val release = CompletableDeferred<Unit>()
+        val jobs = List(3) { launch { pool.use(8) { release.await() } } }
+        runCurrent(); assertEquals(1, pool.active.value)
+        limit = 3; advanceTimeBy(1001); runCurrent()
+        assertEquals(3, pool.active.value)
+        release.complete(Unit); jobs.joinAll(); assertEquals(0, pool.active.value)
+    }
+
+    @Test fun pendingRouteUsesItsCurrentMemoryLimitInsteadOfSubmissionSnapshot() = runTest {
+        val pool = PrioritySessionPool(8)
+        var routeLimit = 3
+        val release = CompletableDeferred<Unit>()
+        val holder = launch { pool.use(3) { release.await() } }
+        runCurrent()
+        val entered = mutableListOf<Int>()
+        routeLimit = 1
+        val waiting = List(2) { launch { pool.use(3, liveLimit = { routeLimit }) { entered += pool.active.value } } }
+        runCurrent(); assertTrue(entered.isEmpty())
+        release.complete(Unit); (listOf(holder) + waiting).joinAll()
+        assertEquals(listOf(1, 1), entered)
+    }
+
     @Test fun independentSlotsReallyOverlapButNeverExceedTheLimit() = runTest {
         val pool = PrioritySessionPool(3)
         val release = CompletableDeferred<Unit>()

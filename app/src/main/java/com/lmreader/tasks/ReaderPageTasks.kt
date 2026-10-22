@@ -89,20 +89,12 @@ class ReaderPageTasks(private val container: AppContainer) : TaskExecutor {
         // interactive priority from the native resource queues.
         val owner = "reader-page:${execution.taskId}"
         val visionSettings = container.visionExecutionPreferences.settings.value
-        val vision = LocalVisionEngine(container.application) { visionSettings }
+        val vision = LocalVisionEngine(container.application) { container.visionExecutionPreferences.settings.value }
         var host: AndroidWorkflowHost? = null
         try {
-            val ocrLanguages = program.allNodes().filter { it.kind == WorkflowKind.OCR }.map { node ->
-                val language = when(val binding = node.inputs["language"]) {
-                    WorkflowSystem.ref(WorkflowSystem.SOURCE) -> from
-                    WorkflowSystem.ref(WorkflowSystem.TARGET) -> to
-                    is WorkflowExpression.Text -> LocalTranslationLanguage.fromTag(binding.value)
-                    else -> throw TaskWaiting("CAPABILITY", "${node.label}：OCR 语言需要明确绑定")
-                }
-                LocalPageTranslator.ocrLanguage(language)
-            }.toSet()
+            val visionDemand = program.visionModelDemand(settings.segTextScope, from, to)
             container.localTranslator.prepareEngineModels(owner, routes)
-            vision.reconfigure(settings.segTextScope != SegTextScope.FREE_TEXT, ocrLanguages, needTextDetection = true)
+            vision.reconfigure(visionDemand)
             vision.setPreprocessingCacheLimit(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576)
             val name = container.mangaRepository.getCards(listOf(mangaId)).firstOrNull()?.displayName ?: mangaId
             val progressScope = CoroutineScope(currentCoroutineContext())

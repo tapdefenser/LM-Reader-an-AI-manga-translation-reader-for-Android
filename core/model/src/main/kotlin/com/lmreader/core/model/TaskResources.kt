@@ -87,8 +87,10 @@ class ResourceGovernor(private val capacities: Map<String, Long> = DEFAULT_CAPAC
         const val SCREEN = 50
         const val NORMAL = 0
         const val MAINTENANCE = -20
-        val DEFAULT_CAPACITIES = mapOf("vision" to 2L, "nmt" to 2L, "decode" to 1L,
-            "io" to 2L, "asr" to 1L, "compute" to 2L, "playback" to 1L, "pixels" to 32_000_000L)
+        // Type-specific shared pools apply user/automatic limits. These outer envelopes
+        // must accommodate their supported maxima, rather than silently clipping them to 2.
+        val DEFAULT_CAPACITIES = mapOf("vision" to 17L, "nmt" to 8L, "decode" to 1L,
+            "io" to 2L, "asr" to 1L, "compute" to 25L, "playback" to 1L, "pixels" to 32_000_000L)
         /** All engines, including non-task previews, use this same process budget. */
         val shared = ResourceGovernor()
     }

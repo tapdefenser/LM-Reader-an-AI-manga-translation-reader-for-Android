@@ -7,6 +7,16 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ResourceGovernorTest {
+    @Test fun defaultEnvelopeDoesNotSilentlyCapConfiguredModelPoolsAtTwo() = runTest {
+        val governor = ResourceGovernor()
+        val release = CompletableDeferred<Unit>()
+        var entered = 0
+        val jobs = List(3) { launch { governor.use(mapOf("vision" to 1L, "compute" to 1L)) { entered++; release.await() } } } +
+            List(3) { launch { governor.use(mapOf("nmt" to 1L, "compute" to 1L)) { entered++; release.await() } } }
+        runCurrent(); assertEquals(6, entered)
+        release.complete(Unit); jobs.joinAll(); assertTrue(governor.usage.value.isEmpty())
+    }
+
     @Test fun interactiveTakesNextFreeResourceWithoutCancellingAdmittedWork() = runTest {
         val governor = ResourceGovernor(mapOf("native" to 1L)) { testScheduler.currentTime }
         val release = CompletableDeferred<Unit>(); val order = mutableListOf<String>()

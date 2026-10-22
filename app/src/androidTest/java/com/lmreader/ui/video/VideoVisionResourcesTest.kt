@@ -21,6 +21,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Resource-demand contracts for [VideoTranslationEngine.prepare].
@@ -91,6 +95,117 @@ class VideoVisionResourcesTest {
         assertEquals(setOf("ocr:0:det"), afterDetection.ids())
         assertFalse("Real DET-only detection must not load bubble SEG: $afterDetection", afterDetection.hasSegmenter())
         assertFalse(afterDetection.hasRecognizer())
+    }
+
+    @Test fun bubblesSentToApiLoadOnlySegDuringPreparationAndActualSegmentation() = runBlocking {
+        val engine = imageEngine(SegTextScope.BUBBLES)
+        withTimeout(120_000) { engine.prepare() }
+        val prepared = awaitResources(engine) { it.hasSegmenter() }
+        assertEquals(setOf("seg:0:seg"), prepared.ids())
+        val detection = withTimeout(120_000) { engine.detect(bitmapWithText(), 0) }
+        assertNotNull(detection)
+        assertTrue(requireNotNull(detection).result.textLines.isEmpty())
+        assertEquals(setOf("seg:0:seg"), awaitResources(engine) { it.hasSegmenter() }.ids())
+    }
+
+    @Test fun bubblesWithOcrLoadWorkflowModelsAndRecognizeInsideTheBubble() = runBlocking {
+        val engine = VideoTranslationEngine(container, project().copy(target = "en"),
+            TranslationWorkflow.LOCAL_MACHINE, textScope = SegTextScope.BUBBLES)
+        engines += engine
+        withTimeout(120_000) { engine.prepare() }
+        val prepared = awaitResources(engine) { it.hasSegmenter() && it.hasDetector() && it.hasRecognizer() }
+        assertEquals(setOf("seg:0:seg", "ocr:0:det", "ocr:0:rec"), prepared.ids())
+        val bitmap = bitmapWithText()
+        val region = SegRegion("${engine.pageId(0)}:seg:0", RegionKind.BUBBLE,
+            PixelRect(16f, 16f, 312f, 160f), 1f)
+        val detection = com.lmreader.ui.workflow.WorkflowPageSegmentation(
+            SegResult(engine.pageId(0), bitmap.width, bitmap.height, listOf(region), 0, "fixture"), listOf(region))
+        val result = withTimeout(120_000) { engine.frame(bitmap, 0, detection, emptySet()) }
+        assertTrue("OCR must detect and recognize bubble text even when block SEG supplies no lines: ${result.regions}",
+            result.regions.any { it.region.sourceText.contains("HELLO", ignoreCase = true) })
+    }
+
+    @Test fun twoVideoOwnersShareTheConfiguredSingleSegSlot() = runBlocking {
+        val first = imageEngine(SegTextScope.BUBBLES)
+        val second = imageEngine(SegTextScope.BUBBLES)
+        withTimeout(120_000) { first.prepare(); second.prepare() }
+        val active = CopyOnWriteArrayList<Int>()
+        val watcher = launch(start = CoroutineStart.UNDISPATCHED) { first.vision.activeSeg.collect { active += it } }
+        try {
+            val bitmap = bitmapWithText()
+            withTimeout(120_000) { coroutineScope {
+                awaitAll(async { repeat(6) { first.detect(bitmap, 1000L + it) } },
+                    async { repeat(6) { second.detect(bitmap, 2000L + it) } })
+            } }
+            assertTrue("The configured slot must actually execute work: $active", active.any { it == 1 })
+            assertTrue("Owners must share the setting, not each receive a private slot: $active", active.all { it <= 1 })
+            assertEquals(0, first.vision.activeSeg.value)
+        } finally { watcher.cancelAndJoin() }
+    }
+
+    @Test fun warmingActiveSubsetPreservesTheRetainedUnionOfQueuedModels() = runBlocking {
+        val engine = imageEngine(SegTextScope.FREE_TEXT)
+        val union = VisionModelDemand(true, true, setOf(LocalOcrLanguage.ENGLISH))
+        withTimeout(120_000) { engine.vision.reconfigure(union) }
+        val original = awaitResources(engine) { it.hasSegmenter() && it.hasDetector() && it.hasRecognizer() }.ids()
+        withTimeout(120_000) { engine.vision.warmModels(VisionModelDemand.blocks(SegTextScope.FREE_TEXT)) }
+        assertEquals(original, awaitResources(engine) { it.hasSegmenter() && it.hasDetector() && it.hasRecognizer() }.ids())
+    }
+
+    @Test fun threeRealSegSlotsAcrossOwnersDrainToOneAfterGlobalLimitIsReduced() = runBlocking {
+        container.visionExecutionPreferences.update { it.copy(segConcurrency = 3) }
+        withTimeout(10_000) { container.visionExecutionPreferences.settings.first { it.segConcurrency == 3 } }
+        val owners = listOf(imageEngine(SegTextScope.BUBBLES), imageEngine(SegTextScope.BUBBLES))
+        withTimeout(120_000) { owners.forEach { it.prepare() } }
+        val entered = AtomicInteger()
+        val firstThree = CountDownLatch(3)
+        val release = CountDownLatch(1)
+        val laterCounts = CopyOnWriteArrayList<Int>()
+        val bitmap = bitmapWithText()
+        coroutineScope {
+            val jobs = List(5) { index -> async(Dispatchers.Default) {
+                val once = AtomicBoolean()
+                val vision = owners[index % owners.size].vision
+                vision.segment("quota-$index", bitmap, scope = SegTextScope.BUBBLES) { progress ->
+                    if (progress.stage == "气泡分割" && once.compareAndSet(false, true)) {
+                        if (entered.incrementAndGet() <= 3) {
+                            firstThree.countDown()
+                            check(release.await(90, TimeUnit.SECONDS)) { "Test gate timed out" }
+                        } else laterCounts += vision.activeSeg.value
+                    }
+                }
+            } }
+            try {
+                assertTrue("Three actual model instances must enter before any finishes", withContext(Dispatchers.IO) {
+                    firstThree.await(90, TimeUnit.SECONDS)
+                })
+                assertEquals(3, owners[0].vision.activeSeg.value)
+                awaitResources(owners[0]) { resources -> resources.count { it.isSegmenter() } == 3 }
+                container.visionExecutionPreferences.update { it.copy(segConcurrency = 1) }
+                withTimeout(10_000) { container.visionExecutionPreferences.settings.first { it.segConcurrency == 1 } }
+                owners[0].vision.configureExecution()
+                assertEquals("An admitted call must remain owned until it returns", 3, owners[0].vision.activeSeg.value)
+            } finally { release.countDown() }
+            withTimeout(120_000) { jobs.awaitAll() }
+        }
+        assertEquals(2, laterCounts.size)
+        assertTrue("Existing waiters must use the new shared limit: $laterCounts", laterCounts.all { it == 1 })
+        assertEquals(0, owners[0].vision.activeSeg.value)
+        assertEquals(1, awaitResources(owners[0]) { it.count { model -> model.isSegmenter() } == 1 }.count { it.isSegmenter() })
+    }
+
+    @Test fun screenAndEngineSettingsShareCountsWithoutReplacingBackendChoices() = runBlocking {
+        val screen = com.lmreader.core.storage.settings.ScreenTranslationPreferences(app)
+        container.visionExecutionPreferences.update { it.copy(segConcurrency = 3, ocrConcurrency = 2) }
+        assertEquals(3, screen.current().vision.segConcurrency)
+        assertEquals(2, screen.current().vision.ocrConcurrency)
+        screen.update { it.copy(vision = it.vision.copy(segConcurrency = 1, ocrConcurrency = 4, segGpu = true)) }
+        val global = withTimeout(10_000) { container.visionExecutionPreferences.settings.first { it.segConcurrency == 1 && it.ocrConcurrency == 4 } }
+        assertFalse(global.segGpu)
+        assertTrue(screen.current().vision.segGpu)
+        container.visionExecutionPreferences.update { it.copy(segConcurrency = 2, ocrConcurrency = 1) }
+        assertEquals(2, screen.current().vision.segConcurrency)
+        assertEquals(1, screen.current().vision.ocrConcurrency)
     }
 
     @Test fun freeTextReprepareRemovesSeededSegAndRetainsDetectorIdentityAcrossRepeats() = runBlocking {

@@ -18,8 +18,8 @@ class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-prepr
     val accelerationMessages = messages.asStateFlow()
     private fun report(message: String) { messages.update { (it.filterNot { old -> old == message } + message).takeLast(8) } }
     private val poolOwner = java.util.UUID.randomUUID().toString()
-    private val segPool = SharedVisionSessions.pool(this.context, "seg", ::report)
-    private val ocrPool = SharedVisionSessions.pool(this.context, "ocr", ::report)
+    private val segPool = SharedVisionSessions.pool(this.context, "seg", ::report) { segConcurrency }
+    private val ocrPool = SharedVisionSessions.pool(this.context, "ocr", ::report) { ocrConcurrency }
     private val resourceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val loadedResources = combine(segPool.resources, ocrPool.resources) { seg, ocr -> seg + ocr }
         .stateIn(resourceScope, SharingStarted.Eagerly, emptyList())
@@ -53,8 +53,10 @@ class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-prepr
             else segPool.use(segConcurrency, settings()) { it.segment(imageId, image, threshold, progress) }
         // Detection is a SEG function but consumes the shared OCR concurrency and backend.
         // Release the segmentation slot before taking an OCR slot so stages never hold both.
-        val lines = ocrPool.use(ocrConcurrency, settings()) { it.detectSegTextLines(seg, image, textDetectionThreshold, progress) }
-        val result = supplementFreeTextRegions(seg.copy(textLines = lines))
+        val result = if (scope == SegTextScope.BUBBLES) seg else {
+            val lines = ocrPool.use(ocrConcurrency, settings()) { it.detectSegTextLines(seg, image, textDetectionThreshold, progress) }
+            supplementFreeTextRegions(seg.copy(textLines = lines))
+        }
         progress(VisionProgress("SEG 完成",1,1))
         return result.copy(elapsedMillis = (System.nanoTime() - started) / 1_000_000)
     }
@@ -70,6 +72,10 @@ class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-prepr
     suspend fun close() { releaseModels(); resourceScope.cancel() }
     suspend fun prepare(needSeg: Boolean, languages: Set<LocalOcrLanguage>, needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
         retainModels(needSeg, languages, needTextDetection)
+        warmModels(needSeg, languages, needTextDetection)
+    }
+    /** Warm the active subset without replacing this owner's retained union of queued demand. */
+    suspend fun warmModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>, needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
         val sample = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.WHITE) }
         suspend fun warm(pool: VisionSessionPool, limit: Int, action: suspend (LocalVisionSession) -> Unit) {
             // Other owners may be warming at the same time. A barrier holding every
@@ -94,11 +100,19 @@ class LocalVisionEngine(context: Context, cacheNamespace: String = "vision-prepr
     /** Rebuild only the pool whose backend changed; trim unused models/clones before warming additions. */
     suspend fun reconfigure(needSeg: Boolean, languages: Set<LocalOcrLanguage>,
         needTextDetection: Boolean = needSeg || languages.isNotEmpty(), warm: Boolean = true) {
-        val next = settings()
-        segPool.configure(next)
-        ocrPool.configure(next)
+        configureExecution()
         retainModels(needSeg, languages, needTextDetection)
-        if (warm) prepare(needSeg, languages, needTextDetection)
+        if (warm) warmModels(needSeg, languages, needTextDetection)
+    }
+    suspend fun reconfigure(demand: VisionModelDemand, warm: Boolean = true) =
+        reconfigure(demand.bubbleSeg, demand.recognitionLanguages, demand.textDetection, warm)
+    suspend fun warmModels(demand: VisionModelDemand) =
+        warmModels(demand.bubbleSeg, demand.recognitionLanguages, demand.textDetection)
+    /** Update limits/backends without inventing a new model owner or interrupting native work. */
+    suspend fun configureExecution() {
+        val next = settings()
+        segPool.configure(next, segConcurrency)
+        ocrPool.configure(next, ocrConcurrency)
     }
     suspend fun retainModels(needSeg: Boolean, languages: Set<LocalOcrLanguage>, needTextDetection: Boolean = needSeg || languages.isNotEmpty()) {
         segPool.retain(poolOwner, if (needSeg) segConcurrency else 0, needSeg, false, emptySet())
@@ -125,8 +139,9 @@ private object SharedVisionCaches {
 private object SharedVisionSessions {
     val messages = MutableStateFlow<List<String>>(emptyList())
     private val pools = mutableMapOf<Pair<String, String>, VisionSessionPool>()
-    @Synchronized fun pool(context: Context, name: String, report: (String) -> Unit): VisionSessionPool =
+    @Synchronized fun pool(context: Context, name: String, report: (String) -> Unit, limit: () -> Int): VisionSessionPool =
         pools.getOrPut(context.filesDir.absolutePath to name) { VisionSessionPool(context, name, report) }
+            .also { it.limitSource = limit }
 }
 
 internal class VisionSessionPool(private val context: Context, private val name: String, private val report: (String) -> Unit) {
@@ -138,7 +153,10 @@ internal class VisionSessionPool(private val context: Context, private val name:
         @Volatile var resources: List<LoadedEngineResource> = emptyList()
         @Volatile var inUse = false
     }
-    private val slots = List(2) { Slot() }
+    private val slots = List(8) { Slot() }
+    @Volatile private var ceiling = slots.size
+    @Volatile internal var limitSource: (() -> Int)? = null
+    private fun currentLimit() = (limitSource?.invoke() ?: ceiling).coerceIn(1, slots.size)
     private val revision = MutableStateFlow(0L)
     private val mutableResources = MutableStateFlow<List<LoadedEngineResource>>(emptyList())
     val resources = mutableResources.asStateFlow()
@@ -149,7 +167,7 @@ internal class VisionSessionPool(private val context: Context, private val name:
     private data class Retention(val limit: Int, val seg: Boolean, val detection: Boolean, val languages: Set<LocalOcrLanguage>)
     private var retention: Retention? = null
     private val owners = mutableMapOf<String, Retention>()
-    private fun unionRetention() = Retention(owners.values.maxOfOrNull { it.limit } ?: 0,
+    private fun unionRetention() = Retention(if (owners.values.any { it.limit > 0 }) currentLimit() else 0,
         owners.values.any { it.seg }, owners.values.any { it.detection }, owners.values.flatMap { it.languages }.toSet())
     private fun compatible(previous: VisionExecutionSettings?, next: VisionExecutionSettings) = previous != null &&
         if (name == "seg") previous.segGpu == next.segGpu else previous.ocrBackend == next.ocrBackend
@@ -166,17 +184,31 @@ internal class VisionSessionPool(private val context: Context, private val name:
             slot.resources.map { it.copy(id = "$name:$index:${it.id}", inUse = slot.inUse) }
         } }
     }
-    private val admission = PrioritySessionPool(2)
-    suspend fun <T> use(limit: Int, settings: VisionExecutionSettings, action: suspend (LocalVisionSession) -> T): T =
-        ResourceGovernor.shared.use(mapOf("vision" to 1L, "compute" to 1L)) { admission.use(limit.coerceIn(1, slots.size)) {
-            useAdmitted(limit.coerceIn(1, slots.size), settings, action)
+    private val admission = PrioritySessionPool(slots.size) { currentLimit() }
+    private suspend fun updateCeiling(limit: Int) = configuration.withLock {
+        val next = (limitSource?.invoke() ?: limit).coerceIn(1, slots.size)
+        if (ceiling == next) return@withLock
+        ceiling = next
+        val required = retention?.let { unionRetention() }.also { retention = it }
+        for ((index, slot) in slots.withIndex()) {
+            if (!slot.mutex.tryLock()) continue
+            try { if (required != null) trim(index, slot, required) else if (index >= currentLimit()) clear(slot) }
+            finally { slot.mutex.unlock() }
+        }
+        publishResources(); revision.update { it + 1 }
+    }
+    suspend fun <T> use(limit: Int, settings: VisionExecutionSettings, action: suspend (LocalVisionSession) -> T): T {
+        updateCeiling(limit)
+        return ResourceGovernor.shared.use(mapOf("vision" to 1L, "compute" to 1L)) { admission.use(slots.size) {
+            useAdmitted(slots.size, settings, action)
         } }
+    }
     private suspend fun <T> useAdmitted(limit: Int, settings: VisionExecutionSettings, action: suspend (LocalVisionSession) -> T): T = withContext(Dispatchers.IO) {
         while (true) {
             currentCoroutineContext().ensureActive()
             val before = revision.value
             val admission = configuration.withLock {
-                slots.take(limit).firstOrNull { it.mutex.tryLock() }?.let { slot ->
+                slots.take(minOf(limit, currentLimit())).firstOrNull { it.mutex.tryLock() }?.let { slot ->
                     slot to settings
                 }
             }
@@ -193,7 +225,7 @@ internal class VisionSessionPool(private val context: Context, private val name:
                     try { configuration.withLock {
                         slot.inUse = false
                         if (slot.retireWhenIdle) clear(slot)
-                        else retention?.let { trim(slots.indexOf(slot), slot, it) }
+                        else retention?.let { trim(slots.indexOf(slot), slot, unionRetention()) }
                     } } finally {
                         slot.inUse = false; publishResources(); slot.mutex.unlock(); revision.update { it + 1 }
                     }
@@ -212,15 +244,21 @@ internal class VisionSessionPool(private val context: Context, private val name:
         }
         publishResources(); revision.update { it + 1 }
     }
-    suspend fun configure(next: VisionExecutionSettings) = configuration.withLock {
-        for (slot in slots) {
+    suspend fun configure(next: VisionExecutionSettings, limit: Int = ceiling) = configuration.withLock {
+        ceiling = (limitSource?.invoke() ?: limit).coerceIn(1, slots.size)
+        val required = retention?.let { unionRetention() }.also { retention = it }
+        for ((index, slot) in slots.withIndex()) {
             if (!slot.mutex.tryLock()) continue
-            try { if (slot.session != null && !compatible(slot.settings, next)) clear(slot) }
+            try {
+                if (slot.session != null && !compatible(slot.settings, next)) clear(slot)
+                if (required != null) trim(index, slot, required) else if (index >= currentLimit()) clear(slot)
+            }
             finally { slot.mutex.unlock() }
         }
         publishResources(); revision.update { it + 1 }
     }
     suspend fun retain(owner: String, limit: Int, needSeg: Boolean, needTextDetection: Boolean, languages: Set<LocalOcrLanguage>) = configuration.withLock {
+        if (limit > 0) ceiling = (limitSource?.invoke() ?: limit).coerceIn(1, slots.size)
         owners[owner] = Retention(limit.coerceAtMost(slots.size), needSeg, needTextDetection, languages.toSet())
         val required = unionRetention()
         retention = required

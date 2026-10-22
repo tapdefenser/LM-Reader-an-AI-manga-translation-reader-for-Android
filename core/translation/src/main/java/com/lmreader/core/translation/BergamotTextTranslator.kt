@@ -58,7 +58,7 @@ class BergamotTextTranslator(private val catalog: () -> TranslationModelCatalog,
     private suspend fun <T> session(route: List<TranslationModelPack>, limit: Int = capacity(route), action: suspend (List<String>) -> T): T =
         ResourceGovernor.shared.use(mapOf("nmt" to 1L, "compute" to 1L)) { TranslationRuntime.pool.use(limit, TranslationRuntime.slots.indices.sortedBy { index ->
             route.count { pack -> TranslationRuntime.resources.value.none { it.id == "${signature(pack)}:session:$index" } }
-        }) { index ->
+        }, liveLimit = { capacity(route) }) { index ->
             withContext(TranslationRuntime.dispatcher) { TranslationRuntime.slots[index].mutex.withLock {
                 val slot = TranslationRuntime.slots[index]
                 val required = route.map(::signature).toSet()

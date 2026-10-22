@@ -42,7 +42,10 @@ class ScreenTranslationController(private val container: AppContainer) {
     private fun sessionContext(): kotlin.coroutines.CoroutineContext = taskContext ?: kotlin.coroutines.EmptyCoroutineContext
     val preferences = ScreenTranslationPreferences(container.application)
     @Volatile private var visionSettings = preferences.settings.value.vision
-    val vision by lazy { LocalVisionEngine(container.application, "screen-vision-preprocessing") { visionSettings } }
+    val vision by lazy { LocalVisionEngine(container.application, "screen-vision-preprocessing") {
+        val global = container.visionExecutionPreferences.settings.value
+        visionSettings.copy(segConcurrency = global.segConcurrency, ocrConcurrency = global.ocrConcurrency)
+    } }
     val state = MutableStateFlow(ScreenTranslationState())
     private var service: ScreenTranslationService? = null
     private var projection: ProjectionScreenCapture? = null
@@ -355,15 +358,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                 val profileIds = nodes.filter { it.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM) }
                     .mapNotNull { (it.inputs["profile"] as? WorkflowExpression.Text)?.value }.toSet()
                 apiResources.value = profiles.filter { it.id in profileIds }.map { "${it.name} · ${it.model}" }
-                fun language(expression: WorkflowExpression?): LocalTranslationLanguage? = when (expression) {
-                    is WorkflowExpression.Text -> LocalTranslationLanguage.fromTag(expression.value)
-                    WorkflowSystem.ref(WorkflowSystem.SOURCE) -> source
-                    WorkflowSystem.ref(WorkflowSystem.TARGET) -> target
-                    else -> null
-                }
-                val languages = nodes.filter { it.kind == WorkflowKind.OCR }.mapNotNull { node ->
-                    language(node.inputs["language"])?.let(LocalPageTranslator::ocrLanguage)
-                }.toSet()
+                val visionDemand = execution.visionModelDemand(config.translation.segTextScope, source, target)
                 val routes = execution.localTranslationRoutes(source, target)
                 vision.setPreprocessingCacheLimit(config.cacheMegabytes.toLong() * 1_048_576)
                 cacheBudget.setLimit(config.cacheMegabytes.toLong() * 1_048_576)
@@ -375,8 +370,7 @@ class ScreenTranslationController(private val container: AppContainer) {
                 container.translationQueue.retainScreenTranslationModels(routes)
                 visionSettings = config.vision
                 coroutineScope {
-                    val segmentation = async(Dispatchers.IO) { vision.reconfigure(nodes.any { it.kind == WorkflowKind.SEG } && config.translation.segTextScope != SegTextScope.FREE_TEXT,
-                        languages, needTextDetection = nodes.any { it.kind == WorkflowKind.SEG } || languages.isNotEmpty()) }
+                    val segmentation = async(Dispatchers.IO) { vision.reconfigure(visionDemand) }
                     val translation = async(Dispatchers.IO) { container.localTranslator.prepareEngineModels(pinOwner, routes) }
                     segmentation.await(); translation.await()
                 }

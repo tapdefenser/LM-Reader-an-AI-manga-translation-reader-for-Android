@@ -586,9 +586,13 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
     }
     suspend fun prepareMangaResources(routes: Set<LocalTranslationRoute>,
         needsSeg: Boolean = true, ocrSources: Set<LocalTranslationLanguage> = routes.map { it.source }.toSet(),
-        needTextDetection: Boolean = needsSeg || ocrSources.isNotEmpty()) = resourceMutex.withLock {
+        needTextDetection: Boolean = needsSeg || ocrSources.isNotEmpty()) =
+        prepareMangaResources(routes, VisionModelDemand(needsSeg, needTextDetection || ocrSources.isNotEmpty(),
+            ocrSources.map { it.visionOcrLanguage() }.toSet()))
+
+    private suspend fun prepareMangaResources(routes: Set<LocalTranslationRoute>, demand: VisionModelDemand) = resourceMutex.withLock {
         resourcesOwned = true
-        android.util.Log.i("TranslationQueue", "Reconciling engines routes=${routes.size} SEG=$needsSeg OCR=${ocrSources.map { it.tag }}")
+        android.util.Log.i("TranslationQueue", "Reconciling engines routes=${routes.size} vision=$demand")
         val queued = dao.queueSnapshot().filter(::runnable).mapNotNull { task -> runCatching {
             val json = JSONObject(requireNotNull(task.configSnapshot))
             val program = json.optJSONObject("program")?.let { WorkflowProgramCodec.decode(it.toString()) } ?: WorkflowTemplates.localMachine()
@@ -597,11 +601,12 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             Triple(program, source, target) to SegTextScope.fromValue(json.optString("segTextScope").takeIf { it.isNotBlank() })
         }.getOrNull() }
         val allRoutes = routes + queued.flatMap { it.first.first.localTranslationRoutes(it.first.second, it.first.third) }
-        val allOcr = ocrSources + queued.filter { it.first.first.uses(WorkflowKind.OCR) }.map { it.first.second }
-        container.localVision.reconfigure(needsSeg || queued.any { it.first.first.uses(WorkflowKind.SEG) && it.second != SegTextScope.FREE_TEXT },
-            allOcr.map { com.lmreader.ui.reader.translation.LocalPageTranslator.ocrLanguage(it) }.toSet(),
-            needTextDetection || queued.any { it.first.first.uses(WorkflowKind.SEG) || it.first.first.uses(WorkflowKind.OCR) }, warm = false)
-        container.localVision.prepare(needsSeg, ocrSources.map { com.lmreader.ui.reader.translation.LocalPageTranslator.ocrLanguage(it) }.toSet(), needTextDetection)
+        val allVision = queued.fold(demand) { total, (work, scope) ->
+            total + runCatching { work.first.visionModelDemand(scope, work.second, work.third) }
+                .getOrDefault(VisionModelDemand())
+        }
+        container.localVision.reconfigure(allVision, warm = false)
+        container.localVision.warmModels(demand)
         container.localTranslator.retainEngineModels(allRoutes)
         val preparationOwner = "queue-prepare:${java.util.UUID.randomUUID()}"
         try { container.localTranslator.prepareEngineModels(preparationOwner, routes) }
@@ -687,8 +692,7 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             if (chapters.isEmpty()) return@coroutineScope
             val routes = program.localTranslationRoutes(source, target)
             routes.forEach { container.translationModels.installedCatalog().route(it.source, it.target, it.engine) }
-            prepareMangaResources(routes, program.uses(WorkflowKind.SEG) && SegTextScope.fromValue(json.optString("segTextScope")) != SegTextScope.FREE_TEXT,
-                if (program.uses(WorkflowKind.OCR)) setOf(source) else emptySet(), program.uses(WorkflowKind.SEG))
+            prepareMangaResources(routes, program.visionModelDemand(SegTextScope.fromValue(json.optString("segTextScope")), source, target))
             val active = ConcurrentHashMap<String, Job>()
             val activeLock = Mutex()
             val preferredPages = chapters.firstOrNull()?.pages.orEmpty().map { it.pageId }
@@ -988,7 +992,10 @@ class TranslationQueueCoordinator(private val container: AppContainer) {
             }
         }
         if (works.isEmpty()) return@coroutineScope
-        prepareMangaResources(works.map { LocalTranslationRoute(it.sourceLanguage, it.targetLanguage) }.toSet(), works.any { it.segTextScope != SegTextScope.FREE_TEXT }, needTextDetection = true)
+        val visionDemand = works.fold(VisionModelDemand()) { total, work -> total +
+            VisionModelDemand.blocks(work.segTextScope) + VisionModelDemand(textDetection = true,
+                recognitionLanguages = setOf(work.sourceLanguage.visionOcrLanguage())) }
+        prepareMangaResources(works.map { LocalTranslationRoute(it.sourceLanguage, it.targetLanguage) }.toSet(), visionDemand)
         val consumed = mutableSetOf<String>()
         val pipeline = MangaPagePipeline(this, works, container.localPageTranslator, budget,
             container.localVision.segConcurrency, container.localVision.ocrConcurrency)

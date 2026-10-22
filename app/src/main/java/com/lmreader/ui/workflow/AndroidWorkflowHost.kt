@@ -284,10 +284,11 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
                 try {
                 val region = key.takeIf { it.startsWith("bubble:") }?.removePrefix("bubble:")?.let { geometry[it] }
                 val report: (VisionProgress) -> Unit = { progress(frame, PageTranslationProgress(PageTranslationStage.OCR, it.completed, it.total)) }
+                val detectedLines = state.seg?.textLines?.takeUnless { settings.segTextScope == SegTextScope.BUBBLES }
                 val result = if (region != null) vision.cachedRecognizeRegion(reference.pageId, state.hash, state.bitmap!!,
-                    language, region, state.seg!!.regions, state.seg!!.textLines, report)
+                    language, region, state.seg!!.regions, detectedLines, report)
                 else vision.recognize(reference.pageId, state.bitmap!!, language,
-                    reference.area?.let { kotlin.collections.listOf(it) }, state.seg?.textLines?.filter { line ->
+                    reference.area?.let { kotlin.collections.listOf(it) }, detectedLines?.filter { line ->
                         reference.area?.let { area -> line.bounds.left >= area.left && line.bounds.top >= area.top && line.bounds.right <= area.right && line.bounds.bottom <= area.bottom } ?: true
                     }, report)
                 if (key.startsWith("bubble:")) ocrBounds[key.removePrefix("bubble:")] = result.lines.map { it.bounds }
@@ -596,7 +597,8 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         require(bubbleId.startsWith("$id:")) { "不能把其他页的气泡回填到本页" }
         return PageTranslatedRegion(PageTextRegion(bubbleId, area.kind, area.bounds, area.contour,
             bubble.string("source"), ocrBounds[bubbleId] ?:
-                selectRegionTextLines(area, seg.regions, seg.textLines).map { it.bounds }), bubble.string("translation"))
+                selectRegionTextLines(area, seg.regions, seg.textLines).map { it.bounds }
+                    .ifEmpty { if (settings.segTextScope == SegTextScope.BUBBLES) kotlin.collections.listOf(area.bounds) else emptyList() }), bubble.string("translation"))
     }
     override suspend fun completePreparationPage(frame: WorkflowFrame): WorkflowValue.ListValue {
         val id = requireNotNull(frame.identity(WorkflowSystem.PAGE))

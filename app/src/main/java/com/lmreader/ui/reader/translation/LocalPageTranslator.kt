@@ -65,7 +65,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
             var elapsed = 0L
             for (region in regions) {
                 val result = vision.cachedRecognizeRegion(segmented.page.pageId, segmented.hash, segmented.image, ocrLanguage(source),
-                    region, segmented.seg.regions, segmented.seg.textLines) {
+                    region, segmented.seg.regions, segmented.seg.textLines.takeUnless { scope == SegTextScope.BUBBLES }) {
                     progress(PageTranslationProgress(PageTranslationStage.OCR, it.completed, it.total))
                 }
                 lines += result.lines; elapsed += result.elapsedMillis
@@ -150,14 +150,7 @@ class LocalPageTranslator(private val context: Context, private val vision: Loca
     companion object {
         val ocrSources = listOf(LocalTranslationLanguage.JAPANESE, LocalTranslationLanguage.ENGLISH,
             LocalTranslationLanguage.CHINESE_SIMPLIFIED, LocalTranslationLanguage.CHINESE_TRADITIONAL, LocalTranslationLanguage.KOREAN)
-        fun ocrLanguage(language: LocalTranslationLanguage) = when (language) {
-            LocalTranslationLanguage.JAPANESE -> LocalOcrLanguage.JAPANESE
-            LocalTranslationLanguage.KOREAN -> LocalOcrLanguage.KOREAN
-            LocalTranslationLanguage.CHINESE_SIMPLIFIED -> LocalOcrLanguage.CHINESE_SIMPLIFIED
-            LocalTranslationLanguage.CHINESE_TRADITIONAL -> LocalOcrLanguage.CHINESE_TRADITIONAL
-            LocalTranslationLanguage.ENGLISH -> LocalOcrLanguage.ENGLISH
-            else -> LocalOcrLanguage.ENGLISH
-        }
+        fun ocrLanguage(language: LocalTranslationLanguage) = language.visionOcrLanguage()
     }
 }
 

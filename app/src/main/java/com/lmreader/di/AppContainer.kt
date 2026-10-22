@@ -293,6 +293,9 @@ class AppContainer(val application: Application,
 
         // Launch only after every lazy delegate has been initialized.
         backgroundScope.launch { translationQueue }
+        backgroundScope.launch {
+            visionExecutionPreferences.settings.collect { localVision.configureExecution() }
+        }
         backgroundScope.launch { exportQueue }
         // Register the model-install executor even when the model settings screens were never
         // opened this process, so durable install rows can recover. Constructing the adapter

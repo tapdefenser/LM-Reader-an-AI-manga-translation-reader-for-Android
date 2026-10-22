@@ -37,7 +37,7 @@ fun LocalVisionConfigurationScreen(container: AppContainer, seg: Boolean, onTest
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(if (seg) "本地气泡分割与文字区域检测" else "本地文字检测与识别模型", style = MaterialTheme.typography.titleMedium)
             Text(if (seg) "SEG 检测气泡与游离文字区域，OCR 或视觉 API 将所选区域转为文本。"
-                else "文字检测与文字识别共用并发数和加速方式；工作流中的文字检测由 SEG 步骤调用。", style = MaterialTheme.typography.bodySmall)
+                else "文字检测与文字识别共用全局并发上限和加速方式，按分块范围及 OCR 节点需求加载。", style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("并发数")
                 Box {

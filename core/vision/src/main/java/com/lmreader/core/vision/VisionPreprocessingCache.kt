@@ -63,7 +63,8 @@ class VisionPreprocessingCache(private val root: File, private val limitBytes: (
 
     suspend fun segment(imageId: String, sourceHash: String, width: Int, height: Int, threshold: Float,
         detectionThreshold: Float, scope: SegTextScope = SegTextScope.ALL, compute: suspend () -> SegResult): SegResult {
-        val key = key("seg", imageId, sourceHash, width, height, threshold, detectionThreshold, scope)
+        val key = key(if (scope == SegTextScope.BUBBLES) "seg-bubbles-only-v2" else "seg",
+            imageId, sourceHash, width, height, threshold, detectionThreshold, scope)
         rememberKey(key, imageId)
         return stripes[(key.hashCode() and Int.MAX_VALUE) % stripes.size].withLock {
             val cached = read(key)?.let { json -> runCatching {

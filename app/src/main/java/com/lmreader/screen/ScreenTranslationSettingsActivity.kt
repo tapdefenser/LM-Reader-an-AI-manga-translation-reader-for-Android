@@ -244,6 +244,7 @@ internal fun ScreenTranslationSettingsScreen(container: AppContainer, onBack: ()
             HorizontalDivider(); Text("屏幕翻译独立资源", style = MaterialTheme.typography.titleMedium)
             Text("默认预处理下一画面，最多两张画面同时处理。上一张 SEG/OCR 就绪且提交间隔已到，才取下一张；两张占满时等待完成，缓存不足时暂停取图。", style = MaterialTheme.typography.bodySmall)
             Text("以下 SEG、OCR 和缓存设置只用于屏幕翻译。引擎已启动时，设置和已保存的工作流修改会自动生效，只更新有变化的资源。", style = MaterialTheme.typography.bodySmall)
+            Text("并行数与“API 与翻译引擎”共用全局设置，多个任务共享额度。", style = MaterialTheme.typography.bodySmall)
             ScreenChoice("SEG 并行数", if (config.vision.segConcurrency == 0) "自动" else config.vision.segConcurrency.toString(), (0..8).map { it.toString() to if (it == 0) "自动" else it.toString() }) { value -> update { it.copy(vision = it.vision.copy(segConcurrency = value.toInt())) } }
             ScreenChoice("OCR 并行数", if (config.vision.ocrConcurrency == 0) "自动" else config.vision.ocrConcurrency.toString(), (0..8).map { it.toString() to if (it == 0) "自动" else it.toString() }) { value -> update { it.copy(vision = it.vision.copy(ocrConcurrency = value.toInt())) } }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("SEG GPU 加速"); Switch(config.vision.segGpu, { value -> update { it.copy(vision = it.vision.copy(segGpu = value)) } }) }
