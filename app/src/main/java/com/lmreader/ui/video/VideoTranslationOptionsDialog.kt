@@ -137,7 +137,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                 target = loaded.target
                 frameWorkflowId = loaded.frameWorkflowId
                 subtitleWorkflowId = loaded.subtitleWorkflowId
-                fpsKey = FPS_CHOICES.firstOrNull { it.rate == savedRate }?.key ?: "1/1"
+                fpsKey = FPS_CHOICES.firstOrNull { it.rate == savedRate }?.key ?: "${savedRate.numerator}/${savedRate.denominator}"
                 startText = formatTimecode(loaded.startMs)
                 endText = (loaded.endMs.takeIf { it > 0 } ?: durationMs.takeIf { it > 0 })?.let(::formatTimecode).orEmpty()
                 maxDimensionText = loaded.maxDimension.coerceAtLeast(1).toString()
@@ -177,7 +177,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     val llmProfiles = remember(apiProfiles) { apiProfiles.filter { it.kind == ApiProfileKind.LLM } }
     val frameNeeded = mode != "SUBTITLE"
     val subtitleNeeded = mode != "FRAME"
-    val rate = FPS_CHOICES.firstOrNull { it.key == fpsKey }?.rate ?: VideoSamplingRate.ONE_FPS
+    val rate = runCatching { val parts = fpsKey.split("/"); VideoSamplingRate(parts[0].toInt(), parts[1].toInt()) }.getOrDefault(VideoSamplingRate.ONE_FPS)
     val segTextScope = SegTextScope.entries.firstOrNull { it.name == segTextScopeKey } ?: SegTextScope.ALL
 
     val sourceLanguage = parseLanguage(source)
@@ -393,6 +393,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                                 frameExpanded,
                                 { frameExpanded = !frameExpanded },
                             ) {
+                                Text("响应与区域", style = MaterialTheme.typography.titleMedium)
                                 Text("采样帧率", style = MaterialTheme.typography.titleSmall)
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -406,10 +407,15 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text("提高帧率可减少短暂文字遗漏，但会增加分析量；这里只统计采样位置，不估算耗时。",
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                LabeledSlider("采样间隔（截图延时）", (rate.denominator * 1000f / rate.numerator).coerceIn(100f, 2000f),
+                                    100f..2000f, 0, "${(rate.denominator * 1000f / rate.numerator).roundToInt()} ms") {
+                                    fpsKey = "1000/${it.roundToInt().coerceIn(100, 2000)}"
+                                }
+                                Text("按视频媒体时间固定采样，不受播放或识别速度影响。", style = MaterialTheme.typography.bodySmall)
                                 OutlinedTextField(
                                     value = maxDimensionText,
                                     onValueChange = { if (it.length <= 6) maxDimensionText = it },
-                                    label = { Text("分析分辨率上限") },
+                                    label = { Text("截图最长边（分析分辨率上限）") },
                                     supportingText = {
                                         Text(maxDimensionError ?: "默认 1280，只限制送入工作流的最长边。",
                                             color = if (maxDimensionError != null) MaterialTheme.colorScheme.error
@@ -420,6 +426,8 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.fillMaxWidth(),
                                 )
+                                HorizontalDivider()
+                                FrameResponseSettings(frameSettings) { frameSettingsJson = it.json().toString() }
                                 HorizontalDivider()
                                 FrameAdvancedSettings(frameSettings) { frameSettingsJson = it.json().toString() }
                             }
@@ -653,6 +661,31 @@ private fun CollapsibleSection(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+private fun FrameResponseSettings(settings: VideoFrameSettings, onChange: (VideoFrameSettings) -> Unit) {
+    LabeledSlider(
+        label = "视频 SEG 区域相似度",
+        value = settings.similarityPercent.toFloat().coerceIn(1f, 100f),
+        range = 1f..100f,
+        steps = 0,
+        display = "${settings.similarityPercent}%",
+    ) { onChange(settings.copy(similarityPercent = it.roundToInt().coerceIn(1, 100))) }
+    Text("用于把当前画面区域与上一帧的跟踪结果匹配；默认 60%。",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+    LabeledSlider("新增区域上下文", settings.overlapPixels.toFloat(), 0f..256f, 0, "${settings.overlapPixels} px") {
+        onChange(settings.copy(overlapPixels = it.roundToInt().coerceIn(0, 256)))
+    }
+    Text("为识别区域保留裁图边距；不扩大画面遮罩。单位为分析画面像素。", style = MaterialTheme.typography.bodySmall)
+    LabeledSlider("视频识别区域上缘", settings.topPercent.toFloat(), 0f..(settings.bottomPercent - 5).toFloat(), 0, "${settings.topPercent}%") {
+        onChange(settings.copy(topPercent = it.roundToInt().coerceIn(0, settings.bottomPercent - 5)))
+    }
+    LabeledSlider("视频识别区域下缘", settings.bottomPercent.toFloat(), (settings.topPercent + 5).toFloat()..100f, 0, "${settings.bottomPercent}%") {
+        onChange(settings.copy(bottomPercent = it.roundToInt().coerceIn(settings.topPercent + 5, 100)))
+    }
+    Text("只分析上下缘之间的原画面；成果坐标仍对应完整视频。", style = MaterialTheme.typography.bodySmall)
+}
+
+@Composable
 private fun FrameAdvancedSettings(
     settings: VideoFrameSettings,
     onChange: (VideoFrameSettings) -> Unit,
@@ -680,15 +713,6 @@ private fun FrameAdvancedSettings(
         display = "${(settings.freeTextMergeGapRatio * 100f).roundToInt()}%",
     ) { onChange(settings.copy(freeTextMergeGapRatio = it / 100f)) }
     Text("阈值影响之后的新识别；行间合并距离 0 表示逐行独立，100% 表示允许一行字高的间隔。",
-        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    LabeledSlider(
-        label = "视频区域相似度",
-        value = settings.similarityPercent.toFloat().coerceIn(1f, 100f),
-        range = 1f..100f,
-        steps = 0,
-        display = "${settings.similarityPercent}%",
-    ) { onChange(settings.copy(similarityPercent = it.roundToInt().coerceIn(1, 100))) }
-    Text("用于把当前画面区域与上一帧的跟踪结果匹配；默认 60%。",
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
     HorizontalDivider()

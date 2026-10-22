@@ -69,7 +69,9 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
         // Legacy queued tasks have no frame-settings snapshot and keep their prior
         // identity. Saving options must not invalidate or replace an existing task.
         val trackingIdentity = "video-surface-v3:$analysisIdentity" +
-            frameSettings?.let { ":similarity=${it.similarityPercent}" }.orEmpty()
+            frameSettings?.let { ":similarity=${it.similarityPercent}" +
+                if (it.topPercent != 0 || it.bottomPercent != 100 || it.overlapPixels != 0)
+                    ":area=${it.topPercent}-${it.bottomPercent}:context=${it.overlapPixels}" else "" }.orEmpty()
         identity = workflowResultIdentity(p, settings, container.translationModels.installedPacks.value.values.toList(),
             vision.modelIdentities, visionSettings, trackingIdentity)
         val routes = p.localTranslationRoutes(from, to)
@@ -81,9 +83,32 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
     override suspend fun detect(bitmap: Bitmap, positionMs: Long): WorkflowPageSegmentation? {
         if(!workflow.program.uses(WorkflowKind.SEG)) return null
         val id = pageId(positionMs)
-        val result = vision.segment(id, bitmap, settings.segThreshold, settings.textDetectionThreshold,
-            sourceSha256 = bitmapHash(bitmap), scope = settings.segTextScope) {}
-        return WorkflowPageSegmentation(result, selectSegRegions(result, settings.segTextScope, settings.freeTextMergeGapRatio))
+        val area = analysisArea(bitmap)
+        val top = area.top.toInt(); val bottom = area.bottom.toInt().coerceAtLeast(top + 1)
+        val crop = if (top == 0 && bottom == bitmap.height) bitmap else
+            Bitmap.createBitmap(bitmap, 0, top, bitmap.width, bottom - top)
+        val segmented = try { vision.segment(id, crop, settings.segThreshold, settings.textDetectionThreshold,
+            sourceSha256 = bitmapHash(crop), scope = settings.segTextScope) {} }
+            finally { if (crop !== bitmap) crop.recycle() }
+        fun mapped(region: SegRegion) = region.copy(bounds = region.bounds.offset(0f, top.toFloat()),
+            contour = region.contour.map { PixelPoint(it.x, it.y + top) },
+            extractionBounds = region.extractionBounds?.offset(0f, top.toFloat()))
+        val result = segmented.copy(width = bitmap.width, height = bitmap.height,
+            regions = segmented.regions.map(::mapped), textLines = segmented.textLines.map { it.copy(bounds = it.bounds.offset(0f, top.toFloat())) })
+        val context = (frameSettings?.overlapPixels ?: 0).toFloat()
+        val selected = selectSegRegions(result, settings.segTextScope, settings.freeTextMergeGapRatio).map { region ->
+            val box = region.extractionBounds ?: region.bounds
+            region.copy(extractionBounds = PixelRect((box.left - context).coerceAtLeast(0f),
+                (box.top - context).coerceAtLeast(area.top), (box.right + context).coerceAtMost(area.right),
+                (box.bottom + context).coerceAtMost(area.bottom)))
+        }
+        return WorkflowPageSegmentation(result, selected)
+    }
+    private fun analysisArea(bitmap: Bitmap): PixelRect {
+        val config = frameSettings
+        val top = (bitmap.height * (config?.topPercent ?: 0) / 100).coerceAtMost(bitmap.height - 1)
+        val bottom = (bitmap.height * (config?.bottomPercent ?: 100) / 100).coerceIn(top + 1, bitmap.height)
+        return PixelRect(0f, top.toFloat(), bitmap.width.toFloat(), bottom.toFloat())
     }
     override suspend fun frame(bitmap: Bitmap, positionMs: Long) = frame(bitmap, positionMs, null, emptySet())
     override suspend fun frame(bitmap: Bitmap, positionMs: Long, detection: WorkflowPageSegmentation?, retained: Set<String>): ReaderPageTranslation {
@@ -102,11 +127,17 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
         }
         // Whole-page API/OCR nodes must not receive retained source text either.
         val input = currentCoroutineContext()[VideoFrameInput]
+        val area = analysisArea(bitmap)
+        val needsCopy = retained.isNotEmpty() || area.top > 0 || area.bottom < bitmap.height
         val inputBytes = (input?.sourceBytes ?: 0L) +
-            (if (retained.isNotEmpty()) bitmap.allocationByteCount.toLong() else 0L)
+            (if (needsCopy) bitmap.allocationByteCount.toLong() else 0L)
         input?.lease?.resizeForPage(inputBytes + videoSegmentationBytes(detection))
-        val working = if(retained.isNotEmpty()) bitmap.copy(Bitmap.Config.ARGB_8888, true) else bitmap
+        val working = if(needsCopy) bitmap.copy(Bitmap.Config.ARGB_8888, true) else bitmap
         try {
+        if (working !== bitmap && (area.top > 0 || area.bottom < bitmap.height)) {
+            com.lmreader.screen.maskedScreenCrop(working,
+                PixelRect(0f, 0f, working.width.toFloat(), working.height.toFloat()), listOf(area), copy = false)
+        }
         if(working !== bitmap && detection != null) {
             val remaining = detection.regions.filterNot { it.id in retained }
             val excluded = detection.regions.filter { it.id in retained }.flatMap {

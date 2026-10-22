@@ -19,8 +19,13 @@ data class VideoFrameSettings(
     val freeTextMergeGapRatio: Float = DEFAULT_FREE_TEXT_MERGE_GAP_RATIO,
     val similarityPercent: Int = 60,
     val render: BubbleRenderSettings = BubbleRenderSettings(),
+    val overlapPixels: Int = 0,
+    val topPercent: Int = 0,
+    val bottomPercent: Int = 100,
 ) {
     init {
+        require(overlapPixels in 0..256)
+        require(topPercent in 0..95 && bottomPercent in 5..100 && bottomPercent - topPercent >= 5)
         require(segThreshold.isFinite() && segThreshold in 0f..1f) {
             "segThreshold 必须在 0..1 之间"
         }
@@ -41,6 +46,7 @@ data class VideoFrameSettings(
         .put("freeTextMergeGapRatio", freeTextMergeGapRatio.toDouble())
         .put("similarityPercent", similarityPercent)
         .put("render", render.toJson())
+        .put("overlapPixels", overlapPixels).put("topPercent", topPercent).put("bottomPercent", bottomPercent)
 
     companion object {
         /**
@@ -53,6 +59,9 @@ data class VideoFrameSettings(
             freeTextMergeGapRatio = json.floatValue("freeTextMergeGapRatio", DEFAULT_FREE_TEXT_MERGE_GAP_RATIO),
             similarityPercent = json.intValue("similarityPercent", 60),
             render = json.renderSettings(),
+            overlapPixels = json.intValue("overlapPixels", 0),
+            topPercent = json.intValue("topPercent", 0),
+            bottomPercent = json.intValue("bottomPercent", 100),
         )
     }
 }
