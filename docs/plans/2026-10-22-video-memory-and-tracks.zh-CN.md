@@ -62,4 +62,14 @@
 
 600 点压力测试使用真实调度/Room/成果发布路径及可控帧源、可控翻译引擎，不代表已验证真实长视频、ARM SEG/OCR/GPU 或画面与 ASR 同时运行的峰值。手机回来后需用原媒体和原配置复测，必要时记录前 1/2/3/10 帧内存、crash log 和进程退出原因，区分 Java OOM、native 信号和系统回收。
 
-本轮未生成或安装新的签名 Release，版本号保持不变；原有 Release APK 不包含本轮修正。
+上述实现验证阶段未生成或安装新的签名 Release。后续手机交付结果如下。
+
+## 手机 Release 交付（14:07）
+
+用户提供 `192.168.1.38:42119` 并明确要求 DS 安装 Release。本地 DS 使用既有脚本增量执行 `assembleRelease`、`lintRelease` 和原证书签名，构建 4 分 40 秒成功；711 份源码输入在打包前后保持一致，对应提交 `53b4b20`。版本继续为 `0.1.12` / 14，包名 `com.lmreader`，APK 不可调试。
+
+DS 在 Xiaomi `24031PN0DC`（Android 16、arm64-v8a）上以 `adb install -r` 覆盖安装，返回 `Success`。手机内 APK 与本地签名 APK 的 SHA-256 均为 `5ef806a12be2d1291be2be96d708cc589a4fafbe095100ee824e72e9bbad3f30`；证书 SHA-256 保持 `8b1051b89d4e4bf8c423e4f7a2ad19e9ef1cfce3cd19041997a75b838b65ecc7`。
+
+首次安装时间仍为 `2026-10-02 11:43:04`，更新时间为 `2026-10-22 14:07:16`；未卸载或清数据，没有读取核验用户数据内容。启动返回成功，6 秒后应用进程仍在。Codex 独立核对了原始构建、签名、包信息、安装输出及手机 APK 哈希。
+
+交付 APK 和原始证据位于 `.scratch/video-feedback-20261022-latest/release/`，详见 `ds-delivery.md`、`installation-verification.json` 和 `phone-*.log`。长视频及真实模型的功能复测交由用户进行，以上安装与启动检查不能替代该复测。
