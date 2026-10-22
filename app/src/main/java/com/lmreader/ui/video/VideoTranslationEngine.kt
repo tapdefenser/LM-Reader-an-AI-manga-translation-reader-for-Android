@@ -82,8 +82,14 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
             vision.modelIdentities, visionSettings, trackingIdentity)
         val routes = p.localTranslationRoutes(from, to)
         container.localTranslator.prepareEngineModels(owner, routes)
-        if (p.inputScenario == WorkflowInputScenario.IMAGE) vision.reconfigure(p.uses(WorkflowKind.SEG), languages,
-            needTextDetection = p.uses(WorkflowKind.SEG) || languages.isNotEmpty())
+        val imageInput = p.inputScenario == WorkflowInputScenario.IMAGE
+        val regions = imageInput && p.uses(WorkflowKind.SEG)
+        // A SEG node also performs text detection. FREE_TEXT needs that detector,
+        // but never the bubble segmentation model. Reconcile this owner's exact
+        // demand; the shared pools preserve models still needed by other owners.
+        vision.reconfigure(regions && textScope != SegTextScope.FREE_TEXT,
+            if (imageInput) languages else emptySet(),
+            needTextDetection = regions || (imageInput && languages.isNotEmpty()))
         vision.setPreprocessingCacheLimit(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576)
     }
     override fun pageId(positionMs: Long) = "video:${project.id}:${project.sha256}:$positionMs:$identity"
