@@ -7,7 +7,6 @@ import com.lmreader.core.storage.reader.*
 import com.lmreader.core.vision.*
 import com.lmreader.core.workflow.*
 import com.lmreader.di.AppContainer
-import com.lmreader.ui.queue.TranslationCacheBudget
 import com.lmreader.ui.reader.translation.*
 import com.lmreader.ui.workflow.*
 import kotlinx.coroutines.*
@@ -18,6 +17,7 @@ import java.util.UUID
 
 interface VideoFrameEngine {
     val identity: String
+    suspend fun configure(settings: VideoFrameSettings) {}
     suspend fun prepare()
     suspend fun frame(bitmap: Bitmap, positionMs: Long): ReaderPageTranslation
     fun pageId(positionMs: Long): String = error("This frame engine does not expose offline page identity")
@@ -35,7 +35,9 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
     val vision = LocalVisionEngine(container.application, "video-analysis-cache/${project.id}") { container.visionExecutionPreferences.settings.value }
     private lateinit var settings: WorkflowRunSettings
     override lateinit var identity: String; private set
-    private val budget = TranslationCacheBudget(64L * 1_048_576, container.imageCacheBudget)
+    private val budget = container.imageCacheBudget
+    private var frameSettings: VideoFrameSettings? = null
+    override suspend fun configure(settings: VideoFrameSettings) { frameSettings = settings }
     override suspend fun prepare() {
         val p = workflow.program
         val validation = WorkflowValidator.validate(p)
@@ -67,15 +69,22 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
             }
             LocalPageTranslator.ocrLanguage(lang)
         }.toSet()
-        settings = WorkflowRunSettings(from, to, "", container.bubbleRenderPreferences.settings.first(), .35f, profiles,
-            segTextScope = textScope)
+        val frame = frameSettings ?: VideoFrameSettings(render = container.bubbleRenderPreferences.settings.first(),
+            similarityPercent = container.screenTranslation.preferences.settings.value.videoSimilarityPercent)
+        settings = WorkflowRunSettings(from, to, "", frame.render, frame.segThreshold, profiles,
+            segTextScope = textScope, textDetectionThreshold = frame.textDetectionThreshold,
+            freeTextMergeGapRatio = frame.freeTextMergeGapRatio)
+        // Legacy queued tasks have no frame-settings snapshot and keep their prior
+        // identity. Saving options must not invalidate or replace an existing task.
+        val trackingIdentity = "video-surface-v3:$analysisIdentity" +
+            frameSettings?.let { ":similarity=${it.similarityPercent}" }.orEmpty()
         identity = workflowResultIdentity(p, settings, container.translationModels.installedPacks.value.values.toList(),
-            vision.modelIdentities, visionSettings, "video-surface-v3:$analysisIdentity")
+            vision.modelIdentities, visionSettings, trackingIdentity)
         val routes = p.localTranslationRoutes(from, to)
         container.localTranslator.prepareEngineModels(owner, routes)
         if (p.inputScenario == WorkflowInputScenario.IMAGE) vision.reconfigure(p.uses(WorkflowKind.SEG), languages,
             needTextDetection = p.uses(WorkflowKind.SEG) || languages.isNotEmpty())
-        vision.setPreprocessingCacheLimit(32L * 1_048_576)
+        vision.setPreprocessingCacheLimit(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576)
     }
     override fun pageId(positionMs: Long) = "video:${project.id}:${project.sha256}:$positionMs:$identity"
     override suspend fun detect(bitmap: Bitmap, positionMs: Long): WorkflowPageSegmentation? {
@@ -101,7 +110,12 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
             override suspend fun open(page: ReaderPage): InputStream = error("视频帧只在内存中可用")
         }
         // Whole-page API/OCR nodes must not receive retained source text either.
+        val input = currentCoroutineContext()[VideoFrameInput]
+        val inputBytes = (input?.sourceBytes ?: 0L) +
+            (if (retained.isNotEmpty()) bitmap.allocationByteCount.toLong() else 0L)
+        input?.lease?.resizeForPage(inputBytes + videoSegmentationBytes(detection))
         val working = if(retained.isNotEmpty()) bitmap.copy(Bitmap.Config.ARGB_8888, true) else bitmap
+        try {
         if(working !== bitmap && detection != null) {
             val remaining = detection.regions.filterNot { it.id in retained }
             val excluded = detection.regions.filter { it.id in retained }.flatMap {
@@ -114,7 +128,9 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
         val host = object : AndroidWorkflowHost(container.application, container, owner, project.name,
             listOf(WorkflowChapterInput("video-frame:${project.id}", "${positionMs}ms", source, listOf(page))), settings, budget,
             reusePages = false, requestOrigin = "本地视频画面", vision = vision, ephemeral = true,
-            pageImages = mapOf(id to WorkflowPageImage(working, hash))) {
+            pageImages = mapOf(id to WorkflowPageImage(working, hash, input?.lease,
+                if (input == null) working.allocationByteCount.toLong() else inputBytes,
+                videoSegmentationBytes(detection)))) {
             override suspend fun segmentPage(pageId: String, bitmap: Bitmap, sha256: String, frame: WorkflowFrame): WorkflowPageSegmentation =
                 detection?.copy(regions = detection.regions.filterNot { it.id in retained }, sha256 = hash)
                     ?: super.segmentPage(pageId, bitmap, sha256, frame)
@@ -122,7 +138,8 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
         try {
             WorkflowRuntime(workflow.parallelLimit, workflow.retries).execute(workflow.program, host)
             return host.published[id] ?: error("工作流没有生成画面成果")
-        } finally { host.close(); if(working !== bitmap) working.recycle() }
+        } finally { host.close() }
+        } finally { if(working !== bitmap) working.recycle() }
     }
     suspend fun subtitles(cues: List<VideoSubtitleCue>, resources: VideoSentenceResources? = null,
         progress: suspend (VideoSubtitleCue, Int, Int) -> Unit): List<VideoSubtitleCue> {

@@ -39,7 +39,11 @@ object VideoPlayerTools : VideoPlayerToolHost {
     }
 }
 
-private data class TimedMask(val overlay: BubbleOverlay, val width: Int, val height: Int, val start: Long, val end: Long)
+internal data class VideoMaskKey(val pageId: String, val revision: String, val region: PageTranslatedRegion,
+    val render: BubbleRenderSettings, val width: Int, val height: Int)
+internal data class VideoMaskPlan(val key: VideoMaskKey, val start: Long, val end: Long)
+internal data class TimedMask(val overlay: BubbleOverlay, val width: Int, val height: Int, val start: Long, val end: Long,
+    val key: VideoMaskKey)
 private data class PreparedScene(val videoId: String, val atMs: Long, val masks: List<TimedMask>, val luma: FloatArray?)
 
 @Composable internal fun VideoSavedOverlays(container: AppContainer, id: String, positionMs: Long, player: Player, enabled: Boolean) {
@@ -50,8 +54,9 @@ private data class PreparedScene(val videoId: String, val atMs: Long, val masks:
     val catalog = rows.firstOrNull { it.videoId == id }
     val settings by container.videoResults.results().observeSettings(id).collectAsStateWithLifecycle(null)
     val cues by container.videoResults.results().observeCues(id).collectAsStateWithLifecycle(emptyList())
-    val regionRows by remember(id, project?.sha256) {
-        container.videoResults.results().observeRegions(id, project?.sha256.orEmpty())
+    val windowStart = positionMs.coerceAtLeast(0) / 400 * 400
+    val regionRows by remember(id, project?.sha256, windowStart) {
+        container.videoResults.results().observeRegionsInWindow(id, project?.sha256.orEmpty(), windowStart, windowStart + 400)
     }.collectAsStateWithLifecycle(emptyList())
     val tasks by container.taskScheduler.tasks.collectAsStateWithLifecycle(emptyList())
     val globalStyle by container.preferences.videoSubtitleStyle.collectAsStateWithLifecycle("{}")
@@ -75,31 +80,24 @@ private data class PreparedScene(val videoId: String, val atMs: Long, val masks:
         val preferred = JSONObject(settings?.json ?: "{}").optString("frameIdentity")
         val chosen = candidates.firstOrNull { it.identity == preferred } ?: candidates.firstOrNull()
         val identity = preferred.ifBlank { chosen?.identity.orEmpty() }
-        val similarity = container.screenTranslation.preferences.settings.value.videoSimilarityPercent
-        val intervals = if(enabled) resultDao.regionsAtIdentity(id, project.sha256, identity, now)
-            .sortedWith(compareByDescending<com.lmreader.core.database.media.VideoRegionInterval> { it.manualTiming }.thenByDescending { it.startMs })
-            .distinctBy { it.trackId } else emptyList()
-        if(intervals.isEmpty() && !style.optBoolean("smartColor")) { scene = PreparedScene(id, now, emptyList(), null); return@LaunchedEffect }
+        val plans = if(enabled) loadVideoMaskPlans(container, id, project.sha256, identity, now) else emptyList()
+        val cachedMasks = scene?.takeIf { it.videoId == id }?.masks.orEmpty().associateBy { it.key }
+        if(plans.all { it.key in cachedMasks } && !style.optBoolean("smartColor")) {
+            scene = PreparedScene(id, now, plans.map { cachedMasks.getValue(it.key).copy(start = it.start, end = it.end) }, null)
+            return@LaunchedEffect
+        }
         val frame = try { decoder.frameAt(now * 1000) } catch(e: CancellationException) { throw e }
             catch(_: Exception) { scene = null; return@LaunchedEffect } ?: return@LaunchedEffect
         try {
-            val observations = intervals.associate { time -> time.intervalId to
-                resultDao.observationAt(id, project.sha256, identity, time.trackId, now * 1000) }
-            val anchors = intervals.associate { time -> time.intervalId to
-                resultDao.observationAt(id, project.sha256, identity, time.trackId, time.anchorUs ?: (time.observedStartMs * 1000 + 999)) }
             val masks = withContext(Dispatchers.Default) {
-                intervals.groupBy { it.pageId }.flatMap { (pageId, times) ->
-                    val saved = container.videoLibrary.artifacts(id).current(pageId) ?: return@flatMap emptyList()
-                    val proof = VideoFrameProof.load(container.videoLibrary.proofs(id), pageId)
-                    val scaled = if(frame.bitmap.width == saved.width && frame.bitmap.height == saved.height) frame.bitmap else Bitmap.createScaledBitmap(frame.bitmap, saved.width, saved.height, true)
-                    try { times.mapNotNull { time ->
-                        val original = saved.regions.firstOrNull { it.region.id == time.regionId } ?: return@mapNotNull null
-                        val observation = observations[time.intervalId]
-                        if(!time.manualTiming && (observation?.matches(frame.bitmap, similarity)
-                                ?: proof?.matches(frame.bitmap, saved.copy(regions = listOf(original)), similarity)) != true) return@mapNotNull null
-                        val region = if(observation != null) moveVideoRegion(original, anchors[time.intervalId], observation, saved.width, saved.height) else original
-                        TimedMask(BubbleMaskRenderer().prepare(scaled, listOf(region), saved.renderSettings), saved.width, saved.height, time.startMs, time.endMs)
-                    } } finally { if(scaled !== frame.bitmap) scaled.recycle() }
+                plans.map { plan ->
+                    cachedMasks[plan.key]?.copy(start = plan.start, end = plan.end) ?: run {
+                        val key = plan.key
+                        val scaled = if(frame.bitmap.width == key.width && frame.bitmap.height == key.height) frame.bitmap
+                            else Bitmap.createScaledBitmap(frame.bitmap, key.width, key.height, true)
+                        try { TimedMask(BubbleMaskRenderer().prepare(scaled, listOf(key.region), key.render), key.width, key.height, plan.start, plan.end, key) }
+                        finally { if(scaled !== frame.bitmap) scaled.recycle() }
+                    }
                 }
             }
             val luma = if(style.optBoolean("smartColor") && decoder.colorSamplingReliable) FloatArray(40 * 24) { i ->
@@ -118,6 +116,27 @@ private data class PreparedScene(val videoId: String, val atMs: Long, val masks:
             size.width * size.pixelWidthHeightRatio, size.height.toFloat(), ready && style.optBoolean("enabled", true))
     })
 }
+
+/** The player's only authority is the saved timeline; it never compares source pixels. */
+internal suspend fun loadVideoMaskPlans(container: AppContainer, id: String, sourceHash: String, identity: String,
+    atMs: Long): List<VideoMaskPlan> = withContext(Dispatchers.IO) {
+    val dao = container.videoResults.results()
+    val intervals = dao.regionsAtIdentity(id, sourceHash, identity, atMs)
+        .sortedWith(compareByDescending<com.lmreader.core.database.media.VideoRegionInterval> { it.manualTiming }.thenByDescending { it.startMs })
+        .distinctBy { it.trackId }
+    intervals.groupBy { it.pageId }.flatMap { (pageId, times) ->
+        val saved = container.videoLibrary.artifacts(id).current(pageId) ?: return@flatMap emptyList()
+        times.mapNotNull { time ->
+            val original = saved.regions.firstOrNull { it.region.id == time.regionId } ?: return@mapNotNull null
+            val current = dao.observationAt(id, sourceHash, identity, time.trackId, atMs * 1000)
+            val anchor = current?.let { dao.observationAt(id, sourceHash, identity, time.trackId,
+                time.anchorUs ?: (time.observedStartMs * 1000 + 999)) }
+            val region = if(current == null) original else moveVideoRegion(original, anchor, current, saved.width, saved.height)
+            VideoMaskPlan(VideoMaskKey(pageId, saved.revision, region, saved.renderSettings, saved.width, saved.height), time.startMs, time.endMs)
+        }
+    }
+}
+
 
 private class VideoResultOverlayView(context: Context) : View(context) {
     private var id = ""; private var positionMs = 0L; private var scene: PreparedScene? = null

@@ -29,7 +29,9 @@ import kotlin.math.floor
 
 data class WorkflowChapterInput(val id: String, val name: String, val source: PageSource, val pages: List<ReaderPage>)
 /** Borrowed input: its caller keeps it alive until the host closes. */
-data class WorkflowPageImage(val bitmap: Bitmap, val sha256: String)
+data class WorkflowPageImage(val bitmap: Bitmap, val sha256: String,
+    val budgetLease: TranslationCacheBudget.Lease? = null,
+    val retainedBytes: Long = bitmap.allocationByteCount.toLong(), val preprocessedBytes: Long = 0)
 data class WorkflowPageSegmentation(val result: SegResult, val regions: List<SegRegion>, val sha256: String? = null)
 data class WorkflowRunSettings(val source: LocalTranslationLanguage, val target: LocalTranslationLanguage,
     val style: String, val render: BubbleRenderSettings, val segThreshold: Float, val apiProfiles: List<ApiProfile> = emptyList(),
@@ -68,6 +70,8 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         val ocrBytes = ConcurrentHashMap<String, Long>()
         var cachePinned = false
         var ownsBitmap = true
+        var ownsLease = true
+        var borrowedBytes = 0L
         val recognized = ConcurrentHashMap<String, LocalOcrResult>()
     }
     private val states = ConcurrentHashMap<String, ImageState>()
@@ -466,16 +470,22 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
             if (state.bitmap == null) {
                 val loadingStarted = System.nanoTime()
                 state.releaseWhenIdle = false
-                val lease = state.lease ?: acquireBitmapLease().also { state.lease = it }
+                val borrowed = pageImages[id]
+                check(borrowed == null || !borrowed.bitmap.isRecycled) { "借用的原始图片已释放" }
+                val lease = state.lease ?: (borrowed?.budgetLease ?: acquireBitmapLease()).also {
+                    state.lease = it
+                    state.ownsLease = borrowed?.budgetLease == null
+                    state.borrowedBytes = if (state.ownsLease) 0 else borrowed!!.retainedBytes
+                    state.resultBytes = maxOf(state.resultBytes, borrowed?.preprocessedBytes ?: 0)
+                }
                 if (!state.cachePinned) {
                     vision.preprocessingCache.markPendingPage(id)
                     vision.preprocessingCache.retainPage(id); state.cachePinned = true
                 }
                 // Reloading the original for this admitted page cannot wait on its own results.
-                lease.resizeForPage(16_000_000 + state.resultBytes + state.ocrBytes.values.sum())
+                lease.resizeForPage((if (state.ownsLease) 16_000_000 else state.borrowedBytes) + state.resultBytes + state.ocrBytes.values.sum())
                 var temporary: File? = null
                 try {
-                    val borrowed = pageImages[id]
                     if (borrowed != null && !borrowed.bitmap.isRecycled) {
                         state.bitmap = borrowed.bitmap; state.hash = segmentedHashes[id] ?: borrowed.sha256; state.ownsBitmap = false
                     } else {
@@ -650,10 +660,17 @@ open class AndroidWorkflowHost(private val context: Context, protected val conta
         } }
     }
     private suspend fun accountPage(state: ImageState) {
-        state.lease?.resizeForPage((state.bitmap?.allocationByteCount?.toLong() ?: 0L) + state.resultBytes + state.ocrBytes.values.sum())
+        state.lease?.resizeForPage(state.borrowedBytes +
+            (if (state.ownsLease) state.bitmap?.allocationByteCount?.toLong() ?: 0L else 0L) +
+            state.resultBytes + state.ocrBytes.values.sum())
     }
     private suspend fun releaseBitmap(state: ImageState) { if (state.ownsBitmap) state.bitmap?.recycle(); state.bitmap = null; accountPage(state) }
-    private suspend fun release(state: ImageState) { if (state.ownsBitmap) state.bitmap?.recycle(); state.bitmap = null; state.lease?.release(); state.lease = null }
+    private suspend fun release(state: ImageState) {
+        if (state.ownsBitmap) state.bitmap?.recycle()
+        state.bitmap = null
+        if (state.ownsLease) state.lease?.release()
+        state.lease = null
+    }
     suspend fun close() = withContext(NonCancellable) {
         preparationScope.coroutineContext.job.cancelAndJoin()
         preparedOcr.clear()

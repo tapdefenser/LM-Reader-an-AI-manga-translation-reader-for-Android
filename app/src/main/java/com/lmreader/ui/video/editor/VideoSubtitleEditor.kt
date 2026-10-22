@@ -296,7 +296,7 @@ fun VideoSubtitleEditor(
             title = { Text("保存字幕？") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("字幕尚未保存。保存后继续、不保存退出，或取消继续校对。显示样式已移到视频翻译选项。")
+                    Text("字幕尚未保存。保存后继续、不保存退出，或取消继续校对。显示样式已移到播放器右上角菜单 → 字幕。")
                     saveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 }
             },

@@ -49,6 +49,8 @@ abstract class VideoResultDao {
     abstract suspend fun deletePageRegions(id: String, pageId: String)
     @Query("SELECT * FROM video_regions WHERE videoId=:id AND sourceHash=:hash ORDER BY startMs,intervalId")
     abstract fun observeRegions(id: String, hash: String): Flow<List<VideoRegionInterval>>
+    @Query("SELECT * FROM video_regions WHERE videoId=:id AND sourceHash=:hash AND deleted=0 AND startMs<:endMs AND endMs>:startMs ORDER BY startMs,intervalId")
+    abstract fun observeRegionsInWindow(id: String, hash: String, startMs: Long, endMs: Long): Flow<List<VideoRegionInterval>>
     @Query("SELECT * FROM video_regions WHERE videoId=:id AND sourceHash=:hash ORDER BY startMs,intervalId")
     abstract suspend fun regions(id: String, hash: String): List<VideoRegionInterval>
     @Query("SELECT * FROM video_regions WHERE videoId=:id AND sourceHash=:hash AND startMs<=:timeMs AND endMs>:timeMs AND deleted=0 ORDER BY startMs,intervalId")

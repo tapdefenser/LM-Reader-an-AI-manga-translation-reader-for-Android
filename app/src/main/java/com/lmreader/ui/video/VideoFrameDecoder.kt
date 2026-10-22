@@ -13,7 +13,7 @@ import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
-/** A shared pixel lease: decoder + at most two pipeline units, never a full-video frame cache. */
+/** A shared pixel lease; the pipeline admits inputs through the common preprocessing budget. */
 class DecodedVideoFrame internal constructor(val bitmap: Bitmap, val ptsUs: Long, private val pixels: ResourceGovernor.Lease? = null) {
     private val references = AtomicInteger(1)
     internal fun retain(): DecodedVideoFrame { check(references.incrementAndGet() > 1); return this }
@@ -21,7 +21,11 @@ class DecodedVideoFrame internal constructor(val bitmap: Bitmap, val ptsUs: Long
 }
 
 /** Sequential MediaCodec decoding in media time; playback speed/seek never drives this decoder. */
-class VideoFrameDecoder(private val context: Context, private val uri: String, private val maxDimension: Int = 1280) {
+interface VideoFrameSource {
+    suspend fun frameAt(targetUs: Long): DecodedVideoFrame?
+    suspend fun close()
+}
+class VideoFrameDecoder(private val context: Context, private val uri: String, private val maxDimension: Int = 1280) : VideoFrameSource {
     private var extractor: MediaExtractor? = null
     private var codec: MediaCodec? = null
     private var inputEnded = false
@@ -60,7 +64,7 @@ class VideoFrameDecoder(private val context: Context, private val uri: String, p
             extractor = source; codec = decoder
         } catch(e: Throwable) { source.release(); throw e }
     }
-    suspend fun frameAt(targetUs: Long): DecodedVideoFrame? = gate.withLock { frameAtUnlocked(targetUs) }
+    override suspend fun frameAt(targetUs: Long): DecodedVideoFrame? = gate.withLock { frameAtUnlocked(targetUs) }
     private suspend fun frameAtUnlocked(targetUs: Long): DecodedVideoFrame? = withContext(Dispatchers.IO) {
         require(targetUs >= 0)
         ResourceGovernor.shared.use("decode") {
@@ -173,5 +177,5 @@ class VideoFrameDecoder(private val context: Context, private val uri: String, p
         pendingIndex = -1; extractor?.release(); extractor = null
         cached?.close(); cached = null; inputEnded = false; outputEnded = false; lastRequested = -1
     }
-    suspend fun close() = withContext(NonCancellable + Dispatchers.IO) { gate.withLock { reset() } }
+    override suspend fun close() = withContext(NonCancellable + Dispatchers.IO) { gate.withLock { reset() } }
 }

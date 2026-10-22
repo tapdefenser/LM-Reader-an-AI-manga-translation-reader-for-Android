@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -36,6 +37,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lmreader.MainActivity
 import com.lmreader.core.model.ApiProfile
 import com.lmreader.core.model.ApiProfileKind
+import com.lmreader.core.model.BubbleFillMode
+import com.lmreader.core.model.BubbleFont
 import com.lmreader.core.model.LocalTranslationLanguage
 import com.lmreader.core.model.SegTextScope
 import com.lmreader.core.model.TranslationWorkflow
@@ -43,17 +46,21 @@ import com.lmreader.core.model.VideoSamplingPlan
 import com.lmreader.core.model.VideoSamplingRate
 import com.lmreader.core.model.WorkflowInputScenario
 import com.lmreader.di.AppContainer
-import com.lmreader.tasks.TaskScheduler
+import com.lmreader.ui.common.LabeledSlider
 import com.lmreader.ui.i18n.Text
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
- * Per-video options editor. Reads VideoTasks.options / videoCatalog only; nothing is persisted
- * until an explicit submit or confirmed replace. Subtitle source is fixed to local ASR: the model
- * comes from Settings, so this dialog submits asrModelId=null and carries legacy audioTrack unseen.
+ * Per-video options editor. Reads VideoTasks.options / videoCatalog only; the draft is persisted
+ * solely by 保存 through VideoTasks.saveOptions. Saving never submits, replaces or requeues work:
+ * already queued/running tasks keep their captured config and a future task uses the saved draft.
+ * Subtitle source is fixed to local ASR: the model is resolved from Settings when work starts, so
+ * the saved options keep asrModelId=null and carry the legacy audioTrack unseen.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -65,8 +72,6 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     val apiProfiles by container.apiProfiles.profiles.collectAsStateWithLifecycle(initialValue = emptyList())
     val installedPacks by container.translationModels.installedPacks.collectAsStateWithLifecycle()
     val catalogs by container.translationCatalogs.state.collectAsStateWithLifecycle()
-    val schedulerTasks by container.taskScheduler.tasks.collectAsStateWithLifecycle()
-    val selectedAsrModel by container.asrModels.selectedId.collectAsStateWithLifecycle()
 
     var savedOptions by remember(videoId) { mutableStateOf<VideoWorkOptions?>(null) }
     var durationMs by remember(videoId) { mutableStateOf(0L) }
@@ -89,6 +94,12 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     var segTextScopeKey by rememberSaveable(videoId) { mutableStateOf(SegTextScope.ALL.name) }
     var frameApiProfileId by rememberSaveable(videoId) { mutableStateOf("") }
     var subtitleApiProfileId by rememberSaveable(videoId) { mutableStateOf("") }
+    var frameSettingsJson by rememberSaveable(videoId) {
+        mutableStateOf(VideoFrameSettings().json().toString())
+    }
+    val frameSettings = remember(frameSettingsJson) {
+        runCatching { VideoFrameSettings.read(JSONObject(frameSettingsJson)) }.getOrDefault(VideoFrameSettings())
+    }
     var frameExpanded by rememberSaveable(videoId) { mutableStateOf(false) }
     var rangeExpanded by rememberSaveable(videoId) { mutableStateOf(false) }
 
@@ -97,10 +108,8 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     var manualText by remember { mutableStateOf("") }
     var workflowPicker by remember { mutableStateOf<String?>(null) }
     var apiPicker by remember { mutableStateOf<String?>(null) }
-    var submitting by remember(videoId) { mutableStateOf(false) }
-    var submitError by remember(videoId) { mutableStateOf<String?>(null) }
-    var confirmReplace by remember(videoId) { mutableStateOf(false) }
-    var pendingReplaceOptions by remember(videoId) { mutableStateOf<VideoWorkOptions?>(null) }
+    var saving by remember(videoId) { mutableStateOf(false) }
+    var saveError by remember(videoId) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(videoId, reloadKey) {
         rootLoaded = false
@@ -134,6 +143,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                 maxDimensionText = loaded.maxDimension.coerceAtLeast(1).toString()
                 audioTrack = loaded.audioTrack
                 segTextScopeKey = loaded.segTextScope.name
+                frameSettingsJson = (loaded.frameSettings ?: VideoFrameSettings()).json().toString()
                 frameApiProfileId = loaded.frameApiProfileId.orEmpty()
                 subtitleApiProfileId = loaded.subtitleApiProfileId.orEmpty()
                 initialized = true
@@ -224,66 +234,45 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
         frameApiProfileId = frameApiProfileId.takeIf { frameUsesApi && it.isNotBlank() },
         subtitleApiProfileId = subtitleApiProfileId.takeIf { subtitleUsesApi && it.isNotBlank() },
         segTextScope = segTextScope,
+        frameSettings = frameSettings,
     )
     val draftCanonical = canonicalOptions(draftOptions, durationMs)
     val savedCanonical = savedOptions?.let { canonicalOptions(it, durationMs) }
-    val changed = savedCanonical != null && (savedCanonical != draftCanonical ||
-        subtitleNeeded && savedOptions?.asrModelId != selectedAsrModel)
-    val activeTasks = remember(schedulerTasks, videoId) {
-        schedulerTasks.filter { isVideoOwner(it.ownerKey, videoId) && it.state !in TaskScheduler.TERMINAL }
-    }
-    val hasActiveTasks = activeTasks.isNotEmpty()
-    val primaryLabel = if (hasActiveTasks && (changed || activeTasks.any { it.waitingReason == "CONFIG_CHANGED" })) "更新并重新排队" else "加入队列"
+    val changed = savedCanonical != null && savedCanonical != draftCanonical
 
-    fun requestSubmit() {
-        if (submitting) return
-        submitError = null
+    fun requestSave() {
+        if (saving) return
+        saveError = null
         if (!rootLoaded || !initialized) {
-            submitError = "正在读取现有选项，请稍候"
+            saveError = "正在读取现有选项，请稍候"
             return
         }
         if (errors.isNotEmpty()) {
             if (maxDimensionError != null) frameExpanded = true
             if (rangeError != null) rangeExpanded = true
-            submitError = errors.first()
+            saveError = errors.first()
             return
         }
-        submitting = true
+        saving = true
         scope.launch {
             try {
-                val latest = try {
-                    container.videoTasks.options(videoId)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    savedOptions
-                }
-                savedOptions = latest
-                val latestCanonical = latest?.let { canonicalOptions(it, durationMs) }
-                val active = container.taskScheduler.tasks.value.filter {
-                    isVideoOwner(it.ownerKey, videoId) && it.state !in TaskScheduler.TERMINAL
-                }
-                if (active.isNotEmpty() && (active.any { it.waitingReason == "CONFIG_CHANGED" } || latest == null || latestCanonical != draftCanonical ||
-                    subtitleNeeded && latest.asrModelId != selectedAsrModel)) {
-                    pendingReplaceOptions = draftOptions
-                    confirmReplace = true
-                } else {
-                    container.videoTasks.submit(videoId, draftOptions)
-                    onDismiss()
-                }
+                val saved = canonicalOptions(draftOptions, durationMs)
+                container.videoTasks.saveOptions(videoId, saved)
+                savedOptions = saved
+                onDismiss()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                submitError = e.message ?: "无法提交任务"
+                saveError = e.message ?: "无法保存视频选项"
             } finally {
-                submitting = false
+                saving = false
             }
         }
     }
 
     Dialog(
-        onDismissRequest = { if (!submitting) onDismiss() },
-        properties = DialogProperties(!submitting, !submitting, usePlatformDefaultWidth = false),
+        onDismissRequest = { if (!saving) onDismiss() },
+        properties = DialogProperties(!saving, !saving, usePlatformDefaultWidth = false),
     ) {
         Surface(
             modifier = Modifier.widthIn(max = 600.dp).fillMaxWidth(0.96f).fillMaxHeight(0.92f).imePadding(),
@@ -298,10 +287,10 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                     Column(Modifier.weight(1f)) {
                         Text("视频翻译选项", style = MaterialTheme.typography.titleLarge)
                     }
-                    TextButton(onClick = onDismiss, enabled = !submitting) { Text("关闭") }
+                    TextButton(onClick = onDismiss, enabled = !saving) { Text("关闭") }
                 }
                 HorizontalDivider()
-                if (submitting) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (saving) LinearProgressIndicator(Modifier.fillMaxWidth())
 
                 if (!rootLoaded) {
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -395,7 +384,6 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             TextButton(onClick = { startSettingsActivity(context, "asr") }) { Text("本地 ASR 设置") }
                         }
-                        VideoSubtitleDisplaySettings(container, videoId)
 
                         if (frameNeeded) {
                             CollapsibleSection(
@@ -432,6 +420,8 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.fillMaxWidth(),
                                 )
+                                HorizontalDivider()
+                                FrameAdvancedSettings(frameSettings) { frameSettingsJson = it.json().toString() }
                             }
                         }
 
@@ -467,26 +457,22 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                     HorizontalDivider()
                     Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val footerMessage = submitError ?: errors.firstOrNull()
+                        val footerMessage = saveError ?: errors.firstOrNull()
                         if (footerMessage != null) {
                             Text(footerMessage, color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodySmall)
                         } else {
-                            Text(if (changed) "配置已修改，提交后才会保存并排队。" else "当前与已保存配置相同。",
+                            Text(if (changed) "保存只更新本视频选项；已排队或进行中的任务保持原配置，之后新建的任务使用新配置。"
+                                else "当前与已保存配置相同。保存不会创建、替换或重新排队任务。",
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        if (hasActiveTasks) {
-                            Text(if (changed) "检测到活动任务；提交前会确认并用新配置重新排队。"
-                                else "检测到活动任务；配置未变时提交会复用现有任务。",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Spacer(Modifier.weight(1f))
-                            TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
-                            Button({ requestSubmit() }, enabled = rootLoaded && initialized && !submitting,
+                            TextButton(onClick = onDismiss, enabled = !saving) { Text("取消") }
+                            Button({ requestSave() }, enabled = rootLoaded && initialized && !saving,
                                 modifier = Modifier.weight(1f, fill = false)) {
-                                Text(if (submitting) "提交中…" else primaryLabel, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text("保存", maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
@@ -570,48 +556,6 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
             selectedId = if (isFrame) frameWorkflowId else subtitleWorkflowId,
             onSelect = { if (isFrame) frameWorkflowId = it else subtitleWorkflowId = it; workflowPicker = null },
             onDismiss = { workflowPicker = null },
-        )
-    }
-
-    val pending = pendingReplaceOptions
-    if (confirmReplace && pending != null) {
-        AlertDialog(
-            onDismissRequest = {
-                if (!submitting) { confirmReplace = false; pendingReplaceOptions = null }
-            },
-            title = { Text("更新并重新排队？") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("检测到本视频已有活动任务，配置已改变。继续会停止旧任务并按新配置重新排队。")
-                    Text("处理范围：${formatTimecode(pending.startMs)} – ${formatTimecode(pending.endMs)}",
-                        style = MaterialTheme.typography.bodySmall)
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = !submitting, onClick = {
-                    confirmReplace = false
-                    pendingReplaceOptions = null
-                    submitting = true
-                    scope.launch {
-                        try {
-                            container.videoTasks.replace(videoId, pending)
-                            onDismiss()
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            submitError = e.message ?: "无法更新任务"
-                        } finally {
-                            submitting = false
-                        }
-                    }
-                }) { Text("更新并重新排队") }
-            },
-            dismissButton = {
-                TextButton(enabled = !submitting, onClick = {
-                    confirmReplace = false
-                    pendingReplaceOptions = null
-                }) { Text("取消") }
-            },
         )
     }
 }
@@ -707,6 +651,111 @@ private fun CollapsibleSection(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FrameAdvancedSettings(
+    settings: VideoFrameSettings,
+    onChange: (VideoFrameSettings) -> Unit,
+) {
+    Text("识别与分组", style = MaterialTheme.typography.titleSmall)
+    LabeledSlider(
+        label = "Seg 判定阈值",
+        value = (settings.segThreshold * 100f).coerceIn(5f, 95f),
+        range = 5f..95f,
+        steps = 0,
+        display = "${(settings.segThreshold * 100f).roundToInt()}%",
+    ) { onChange(settings.copy(segThreshold = it / 100f)) }
+    LabeledSlider(
+        label = "文字检测置信度阈值",
+        value = (settings.textDetectionThreshold * 100f).coerceIn(5f, 95f),
+        range = 5f..95f,
+        steps = 0,
+        display = "${(settings.textDetectionThreshold * 100f).roundToInt()}%",
+    ) { onChange(settings.copy(textDetectionThreshold = it / 100f)) }
+    LabeledSlider(
+        label = "游离文字行间合并距离",
+        value = (settings.freeTextMergeGapRatio * 100f).coerceIn(0f, 200f),
+        range = 0f..200f,
+        steps = 0,
+        display = "${(settings.freeTextMergeGapRatio * 100f).roundToInt()}%",
+    ) { onChange(settings.copy(freeTextMergeGapRatio = it / 100f)) }
+    Text("阈值影响之后的新识别；行间合并距离 0 表示逐行独立，100% 表示允许一行字高的间隔。",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    LabeledSlider(
+        label = "视频区域相似度",
+        value = settings.similarityPercent.toFloat().coerceIn(1f, 100f),
+        range = 1f..100f,
+        steps = 0,
+        display = "${settings.similarityPercent}%",
+    ) { onChange(settings.copy(similarityPercent = it.roundToInt().coerceIn(1, 100))) }
+    Text("用于把当前画面区域与上一帧的跟踪结果匹配；默认 60%。",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+    HorizontalDivider()
+    Text("画面遮罩与文字", style = MaterialTheme.typography.titleSmall)
+    Text("遮罩背景", style = MaterialTheme.typography.labelLarge)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        BubbleFillMode.entries.forEach { fill ->
+            FilterChip(settings.render.fillMode == fill,
+                { onChange(settings.copy(render = settings.render.copy(fillMode = fill))) },
+                label = { Text(if (fill == BubbleFillMode.AUTO) "自动取背景色" else "纯白遮盖") })
+        }
+    }
+    LabeledSlider(
+        label = "遮盖不透明度",
+        value = settings.render.opacityPercent.toFloat(),
+        range = 0f..100f,
+        steps = 0,
+        display = "${settings.render.opacityPercent}%",
+    ) { onChange(settings.copy(render = settings.render.copy(opacityPercent = it.roundToInt().coerceIn(0, 100)))) }
+    LabeledSlider(
+        label = "文字边距",
+        value = settings.render.textPaddingPercent.toFloat(),
+        range = 0f..20f,
+        steps = 0,
+        display = "${settings.render.textPaddingPercent}%",
+    ) { onChange(settings.copy(render = settings.render.copy(textPaddingPercent = it.roundToInt().coerceIn(0, 20)))) }
+    LabeledSlider(
+        label = "游离文字遮罩扩张",
+        value = settings.render.freeTextMaskExpansionPercent.toFloat(),
+        range = 0f..20f,
+        steps = 0,
+        display = "${settings.render.freeTextMaskExpansionPercent}%",
+    ) { onChange(settings.copy(render = settings.render.copy(freeTextMaskExpansionPercent = it.roundToInt().coerceIn(0, 20)))) }
+    Text("字体", style = MaterialTheme.typography.labelLarge)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        BubbleFont.entries.forEach { font ->
+            FilterChip(settings.render.font == font,
+                { onChange(settings.copy(render = settings.render.copy(font = font))) },
+                label = {
+                    Text(when (font) {
+                        BubbleFont.SYSTEM -> "系统"
+                        BubbleFont.SANS_SERIF -> "无衬线"
+                        BubbleFont.SERIF -> "衬线"
+                        BubbleFont.MONOSPACE -> "等宽"
+                    })
+                })
+        }
+    }
+    LabeledSlider(
+        label = "相对自动字号",
+        value = settings.render.fontScalePercent.toFloat(),
+        range = 50f..150f,
+        steps = 0,
+        display = "${settings.render.fontScalePercent}%",
+    ) { onChange(settings.copy(render = settings.render.copy(fontScalePercent = it.roundToInt().coerceIn(50, 150)))) }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween) {
+        Text("粗体")
+        Switch(settings.render.bold,
+            { onChange(settings.copy(render = settings.render.copy(bold = it))) })
+    }
+    Text("这些值随本视频保存，只用于之后新建的画面任务。",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
 @Composable
 private fun TimecodeField(label: String, value: String, onValueChange: (String) -> Unit, isError: Boolean) {
     OutlinedTextField(
@@ -786,8 +835,6 @@ private fun endError(value: String, endMs: Long?, startMs: Long?, durationMs: Lo
     durationMs > 0 && endMs > durationMs -> true
     else -> false
 }
-private fun isVideoOwner(ownerKey: String, videoId: String) =
-    ownerKey == "video:$videoId" || ownerKey.startsWith("video:$videoId:")
 
 private fun canonicalOptions(value: VideoWorkOptions, durationMs: Long): VideoWorkOptions {
     fun tag(text: String) = try { LocalTranslationLanguage.fromTag(text).tag } catch (_: Exception) { text.trim() }
@@ -797,13 +844,14 @@ private fun canonicalOptions(value: VideoWorkOptions, durationMs: Long): VideoWo
         mode = value.mode.uppercase(Locale.ROOT),
         subtitleSource = value.subtitleSource.uppercase(Locale.ROOT),
         endMs = value.endMs.takeIf { it > 0 } ?: durationMs.coerceAtLeast(0L),
-        // The model is selected globally and captured by submit(), not edited here.
+        // The model is selected globally and resolved from Settings when work starts.
         asrModelId = null,
         audioApiProfileId = value.audioApiProfileId?.takeIf { it.isNotBlank() },
         audioApiEndpoint = value.audioApiEndpoint.trim(),
         frameApiProfileId = value.frameApiProfileId?.takeIf { it.isNotBlank() },
         subtitleApiProfileId = value.subtitleApiProfileId?.takeIf { it.isNotBlank() },
-        // Recognition scope is task semantics; keep it in the saved/draft comparison.
+        // Recognition scope and frame settings are task semantics; keep them in the saved/draft comparison.
         segTextScope = value.segTextScope,
+        frameSettings = value.frameSettings,
     )
 }

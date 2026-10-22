@@ -14,7 +14,7 @@ class TranslationCacheBudget(initialLimit: Long, shared: TranslationCacheBudget?
     private val mutex = Mutex()
     private val leases = mutableSetOf<Lease>()
     private data class Waiter(val group: TranslationCacheBudget, val bytes: Long, val owner: String,
-        val priority: Int, val order: Long, val at: Long = System.currentTimeMillis())
+        val priority: Int, val order: Long, val pageOverflow: Boolean = false, val at: Long = System.currentTimeMillis())
     private val waiting = mutableListOf<Waiter>()
     private var serial = 0L
     private val changed = MutableStateFlow(0L)
@@ -24,9 +24,10 @@ class TranslationCacheBudget(initialLimit: Long, shared: TranslationCacheBudget?
     val limitBytes get() = minOf(limit, root.limit)
     init { require(initialLimit > 0) }
     fun setLimit(bytes: Long) { require(bytes >= 32L * 1_048_576); limit = bytes; root.changed.update { it + 1 } }
-    private fun fits(group: TranslationCacheBudget, bytes: Long) =
-        mutableBytes.value + bytes <= limit && (group === this || group.mutableBytes.value + bytes <= group.limit)
-    private fun next(): Waiter? = waiting.filter { fits(it.group, it.bytes) }.maxWithOrNull(compareBy<Waiter> {
+    private fun fits(group: TranslationCacheBudget, bytes: Long, pageOverflow: Boolean = false) =
+        if (pageOverflow) mutableBytes.value < limit && (group === this || group.mutableBytes.value < group.limit)
+        else mutableBytes.value + bytes <= limit && (group === this || group.mutableBytes.value + bytes <= group.limit)
+    private fun next(): Waiter? = waiting.filter { fits(it.group, it.bytes, it.pageOverflow) }.maxWithOrNull(compareBy<Waiter> {
         it.priority + ((System.currentTimeMillis() - it.at).coerceAtLeast(0) / 1000).coerceAtMost((95 - it.priority).coerceAtLeast(0).toLong()).toInt()
     }.thenBy { -it.order })
     private fun account(group: TranslationCacheBudget, delta: Long) {
@@ -42,11 +43,14 @@ class TranslationCacheBudget(initialLimit: Long, shared: TranslationCacheBudget?
         require(bytes > 0)
         if(!root.fits(this, bytes) || root.next() != null) null else root.grant(this, bytes, owner)
     }
-    suspend fun acquire(bytes: Long, owner: String = "shared"): Lease {
+    /** Admit the final whole page while below the limit, then stop admitting until space returns. */
+    suspend fun acquirePage(bytes: Long, owner: String = "shared"): Lease = acquire(bytes, owner, true)
+    suspend fun acquire(bytes: Long, owner: String = "shared"): Lease = acquire(bytes, owner, false)
+    private suspend fun acquire(bytes: Long, owner: String, pageOverflow: Boolean): Lease {
         require(bytes > 0)
         val context = currentCoroutineContext()[TaskContext]
         val priority = context?.priority ?: currentCoroutineContext()[InferencePriority]?.rank ?: 0
-        val ticket = root.mutex.withLock { Waiter(this, bytes, owner, priority, root.serial++).also {
+        val ticket = root.mutex.withLock { Waiter(this, bytes, owner, priority, root.serial++, pageOverflow).also {
             root.waiting += it; root.changed.update { value -> value + 1 }
         } }
         try { while (true) {

@@ -122,4 +122,60 @@ class TranslationCacheBudgetTest {
         admitted.shrink(1024); assertEquals(1024, budget.bytes.value)
         admitted.release(); assertEquals(0, budget.bytes.value)
     }
+    @Test fun acquirePageAdmitsOneCrossingPageThenWaitsUntilSpaceReturns() = runBlocking {
+        val budget = TranslationCacheBudget(100)
+        val first = budget.acquire(60, "first")
+        val crossing = budget.acquirePage(60, "crossing")
+        assertEquals(120L, budget.bytes.value)
+
+        val waiting = async { budget.acquirePage(60, "waiting") }
+        yield(); assertFalse(waiting.isCompleted)
+        assertEquals(120L, budget.bytes.value)
+
+        first.release()
+        val admitted = withTimeout(1000) { waiting.await() }
+        assertEquals(120L, budget.bytes.value)
+        crossing.release()
+        admitted.release()
+        assertEquals(0L, budget.bytes.value)
+    }
+    @Test fun cancellingAPageWaiterLeavesOnlyTheAdmittedPagesAccounted() = runBlocking {
+        val budget = TranslationCacheBudget(100)
+        val held = budget.acquirePage(120, "held")
+        assertEquals(120L, budget.bytes.value)
+
+        val waiting = async { budget.acquirePage(40, "waiting") }
+        yield(); assertFalse(waiting.isCompleted)
+        withTimeout(1000) { waiting.cancelAndJoin() }
+        assertEquals(120L, budget.bytes.value)
+
+        held.release()
+        assertEquals(0L, budget.bytes.value)
+    }
+    @Test fun videoAndMangaGroupsShareOneRootWithoutDoubleCountingPages() = runBlocking {
+        val manga = TranslationCacheBudget(100)
+        val video = TranslationCacheBudget(1000, manga)
+        assertEquals(100L, video.limitBytes)
+
+        val videoPage = video.acquirePage(60, "video")
+        assertEquals(60L, manga.bytes.value)
+        assertEquals(60L, video.bytes.value)
+
+        val mangaPage = manga.acquirePage(60, "manga")
+        assertEquals(120L, manga.bytes.value)
+        assertEquals(60L, video.bytes.value)
+
+        val waiting = async { video.acquirePage(20, "video-next") }
+        yield(); assertFalse(waiting.isCompleted)
+        videoPage.release()
+        assertEquals(60L, manga.bytes.value)
+
+        val next = withTimeout(1000) { waiting.await() }
+        assertEquals(80L, manga.bytes.value)
+        assertEquals(20L, video.bytes.value)
+
+        next.release(); mangaPage.release()
+        assertEquals(0L, manga.bytes.value)
+        assertEquals(0L, video.bytes.value)
+    }
 }

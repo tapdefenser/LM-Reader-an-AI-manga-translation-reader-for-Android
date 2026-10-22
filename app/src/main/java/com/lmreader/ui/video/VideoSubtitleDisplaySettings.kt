@@ -28,7 +28,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Video subtitle appearance editor for the translation-options dialog.
+ * Video subtitle appearance editor shown under the source list in the player's
+ * top-right 三个点 → 字幕 dialog.
  *
  * The card reads the global default and the current per-video row through
  * [resolveVideoSubtitleStyle], then writes only [VideoSettingsRecord.style]. It never

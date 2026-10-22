@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.room.withTransaction
@@ -41,6 +42,7 @@ internal fun VideoSubtitleSourceDialog(container: AppContainer, id: String, onDi
     val cues by dao.observeCues(id).collectAsStateWithLifecycle(emptyList())
     val style = remember(settings?.style) { JSONObject(settings?.style ?: "{}") }
     val scope = rememberCoroutineScope()
+    val maxContentHeight = (LocalConfiguration.current.screenHeightDp.dp * .7f).coerceIn(240.dp, 520.dp)
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     fun select(track: String?, enabled: Boolean) {
@@ -49,7 +51,6 @@ internal fun VideoSubtitleSourceDialog(container: AppContainer, id: String, onDi
         scope.launch {
             try {
                 changeVideoSubtitleSource(container, id) { put("enabled", enabled); if(track != null) put("trackId", track) }
-                onDismiss()
             } catch(e: CancellationException) { throw e }
             catch(e: Exception) { error = e.message ?: "字幕选择未保存" }
             finally { busy = false }
@@ -62,7 +63,6 @@ internal fun VideoSubtitleSourceDialog(container: AppContainer, id: String, onDi
                 try {
                     val track = container.videoAudio.importSrt(id, uri)
                     changeVideoSubtitleSource(container, id) { put("enabled", true); put("trackId", track) }
-                    onDismiss()
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) { error = e.message ?: "无法导入字幕" }
                 finally { busy = false }
@@ -70,7 +70,7 @@ internal fun VideoSubtitleSourceDialog(container: AppContainer, id: String, onDi
         }
     }
     AlertDialog(onDismissRequest = { if(!busy) onDismiss() }, title = { Text("字幕") }, text = {
-        Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.heightIn(max = maxContentHeight).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             val enabled = style.optBoolean("enabled", true)
             val selected = resolvedVideoSubtitleTrack(style, cues)
             @Composable fun choice(label: String, selectedRow: Boolean, action: () -> Unit) {
@@ -91,6 +91,8 @@ internal fun VideoSubtitleSourceDialog(container: AppContainer, id: String, onDi
             TextButton(onClick = { picker.launch(arrayOf("application/x-subrip", "text/*", "application/octet-stream")) }, enabled = !busy) { Text("导入字幕…") }
             if(busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            HorizontalDivider(Modifier.padding(vertical = 6.dp))
+            VideoSubtitleDisplaySettings(container, id)
         }
     }, confirmButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("关闭") } })
 }

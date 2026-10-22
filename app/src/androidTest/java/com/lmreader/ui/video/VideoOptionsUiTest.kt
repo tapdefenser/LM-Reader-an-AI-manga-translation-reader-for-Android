@@ -29,7 +29,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -88,6 +87,7 @@ class VideoOptionsUiTest {
     }
 
     @Test fun languageRowsOpenPickersAndManualTargetIsSaved() = runBlocking<Unit> {
+        val tasksBefore = container.workDatabase.tasks().all().size
         openDialog()
 
         compose.onNodeWithTag("video-option:source").performScrollTo().performClick()
@@ -111,11 +111,12 @@ class VideoOptionsUiTest {
             compose.onAllNodesWithText("pt-BR", substring = true).fetchSemanticsNodes().isNotEmpty()
         }
 
-        compose.onNodeWithText("加入队列").performClick()
+        compose.onNodeWithText("保存").performClick()
         compose.waitUntil(10_000) {
             compose.onAllNodesWithTag("video-option:source").fetchSemanticsNodes().isEmpty()
         }
         assertEquals("pt-BR", container.videoTasks.options(videoId).target)
+        assertEquals(tasksBefore, container.workDatabase.tasks().all().size)
     }
 
     @Test fun defaultLocalWorkflowsHideApiAndLegacyControlsAndCloseCreatesNothing() = runBlocking<Unit> {
@@ -125,6 +126,8 @@ class VideoOptionsUiTest {
 
         assertEquals(0, compose.onAllNodesWithTag("video-option:frame-api").fetchSemanticsNodes().size)
         assertEquals(0, compose.onAllNodesWithTag("video-option:subtitle-api").fetchSemanticsNodes().size)
+        assertEquals(0, compose.onAllNodesWithText("字幕显示设置").fetchSemanticsNodes().size)
+        compose.onNodeWithText("保存").assertExists()
         for (hidden in listOf("准备状态", "字幕高级选项", "字幕源", "ASR 模型")) {
             assertEquals(0, compose.onAllNodesWithText(hidden).fetchSemanticsNodes().size)
         }
@@ -137,7 +140,49 @@ class VideoOptionsUiTest {
         assertEquals(shelfBefore, container.workDatabase.videoCatalogDao().byId(videoId)?.onShelf)
     }
 
-    @Test fun apiWorkflowRevealsFrameApiPickerAndSubtitleOnlySubmissionUsesLocalAsr() = runBlocking<Unit> {
+    @Test fun savingOnlyChangesFutureOptionsAndPreservesExistingTaskSnapshotsAndResultMetadata() = runBlocking<Unit> {
+        val old = container.videoTasks.options(videoId).copy(mode = "FRAME", source = "en")
+        container.videoTasks.submit(videoId, old)
+        val dao = container.workDatabase.results()
+        val row = dao.settings(videoId)!!
+        dao.putSettings(row.copy(json = org.json.JSONObject(row.json).put("frameIdentity", "keep-track")
+            .put("resultEpoch", "keep-epoch").toString(), style = "{\"enabled\":false}"))
+        val before = container.workDatabase.tasks().all().associateBy { it.taskId }
+        val changed = old.copy(target = "pt-BR", frameSettings = old.frameSettings!!.copy(segThreshold = .71f,
+            textDetectionThreshold = .63f, freeTextMergeGapRatio = .8f, similarityPercent = 77))
+        container.videoTasks.saveOptions(videoId, changed)
+        val after = container.workDatabase.tasks().all().associateBy { it.taskId }
+        assertEquals(before.keys, after.keys)
+        before.forEach { (id, task) ->
+            assertEquals(task.payload, after.getValue(id).payload)
+            assertEquals(task.generation, after.getValue(id).generation)
+            assertEquals(task.state, after.getValue(id).state)
+        }
+        val stored = dao.settings(videoId)!!
+        assertEquals("keep-track", org.json.JSONObject(stored.json).getString("frameIdentity"))
+        assertEquals("keep-epoch", org.json.JSONObject(stored.json).getString("resultEpoch"))
+        assertEquals("{\"enabled\":false}", stored.style)
+        assertEquals(changed.frameSettings, container.videoTasks.options(videoId).frameSettings)
+        assertEquals("pt-BR", container.videoTasks.options(videoId).target)
+    }
+
+    @Test fun subtitleSourceListContainsTheDisplaySettingsWithoutCreatingTasks() = runBlocking<Unit> {
+        val before = container.workDatabase.tasks().all().size
+        compose.setContent {
+            MaterialTheme {
+                var open by remember { mutableStateOf(true) }
+                if(open) VideoSubtitleSourceDialog(container, videoId) { open = false }
+            }
+        }
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("字幕显示设置").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("翻译产生的字幕").performScrollTo().assertExists()
+        compose.onNodeWithText("导入字幕…").performScrollTo().assertExists()
+        compose.onNodeWithText("字幕显示设置").performScrollTo().assertExists()
+        assertEquals(before, container.workDatabase.tasks().all().size)
+        compose.onNodeWithText("关闭").performClick()
+    }
+
+    @Test fun apiWorkflowRevealsFrameApiPickerAndSavingKeepsLocalAsrWithoutQueuing() = runBlocking<Unit> {
         val profile = ApiProfile("profile-${UUID.randomUUID()}", ApiProfileKind.LLM, "测试配置",
             "https://api.example.invalid/v1", apiKey = "not-used", model = "test-model", retryCount = 0)
         container.apiProfiles.save(profile)
@@ -147,6 +192,7 @@ class VideoOptionsUiTest {
                 program = WorkflowTemplates.visionApi(profile.id),
             ))
         }
+        val tasksBefore = container.workDatabase.tasks().all().size
         openDialog()
 
         compose.onNodeWithTag("video-option:frame-workflow").performScrollTo().performClick()
@@ -172,17 +218,16 @@ class VideoOptionsUiTest {
         compose.onNodeWithText(profile.displayName, substring = true).assertExists()
 
         compose.onNodeWithText("仅字幕").performScrollTo().performClick()
-        compose.onNodeWithText("加入队列").performClick()
+        compose.onNodeWithText("保存").performClick()
         compose.waitUntil(10_000) {
             compose.onAllNodesWithTag("video-option:source").fetchSemanticsNodes().isEmpty()
         }
 
-        val tasks = container.workDatabase.tasks().all()
-        val subtitle = tasks.firstOrNull { it.type == "VIDEO_SUBTITLES" }
-            ?: error("subtitle task was not queued")
-        val options = JSONObject(subtitle.payload).getJSONObject("options")
-        assertEquals("ASR_LOCAL", options.getString("subtitleSource"))
-        assertTrue(options.isNull("audioApiProfileId"))
-        assertEquals("ASR_LOCAL", container.videoTasks.options(videoId).subtitleSource)
+        val saved = container.videoTasks.options(videoId)
+        assertEquals("SUBTITLE", saved.mode)
+        assertEquals("ASR_LOCAL", saved.subtitleSource)
+        assertEquals(profile.id, saved.frameApiProfileId)
+        assertTrue(saved.asrModelId == null)
+        assertEquals(tasksBefore, container.workDatabase.tasks().all().size)
     }
 }

@@ -17,7 +17,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -30,13 +29,14 @@ data class VideoWorkOptions(val source: String = "ja", val target: String = "zh-
     val subtitleSource: String = "ASR_LOCAL", val audioTrack: Int = -1, val subtitleTrack: Int = -1,
     val asrModelId: String? = null, val audioApiProfileId: String? = null, val audioApiEndpoint: String = "",
     val maxDimension: Int = 1280, val frameApiProfileId: String? = null, val subtitleApiProfileId: String? = null,
-    val segTextScope: SegTextScope = SegTextScope.ALL) {
+    val segTextScope: SegTextScope = SegTextScope.ALL, val frameSettings: VideoFrameSettings? = null) {
     fun json() = JSONObject().put("source", source).put("target", target).put("mode", mode)
         .put("frameWorkflowId", frameWorkflowId).put("subtitleWorkflowId", subtitleWorkflowId)
         .put("fpsNumerator", fpsNumerator).put("fpsDenominator", fpsDenominator).put("startMs", startMs).put("endMs", endMs)
         .put("subtitleSource", subtitleSource).put("audioTrack", audioTrack).put("subtitleTrack", subtitleTrack)
         .put("asrModelId", asrModelId).put("audioApiProfileId", audioApiProfileId).put("audioApiEndpoint", audioApiEndpoint).put("maxDimension", maxDimension)
         .put("frameApiProfileId", frameApiProfileId).put("subtitleApiProfileId", subtitleApiProfileId).put("segTextScope", segTextScope.name)
+        .put("frameSettings", frameSettings?.json())
     companion object { fun read(j: JSONObject) = VideoWorkOptions(j.optString("source", "ja"), j.optString("target", "zh-Hans"), j.optString("mode", "BOTH"),
         j.optString("frameWorkflowId", TranslationWorkflow.LOCAL_MACHINE_ID), j.optString("subtitleWorkflowId", "builtin.subtitle-local"),
         j.optInt("fpsNumerator", 1), j.optInt("fpsDenominator", 1), j.optLong("startMs"), j.optLong("endMs"),
@@ -45,7 +45,8 @@ data class VideoWorkOptions(val source: String = "ja", val target: String = "zh-
         j.optString("audioApiEndpoint"), j.optInt("maxDimension", 1280),
         j.optString("frameApiProfileId").takeUnless { it.isBlank() || it == "null" },
         j.optString("subtitleApiProfileId").takeUnless { it.isBlank() || it == "null" },
-        SegTextScope.fromValue(j.optString("segTextScope").takeIf { it.isNotBlank() })) }
+        SegTextScope.fromValue(j.optString("segTextScope").takeIf { it.isNotBlank() }),
+        j.optJSONObject("frameSettings")?.let(VideoFrameSettings::read)) }
 }
 
 /** Application-owned offline executors. No player or ViewModel owns this work. */
@@ -55,6 +56,8 @@ class VideoTasks internal constructor(private val container: AppContainer,
     },
     private val createFrameEngine: (VideoProject, TranslationWorkflow, List<ApiProfile>, String, SegTextScope) -> VideoFrameEngine = { p, w, profiles, identity, scope ->
         VideoTranslationEngine(container, p, w, profiles, identity, scope)
+    }, private val createFrameSource: (VideoProject, VideoWorkOptions) -> VideoFrameSource = { project, options ->
+        VideoFrameDecoder(container.applicationContext, project.uri, options.maxDimension)
     }) {
     private val db get() = container.workDatabase
     private val dao get() = db.results()
@@ -72,9 +75,29 @@ class VideoTasks internal constructor(private val container: AppContainer,
             execution.progress(1, 1, "原视频内容已核对")
         }
     }
-    suspend fun options(id: String): VideoWorkOptions = dao.settings(id)?.let { VideoWorkOptions.read(JSONObject(it.json)) }
+    suspend fun options(id: String): VideoWorkOptions = (dao.settings(id)?.let { VideoWorkOptions.read(JSONObject(it.json)) }
         ?: container.videoLibrary.projects.value.firstOrNull { it.id == id }?.let { VideoWorkOptions(it.source, it.target, frameWorkflowId = it.workflowId, subtitleWorkflowId = it.subtitleWorkflowId) }
-        ?: VideoWorkOptions()
+        ?: VideoWorkOptions()).let { it.copy(frameSettings = it.frameSettings ?: defaultFrameSettings()) }
+    private suspend fun defaultFrameSettings() = VideoFrameSettings(
+        similarityPercent = container.screenTranslation.preferences.settings.value.videoSimilarityPercent,
+        render = container.bubbleRenderPreferences.settings.first())
+    /** Saving a draft never changes task snapshots, queue state, shelf membership or result identity. */
+    suspend fun saveOptions(id: String, options: VideoWorkOptions) = snapshot(id) {
+        require(options.mode in setOf("FRAME", "SUBTITLE", "BOTH"))
+        require(options.maxDimension in 64..2048)
+        VideoSamplingRate(options.fpsNumerator, options.fpsDenominator)
+        val video = container.videoCatalog.find(id) ?: error("视频不存在")
+        val end = options.endMs.takeIf { it > 0 } ?: video.durationMs
+        require(options.startMs >= 0 && end > options.startMs && (video.durationMs <= 0 || end <= video.durationMs)) { "请选择有效的处理时间范围" }
+        val saved = options.copy(frameSettings = options.frameSettings ?: defaultFrameSettings()).json()
+        db.withTransaction {
+            val old = dao.settings(id) ?: VideoSettingsRecord(id)
+            val merged = JSONObject(old.json)
+            saved.keys().forEach { key -> merged.put(key, saved.get(key)) }
+            dao.putSettings(old.copy(json = merged.toString(), revision = UUID.randomUUID().toString()))
+        }
+        Unit
+    }
     suspend fun existingProject(id: String): VideoProject? = container.videoLibrary.projects.value.firstOrNull { it.id == id }?.also { migrate(it) }
     suspend fun verifyForPlayback(id: String) {
         val video = container.videoCatalog.find(id) ?: return
@@ -114,7 +137,8 @@ class VideoTasks internal constructor(private val container: AppContainer,
         // Keep the captured model stable for an in-flight task; new submissions follow Settings.
         val resolved = options.copy(subtitleSource = "ASR_LOCAL", audioApiProfileId = null, audioApiEndpoint = "",
             audioTrack = if(speech && options.audioTrack < 0) tracks.firstOrNull { it.type == "AUDIO" }?.index ?: -1 else options.audioTrack,
-            subtitleTrack = -1, asrModelId = if(speech) container.asrModels.selectedId.value else null)
+            subtitleTrack = -1, asrModelId = if(speech) container.asrModels.selectedId.value else null,
+            frameSettings = options.frameSettings ?: defaultFrameSettings())
         return submitResolved(id, resolved, frameAtUs)
     }
     suspend fun replace(id: String, options: VideoWorkOptions): String {
@@ -267,20 +291,22 @@ class VideoTasks internal constructor(private val container: AppContainer,
         if(JSONObject(dao.settings(video.videoId)?.json ?: "{}").optString("resultEpoch") != payload.optString("resultEpoch"))
             throw TaskWaiting("CONFIG_CHANGED", "成果已清理或恢复，请更新选项并重新排队")
     }
-    internal suspend fun frames(execution: TaskExecution) = coroutineScope {
+    internal suspend fun frames(execution: TaskExecution) = try { coroutineScope {
         val payload = JSONObject(execution.payload); val options = VideoWorkOptions.read(payload.getJSONObject("options"))
         val project = checkedProject(payload).copy(source = options.source, target = options.target)
         val engine = createFrameEngine(project, readWorkflow(payload.getJSONObject("frameWorkflow")),
             ApiProfileCodec.decode(payload.getJSONObject("apiProfiles").toString()),
             "${options.maxDimension}:${options.fpsNumerator}/${options.fpsDenominator}:${options.startMs}:${options.endMs}:${payload.optString("resultEpoch")}", options.segTextScope)
-        val decoder = VideoFrameDecoder(container.applicationContext, project.uri, options.maxDimension)
+        val decoder = createFrameSource(project, options)
+        val activeInputs = ConcurrentHashMap.newKeySet<VideoFrameInput>()
         try {
+            options.frameSettings?.let { engine.configure(it) }
             try { engine.prepare() } catch(e: CancellationException) { throw e }
             catch(e: Exception) { throw TaskWaiting("CAPABILITY", e.message ?: "画面工作流尚未就绪") }
             val checkpoint = JSONObject(execution.initial.checkpoint)
             val previousIdentity = checkpoint.optString("identity")
             if(previousIdentity.isNotBlank() && previousIdentity != engine.identity)
-                throw TaskWaiting("CONFIG_CHANGED", "模型或工作流语义已变化，请更新并重新排队")
+                throw TaskWaiting("CONFIG_CHANGED", "模型或工作流语义已变化，已保留成果；请取消旧任务后从翻译入口重新开始")
             execution.publish { snapshot(project.id) {
                 val row = dao.settings(project.id) ?: VideoSettingsRecord(project.id)
                 dao.putSettings(row.copy(json = JSONObject(row.json).put("frameIdentity", engine.identity).toString()))
@@ -289,14 +315,17 @@ class VideoTasks internal constructor(private val container: AppContainer,
             val plan = VideoSamplingPlan(project.durationMs, VideoSamplingRate(options.fpsNumerator, options.fpsDenominator),
                 options.startMs, options.endMs.coerceAtMost(project.durationMs))
             val total = if(single) 1 else plan.sampleCount
-            val similarity = container.screenTranslation.preferences.settings.value.videoSimilarityPercent
+            val similarity = (options.frameSettings ?: defaultFrameSettings()).similarityPercent
             var completed = execution.initial.completed
-            val permits = Semaphore(2)
+            val scaled = minOf(1.0, options.maxDimension.toDouble() / maxOf(project.width, project.height).coerceAtLeast(1))
+            val inputReservation = (project.width.toDouble() * project.height * scaled * scaled * 12)
+                .toLong().coerceAtLeast(1)
             data class UnitFrame(val index: Long, val targetUs: Long, val frame: DecodedVideoFrame?,
                 val untilUs: Long = 0, val observations: List<VideoRegionObservation> = emptyList(),
                 val trackByDetection: Map<String, String> = emptyMap(),
                 val result: Deferred<Result<Unit>>? = null,
-                val detected: Boolean = false)
+                val detected: Boolean = false, val input: VideoFrameInput? = null,
+                val ptsUs: Long = frame?.ptsUs ?: -1L)
             suspend fun publishCaptured(work: UnitFrame, saved: com.lmreader.ui.reader.translation.ReaderPageTranslation) {
                 val frame = requireNotNull(work.frame)
                 val publicationContext = currentCoroutineContext()
@@ -331,9 +360,9 @@ class VideoTasks internal constructor(private val container: AppContainer,
                 }
             } }
             }
-            val window = Channel<UnitFrame>(1, onUndeliveredElement = {
-                it.result?.cancel(); it.frame?.close(); permits.release()
-            })
+            // Pixel ownership is admitted before decode through the same byte budget
+            // as manga preprocessing. Bound the lightweight ordered receipts as well.
+            val window = Channel<UnitFrame>(64, onUndeliveredElement = { it.result?.cancel() })
             val producer = launch {
                 val committedFrame = if(single) null else dao.latestFrame(project.id, project.sha256, engine.identity, checkpoint.optLong("committed", -1))
                 var previous = committedFrame?.let { dao.sampleObservations(project.id, project.sha256, engine.identity, it.sampleIndex) }.orEmpty()
@@ -345,8 +374,9 @@ class VideoTasks internal constructor(private val container: AppContainer,
                         val current = index
                         val target = if(single) payload.getLong("frameAtUs") else plan.targetUs(current)
                         val sample = if(single) -target - 1 else current
-                        permits.acquire()
                         var frame: DecodedVideoFrame? = null
+                        var input: VideoFrameInput? = null
+                        var lease: com.lmreader.ui.queue.TranslationCacheBudget.Lease? = null
                         var future: Deferred<Result<Unit>>? = null
                         var sent = false
                         try {
@@ -357,9 +387,15 @@ class VideoTasks internal constructor(private val container: AppContainer,
                                 previousResult = null
                                 window.send(UnitFrame(current, target, null)); sent = true
                             } else {
+                                lease = container.imageCacheBudget.acquirePage(inputReservation, "video:${execution.taskId}")
                                 val decoded = decoder.frameAt(target) ?: error("此时间范围没有可解码画面")
                                 frame = decoded
+                                val admitted = VideoFrameInput(decoded, requireNotNull(lease))
+                                input = admitted
+                                activeInputs += admitted
+                                lease = null
                                 val detection = engine.detect(decoded.bitmap, decoded.ptsUs / 1000)
+                                admitted.lease.resizeForPage(admitted.sourceBytes + videoSegmentationBytes(detection))
                                 val fresh = detection?.let { com.lmreader.screen.screenVideoRegions(decoded.bitmap, it.regions, ScreenTransform()) }.orEmpty()
                                 val matches = screenVideoRegionMatches(previous.map { it.screenRegion() }, fresh, similarity)
                                 val tracks = fresh.associate { region -> region.id to (matches[region.id]?.id
@@ -392,11 +428,11 @@ class VideoTasks internal constructor(private val container: AppContainer,
                                     }
                                 } } }
                                 previous = observations
-                                val staged = UnitFrame(current, target, decoded, untilUs, observations, tracks, detected = detection != null)
+                                val staged = UnitFrame(current, target, decoded, untilUs, observations, tracks,
+                                    detected = detection != null, input = admitted)
                                 val samePresentation = previousPts == decoded.ptsUs
                                 val preceding = previousResult
-                                decoded.retain()
-                                future = async {
+                                future = async(admitted) {
                                     try {
                                         val translated = if(samePresentation) {
                                             preceding?.await()?.getOrThrow()
@@ -411,13 +447,22 @@ class VideoTasks internal constructor(private val container: AppContainer,
                                         Result.success(Unit)
                                     } catch(cancelled: CancellationException) { throw cancelled }
                                     catch(failure: Throwable) { Result.failure(failure) }
-                                    finally { decoded.close() }
+                                    finally { admitted.close(); activeInputs -= admitted }
                                 }
                                 previousPts = decoded.ptsUs
                                 previousResult = future
-                                window.send(staged.copy(result = future)); sent = true
+                                window.send(staged.copy(frame = null, observations = emptyList(), trackByDetection = emptyMap(),
+                                    result = future, input = null)); sent = true
                             }
-                        } finally { if(!sent) { future?.cancel(); frame?.close(); permits.release() } }
+                        } finally { if(!sent) { withContext(NonCancellable) {
+                            try { future?.cancelAndJoin() }
+                            finally {
+                                val abandoned = input
+                                if(abandoned != null) { abandoned.close(); activeInputs -= abandoned }
+                                else frame?.close()
+                                lease?.release()
+                            }
+                        } } }
                         index = if(single) null else plan.nextIndexAfter(current)
                     }
                 } finally { window.close() }
@@ -431,7 +476,7 @@ class VideoTasks internal constructor(private val container: AppContainer,
                         execution.progress(completed, total, "画面 $completed/$total",
                             JSONObject().put("committed", work.index).put("identity", engine.identity).toString())
                     } catch(conflict: com.lmreader.ui.reader.translation.PageTranslationRevisionConflict) {
-                        val pts = work.frame?.ptsUs ?: throw conflict
+                        val pts = work.ptsUs.takeIf { it >= 0 } ?: throw conflict
                         val pageId = engine.pageId(pts / 1000)
                         execution.publish { snapshot(project.id) {
                             validateSource(payload); container.videoLibrary.artifacts(project.id).delete(pageId)
@@ -441,11 +486,24 @@ class VideoTasks internal constructor(private val container: AppContainer,
                             }
                         } }
                         throw TaskRequeue(resultConflict = true)
-                    } finally { work.result?.cancel(); work.frame?.close(); permits.release() }
+                    } finally { withContext(NonCancellable) {
+                        work.result?.cancelAndJoin()
+                        work.input?.close()
+                        work.input?.let { activeInputs -= it }
+                    } }
                 }
                 producer.join()
-            } finally { withContext(NonCancellable) { try { producer.cancelAndJoin() } finally { window.cancel() } } }
+            } finally { withContext(NonCancellable) {
+                try { producer.cancelAndJoin() }
+                finally {
+                    window.cancel()
+                    activeInputs.toList().forEach { it.close(); activeInputs -= it }
+                }
+            } }
         } finally { withContext(NonCancellable) { try { decoder.close() } finally { engine.close() } } }
+    } } catch(memory: OutOfMemoryError) {
+        android.util.Log.e("VideoFrames", "Frame analysis exhausted memory after releasing in-flight inputs", memory)
+        throw TaskWaiting("MEMORY", "画面分析内存不足，已停止并保留完成成果。请降低分析分辨率或 SEG/OCR 并发后重新开始。")
     }
     internal suspend fun subtitles(execution: TaskExecution) = coroutineScope {
         val payload = JSONObject(execution.payload); val options = VideoWorkOptions.read(payload.getJSONObject("options"))

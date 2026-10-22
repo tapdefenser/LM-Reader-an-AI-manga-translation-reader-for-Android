@@ -218,6 +218,17 @@ class VideoTrackedRegionsTest {
             engine.identity, 2000).isEmpty())
         assertTrue(dao.regionsAtIdentity(video.id, video.sha256, engine.identity, 2500).isEmpty())
         assertEquals(1L, dao.observationAt(video.id, video.sha256, engine.identity, track, 1_500_000)!!.sampleIndex)
+        val playerPlans = loadVideoMaskPlans(container, video.id, video.sha256, engine.identity, 1500)
+        assertEquals("the player must retain the anchor even when the newest sample is empty", 1, playerPlans.size)
+        assertEquals(anchor.pageId, playerPlans.single().key.pageId)
+        assertEquals("你好", playerPlans.single().key.region.translatedText)
+        assertEquals(moved, playerPlans.single().key.region.region.bounds)
+        // Playback must also show legacy fixed tracks: source proofs may be absent or
+        // unreadable, and this fixture's content URI cannot be decoded by a player.
+        container.videoLibrary.proofs(video.id).listFiles().orEmpty().forEach { it.writeText("invalid legacy proof") }
+        dao.deleteSourceObservations(video.id, video.sha256, 0, Long.MAX_VALUE)
+        assertEquals(1, loadVideoMaskPlans(container, video.id, video.sha256, engine.identity, 1500).size)
+        assertTrue(loadVideoMaskPlans(container, video.id, video.sha256, engine.identity, 2000).isEmpty())
     }
 
     @Test fun movedObservationFollowsSavedGeometryAndProofRejectsChangedSource() {
