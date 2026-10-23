@@ -1,8 +1,8 @@
 # Release And Signing
 
-## Current Release: v0.1.11
+## Current Release: v0.1.12
 
-Release date: 2026-10-19. Version `0.1.11`, code `13`, tag `v0.1.11`, APK `LM-Reader-v0.1.11-64bit.apk`. See the [current notes](releases/v0.1.11.md) and [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.11).
+Release date: 2026-10-23. Version `0.1.12`, code `14`, tag `v0.1.12`, APK `LM-Reader-v0.1.12-64bit.apk`. See the [current notes](releases/v0.1.12.md) and [GitHub Release](https://github.com/tapdefenser/LM-Reader-an-AI-manga-translation-reader-for-Android/releases/tag/v0.1.12).
 
 Use the same build/sign/package workflow and certificate below. `tools/package_release.py` reads the current `gradle/release.properties`, requires committed sources and packages this version's notes and checksums. See the current notes for verification scope. Open distribution and long-running ARM checks remain as documented below.
 

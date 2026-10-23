@@ -37,6 +37,17 @@ Android 26 的 Vulkan 1.0 加载器不能直接导入 1.1 符号；构建时对�
 - 手机 `192.168.1.38:34447`（Xiaomi 24031PN0DC，Android 16，arm64-v8a）已用 `adb install -r` 覆盖安装 0.1.12（versionCode 14）：首次安装时间 2026-10-02 11:43:04 保持不变，设备上 APK 哈希与签名包一致，应用启动后书架仍列出原视频及“已有成果/配置”。安装与校验记录见 `release/installation-verification.json`。
 - 编辑器缩放修复的模拟器两项 UI 用例未跑完：上一轮 MuMu 启动被作业运行器终止，本轮不再重跑，改由手机试用确认；横屏编辑器列为本次试用重点。
 - 首轮设备发现取消后清理分支被取消异常打断，已改成等待全部在途工作退出并在不可取消范围完成解码器/引擎释放；取消恢复用例复测通过。另一处失败来自测试字符串插值错误，已修正，并通过实际成果包往返复测。
+
+## 追加：启动闪退（2026-10-22 05:40 之后）
+
+- 现象：0.1.12 在手机上打开约 7–10 秒后闪退，可重复；当天 4 次退出。
+- 结论：原生段错误（`exit-info` 为 `SIGNALED`、`status=11`，`Zygote` 记录 `exited due to signal 11`），不是 Java 异常、不是内存击杀；没有 tombstone，取不到 native 栈。
+- 触发链：进程启动 → 未完成的视频任务自动恢复 → 加载 `liblmreader_asr.so` → `AdrenoVK-0: ggml-vulkan` → `ASR backend requested=AUTO actual=VULKAN` → RSS 约 1.1 GB → 约 4 秒后 SIGSEGV。启动命令本身即可复现，无需任何操作。
+- 处理：
+  1. `自动` 后端改为只走 CPU（`asr_backend.cpp`），Vulkan/OpenCL 保留为手动选项；`LocalAsrEngine` 只在显式 GPU 后端下占用视觉资源，设置页文案同步改为“默认使用 CPU，GPU 需手动选择”。
+  2. 应用启动时翻译队列默认暂停（`QueueOrderStore` 构造即置为暂停，旧队列暂停迁移不再清除它），排队任务不随进程重启自动续跑。
+- 详细证据：`.scratch/video-feedback-20261022/crash-report-20261022.md`，原始日志在同目录 `crashes/`。
+- GPU 路径的具体崩溃函数仍未定位；本机 tombstone 被抑制，需要独立进程或临时信号处理器才能取到回溯。恢复 GPU 前不要在同进程直接跑 Vulkan 推理。
 - 尚未测量目标 ARM 手机上 Whisper Base 的 GPU 识别速度、峰值内存或耗电，不承诺加速倍数。实际模型质量、长视频和目标设备后台限制继续按原验收矩阵记录。
 
 工作记录目录：`.scratch/video-feedback-20261022/`。DSH 承担限定文件实现、测试补充、设备执行和打包；Codex 审查改动、处理时序与发布一致性、核对原始结果。早期 DS 构建报告将旧的测试结果当作本轮通过，已在 `validation-correction.md` 纠正，不计入本批证据。
