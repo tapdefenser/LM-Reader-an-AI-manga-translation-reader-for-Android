@@ -46,9 +46,9 @@ import kotlinx.coroutines.launch
 private fun resolveTaskOptions(row: com.lmreader.core.database.tasks.TaskRecord, context: android.content.Context,
     nav: NavHostController) {
     val payload = runCatching { org.json.JSONObject(row.payload) }.getOrElse { org.json.JSONObject() }
-    if(row.waitingReason in setOf("CAPABILITY", "API_ACCESS")) {
-        val localAsr = payload.optJSONObject("options")?.optString("subtitleSource") == "ASR_LOCAL"
-        nav.navigate(if(localAsr) Routes.SETTINGS_API_ASR else Routes.SETTINGS_API)
+    val capabilityRoute = com.lmreader.tasks.capabilitySettingsRoute(row.waitingReason)
+    if(capabilityRoute != null) {
+        nav.navigate(capabilityRoute)
     } else if(row.type.startsWith("VIDEO") && payload.optString("videoId").isNotBlank()) {
         val id = payload.getString("videoId")
         com.lmreader.ui.video.openVideoPlayer(context, id, listOf(id), if(row.waitingReason == "CONFIG_CHANGED") "OPTIONS" else "INFO")

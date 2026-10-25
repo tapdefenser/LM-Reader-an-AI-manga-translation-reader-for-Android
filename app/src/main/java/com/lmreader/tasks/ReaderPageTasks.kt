@@ -82,8 +82,6 @@ class ReaderPageTasks(private val container: AppContainer) : TaskExecutor {
             json.optDouble("textDetectionThreshold", .35).toFloat(), json.optDouble("freeTextMergeGapRatio", 1.2).toFloat())
         val routes = program.localTranslationRoutes(from, to)
         requireWorkflowCapabilities(container, program, from, to, settings.apiProfiles)
-        try { routes.forEach { container.translationModels.installedCatalog().route(it.source, it.target, it.engine) } }
-        catch (e: Exception) { throw TaskWaiting("CAPABILITY", "本地翻译模型：${e.message}") }
         execution.progress(0, 1, "正在准备")
         // Preparation belongs to this task too: a chapter-wide mutex would hide
         // interactive priority from the native resource queues.
@@ -93,8 +91,8 @@ class ReaderPageTasks(private val container: AppContainer) : TaskExecutor {
         var host: AndroidWorkflowHost? = null
         try {
             val visionDemand = program.visionModelDemand(settings.segTextScope, from, to)
-            container.localTranslator.prepareEngineModels(owner, routes)
-            vision.reconfigure(visionDemand)
+            requireTaskCapability(TaskCapability.TRANSLATION) { container.localTranslator.prepareEngineModels(owner, routes) }
+            requireTaskCapability(TaskCapability.VISION) { vision.reconfigure(visionDemand) }
             vision.setPreprocessingCacheLimit(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576)
             val name = container.mangaRepository.getCards(listOf(mangaId)).firstOrNull()?.displayName ?: mangaId
             val progressScope = CoroutineScope(currentCoroutineContext())

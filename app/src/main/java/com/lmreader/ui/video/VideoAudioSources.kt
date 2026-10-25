@@ -128,7 +128,7 @@ class VideoAudioSources(private val container: AppContainer) {
         val modelId = checkpoint.optString("asrModelId").takeIf { it.isNotBlank() }
             ?: options.asrModelId ?: container.asrModels.selectedId.value
         if(options.subtitleSource == "ASR_LOCAL" && (modelId == null || container.asrModels.installedModel(modelId) == null))
-            throw TaskWaiting("CAPABILITY", "请在设置 → API 与翻译引擎 → 本地 ASR 模型下载模型并设为当前；视频会自动使用它")
+            throw TaskWaiting(TaskCapability.ASR.reason, "请在设置 → API 与翻译引擎 → 本地 ASR 模型下载模型并设为当前；视频会自动使用它")
         val decoder = VideoAudioDecoder(container.applicationContext, p.uri, options.audioTrack, options.startMs, options.endMs)
         val committed = checkpoint.optLong("asrCommitted", -1)
         val trackId = checkpoint.optString("sourceTrackId").takeIf { it.isNotBlank() }
@@ -140,7 +140,9 @@ class VideoAudioSources(private val container: AppContainer) {
                 val stage = "语音识别 · ${chunk.startMs / 1000} 秒"
                 if(updates != null) updates.onProgress(stage, null) else execution.progress(chunk.index, 0, stage)
                 val language = options.source.substringBefore('-').substringBefore('_')
-                val segments = if(options.subtitleSource == "ASR_LOCAL") container.localAsr.transcribe(chunk.samples, language, modelId)
+                val segments = if(options.subtitleSource == "ASR_LOCAL") requireTaskCapability(TaskCapability.ASR) {
+                    container.localAsr.transcribe(chunk.samples, language, modelId)
+                }
                     else transcribeApi(execution, chunk.samples, language, options)
                 val existing = dao.cuesInRange(p.id, p.sha256, trackId, chunk.startMs, chunk.startMs + chunk.samples.size * 1000L / 16000)
                 val batch = mutableListOf<VideoCueRecord>()
@@ -173,12 +175,12 @@ class VideoAudioSources(private val container: AppContainer) {
     private suspend fun transcribeApi(execution: TaskExecution, samples: FloatArray, language: String, options: VideoWorkOptions): List<AsrSegment> {
         val liveProfiles = container.apiProfiles.profiles.first()
         val live = liveProfiles.firstOrNull { it.id == options.audioApiProfileId }
-            ?: throw TaskWaiting("CAPABILITY", "请选择具有实际音频转写能力的 API 配置")
+            ?: throw TaskWaiting(TaskCapability.API.reason, "请选择具有实际音频转写能力的 API 配置")
         val captured = com.lmreader.core.api.ApiProfileCodec.decode(JSONObject(execution.payload).getJSONObject("apiProfiles").toString())
-            .firstOrNull { it.id == options.audioApiProfileId } ?: throw TaskWaiting("CAPABILITY", "音频 API 配置没有捕获到任务，请更新选项")
+            .firstOrNull { it.id == options.audioApiProfileId } ?: throw TaskWaiting(TaskCapability.API.reason, "音频 API 配置没有捕获到任务，请更新选项")
         val profile = captured.copy(apiKey = live.apiKey)
         container.apiClient.configureProfiles(liveProfiles)
-        val endpoint = options.audioApiEndpoint.toHttpUrlOrNull() ?: throw TaskWaiting("CAPABILITY", "请明确填写音频转写端点，例如 /audio/transcriptions")
+        val endpoint = options.audioApiEndpoint.toHttpUrlOrNull() ?: throw TaskWaiting(TaskCapability.API.reason, "请明确填写音频转写端点，例如 /audio/transcriptions")
         require(endpoint.scheme == "https" || endpoint.host in setOf("localhost", "127.0.0.1")) { "音频 API 需要 HTTPS，或本机服务" }
         val audio = ByteBuffer.allocate(44 + samples.size * 2).order(ByteOrder.LITTLE_ENDIAN)
         audio.put("RIFF".toByteArray()).putInt(36 + samples.size * 2).put("WAVEfmt ".toByteArray()).putInt(16).putShort(1).putShort(1)

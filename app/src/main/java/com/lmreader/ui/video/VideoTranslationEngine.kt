@@ -1,12 +1,14 @@
 package com.lmreader.ui.video
 
 import android.graphics.Bitmap
-import com.lmreader.core.api.ApiProtocol
 import com.lmreader.core.model.*
 import com.lmreader.core.storage.reader.*
 import com.lmreader.core.vision.*
 import com.lmreader.core.workflow.*
 import com.lmreader.di.AppContainer
+import com.lmreader.tasks.TaskCapability
+import com.lmreader.tasks.requireTaskCapability
+import com.lmreader.tasks.requireWorkflowCapabilities
 import com.lmreader.ui.reader.translation.*
 import com.lmreader.ui.workflow.*
 import kotlinx.coroutines.*
@@ -45,21 +47,7 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
         val from = LocalTranslationLanguage.fromTag(project.source); val to = LocalTranslationLanguage.fromTag(project.target)
         val profiles = fixedProfiles ?: container.apiProfiles.profiles.first()
         // The captured program already contains the user's branch-wide API override.
-        for (node in p.allNodes()) {
-            try {
-                if (node.kind in setOf(WorkflowKind.API, WorkflowKind.API_STREAM)) {
-                    val id = (node.inputs["profile"] as? WorkflowExpression.Text)?.value ?: error("请明确选择 API 配置")
-                    val profile = profiles.firstOrNull { it.id == id } ?: error("缺少 API 配置，请先复制工作流并绑定 API")
-                    require(profile.kind == ApiProfileKind.LLM) { "此节点需要 LLM API 配置" }
-                    ApiProtocol.validate(profile)
-                }
-                if (node.kind == WorkflowKind.TRANSLATE) {
-                    val routes = p.copy(rows = listOf(node)).localTranslationRoutes(from, to)
-                    require(routes.isNotEmpty()) { "语言方向需明确绑定" }
-                    routes.forEach { route -> container.translationModels.installedCatalog().route(route.source, route.target, route.engine) }
-                }
-            } catch (error: Exception) { throw IllegalStateException("${node.label.ifBlank { WorkflowLabels.kind(node.kind) }}：${error.message}", error) }
-        }
+        requireWorkflowCapabilities(container, p, from, to, profiles)
         val visionDemand = p.visionModelDemand(textScope, from, to)
         val frame = frameSettings ?: VideoFrameSettings(render = container.bubbleRenderPreferences.settings.first(),
             similarityPercent = container.screenTranslation.preferences.settings.value.videoSimilarityPercent)
@@ -75,8 +63,8 @@ class VideoTranslationEngine(private val container: AppContainer, val project: V
         identity = workflowResultIdentity(p, settings, container.translationModels.installedPacks.value.values.toList(),
             vision.modelIdentities, visionSettings, trackingIdentity)
         val routes = p.localTranslationRoutes(from, to)
-        container.localTranslator.prepareEngineModels(owner, routes)
-        vision.reconfigure(visionDemand)
+        requireTaskCapability(TaskCapability.TRANSLATION) { container.localTranslator.prepareEngineModels(owner, routes) }
+        requireTaskCapability(TaskCapability.VISION) { vision.reconfigure(visionDemand) }
         vision.setPreprocessingCacheLimit(container.translationCachePreferences.megabytes.value.toLong() * 1_048_576)
     }
     override fun pageId(positionMs: Long) = "video:${project.id}:${project.sha256}:$positionMs:$identity"

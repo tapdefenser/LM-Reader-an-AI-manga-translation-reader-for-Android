@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.hasSetTextAction
@@ -164,6 +165,56 @@ class VideoOptionsUiTest {
         assertEquals("{\"enabled\":false}", stored.style)
         assertEquals(changed.frameSettings, container.videoTasks.options(videoId).frameSettings)
         assertEquals("pt-BR", container.videoTasks.options(videoId).target)
+    }
+
+    @Test fun maskTextColorSavesFromDialogWithoutChangingExistingWorkOrSubtitleStyle() = runBlocking<Unit> {
+        val options = container.videoTasks.options(videoId).copy(mode = "FRAME", source = "en",
+            endMs = container.videoCatalog.find(videoId)!!.durationMs)
+        container.videoTasks.submit(videoId, options)
+        val dao = container.workDatabase.results()
+        val original = dao.settings(videoId)!!
+        dao.putSettings(original.copy(style = "{\"enabled\":false,\"textColor\":123,\"offsetMs\":400,\"maskTextColor\":\"BLACK\"}"))
+        val before = container.workDatabase.tasks().all().associateBy { it.taskId }
+        openDialog()
+        compose.onNodeWithTag("video-mask-text:BLACK").performScrollTo().assertIsSelected()
+        compose.onNodeWithTag("video-mask-text:WHITE").performScrollTo().performClick()
+        compose.onNodeWithText("保存").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("video-option:source").fetchSemanticsNodes().isEmpty() }
+        val stored = dao.settings(videoId)!!
+        assertEquals(com.lmreader.core.model.BubbleTextColorMode.WHITE, videoMaskTextColor(stored.style))
+        val style = org.json.JSONObject(stored.style)
+        assertEquals(false, style.getBoolean("enabled"))
+        assertEquals(123, style.getInt("textColor"))
+        assertEquals(400, style.getInt("offsetMs"))
+        assertEquals(original.json, stored.json)
+        val after = container.workDatabase.tasks().all().associateBy { it.taskId }
+        assertEquals(before.keys, after.keys)
+        // Parent progress text and normalized sort indexes reconcile asynchronously;
+        // the saved work, its execution generation and its safe checkpoint must not change.
+        before.forEach { (id, task) ->
+            val current = after.getValue(id)
+            assertEquals(task.payload, current.payload)
+            assertEquals(task.generation, current.generation)
+            assertEquals(task.state, current.state)
+            assertEquals(task.checkpoint, current.checkpoint)
+            assertEquals(task.completed, current.completed)
+        }
+    }
+
+    @Test fun missingWorkflowCapabilitiesRouteByTheActualFailureRatherThanSubtitleSource() = runBlocking<Unit> {
+        assertEquals("ASR_LOCAL", container.videoTasks.options(videoId).subtitleSource)
+        val local = container.translationWorkflows.find(com.lmreader.core.model.TranslationWorkflow.LOCAL_MACHINE_ID)!!
+        val from = com.lmreader.core.model.LocalTranslationLanguage.fromTag("en")
+        val to = com.lmreader.core.model.LocalTranslationLanguage.fromTag("zh-Hans")
+        for ((program, reason, route) in listOf(
+            Triple(local.program, com.lmreader.tasks.TaskCapability.TRANSLATION.reason, "settings/api/local"),
+            Triple(WorkflowTemplates.visionApi("missing-profile"), com.lmreader.tasks.TaskCapability.API.reason, "settings/api"),
+        )) {
+            val failure = runCatching { com.lmreader.tasks.requireWorkflowCapabilities(container, program, from, to, emptyList()) }.exceptionOrNull()
+            assertTrue(failure is com.lmreader.tasks.TaskWaiting)
+            assertEquals(reason, (failure as com.lmreader.tasks.TaskWaiting).reason)
+            assertEquals(route, com.lmreader.tasks.capabilitySettingsRoute(failure.reason))
+        }
     }
 
     @Test fun subtitleSourceListContainsTheDisplaySettingsWithoutCreatingTasks() = runBlocking<Unit> {

@@ -19,6 +19,7 @@ data class PageTranslatedRegion(val region: PageTextRegion, val translatedText: 
 fun PageTextRegion.renderGeometry() = copy(sourceText = "")
 
 enum class BubbleFillMode { AUTO, WHITE }
+enum class BubbleTextColorMode { BLACK, WHITE, AUTO }
 enum class BubbleFont { SYSTEM, SANS_SERIF, SERIF, MONOSPACE }
 
 data class BubbleRenderSettings(

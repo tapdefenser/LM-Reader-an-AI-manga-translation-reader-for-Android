@@ -63,6 +63,39 @@ class UnifiedTaskSchedulerTest {
         assertEquals(1, db.tasks().all().size)
     }
 
+    @Test fun capabilityRepairResumesTheSameSnapshotFromItsSavedSafeUnit() = runBlocking<Unit> {
+        start()
+        val available = java.util.concurrent.atomic.AtomicBoolean(false)
+        val firstUnits = AtomicInteger()
+        val attempts = AtomicInteger()
+        scheduler.register("TEST") { execution ->
+            attempts.incrementAndGet()
+            if(execution.initial.completed == 0L) {
+                firstUnits.incrementAndGet()
+                execution.progress(1, 2, "first unit saved", "{\"unit\":1}")
+            }
+            requireTaskCapability(TaskCapability.TRANSLATION, "translation node") { check(available.get()) { "missing language pack" } }
+            assertEquals("{\"unit\":1}", db.tasks().get(execution.taskId)!!.checkpoint)
+            execution.progress(2, 2, "done")
+        }
+        val task = scheduler.submit("TEST", "capability fixture", "repair-owner", "repair-key",
+            "{\"options\":{\"subtitleSource\":\"ASR_LOCAL\"},\"snapshot\":\"original\"}")
+        val waiting = waitState(task.taskId, "WAITING")
+        assertEquals(TaskCapability.TRANSLATION.reason, waiting.waitingReason)
+        assertEquals("settings/api/local", capabilitySettingsRoute(waiting.waitingReason))
+        available.set(true)
+        delay(100)
+        assertEquals("WAITING", db.tasks().get(task.taskId)!!.state)
+        assertEquals(1, attempts.get())
+        scheduler.resume(task.taskId)
+        val done = waitState(task.taskId, "SUCCEEDED")
+        assertEquals(task.payload, done.payload)
+        assertEquals(2L, done.completed)
+        assertEquals(2, attempts.get())
+        assertEquals(1, firstUnits.get())
+        assertEquals(1, db.tasks().all().count { it.ownerKey == "repair-owner" })
+    }
+
     @Test fun failedStartupReleasesUiWaitersButKeepsAdmissionClosed() = runBlocking {
         startup.completeExceptionally(IllegalStateException("restore fixture failed"))
         withTimeout(8000) { scheduler.ready.await() }
