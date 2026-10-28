@@ -14,6 +14,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
@@ -32,6 +33,8 @@ import com.lmreader.R
 import com.lmreader.di.AppContainer
 import com.lmreader.screen.ScreenBallPosition
 import com.lmreader.tasks.TaskQueue
+import com.lmreader.tasks.TaskNotice
+import com.lmreader.ui.common.LocalHomeOverlayPadding
 import kotlin.math.roundToInt
 
 /** Home-only space for media collection switching, ongoing work and screen translation. */
@@ -46,42 +49,7 @@ internal fun HomeTaskChrome(container: AppContainer, homeDestination: String?,
     val enabled = homeDestination in setOf(Routes.LIBRARY, Routes.BOOKSHELF)
     val notice = notices[TaskQueue.TRANSLATION]?.takeIf { enabled && it.working }
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize()) {
-            content(Modifier.weight(1f).fillMaxWidth())
-            if(enabled) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 16.dp),
-                horizontalArrangement = Arrangement.Center) {
-                SingleChoiceSegmentedButtonRow(Modifier.widthIn(max = 264.dp).width(240.dp)) {
-                    listOf(Routes.LIBRARY to "库", Routes.BOOKSHELF to "书架").forEachIndexed { index, (destination, label) ->
-                        SegmentedButton(selected = homeDestination == destination,
-                            onClick = { onOpenCollection(destination) },
-                            shape = SegmentedButtonDefaults.itemShape(index, 2),
-                            modifier = Modifier.testTag(
-                                if(destination == Routes.LIBRARY) "home-collection:LIBRARY" else "home-collection:BOOKSHELF",
-                            ),
-                            icon = { Icon(
-                                if(destination == Routes.LIBRARY) Icons.Outlined.Book else Icons.Outlined.Bookmarks,
-                                null,
-                            ) },
-                        ) { Text(label) }
-                    }
-                }
-            }
-            if (notice != null) Surface(color = MaterialTheme.colorScheme.secondaryContainer,
-                modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenQueue).testTag("home-translation-progress")) {
-                Row(Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Column(Modifier.weight(1f)) {
-                        Text(listOf(notice.item.manga, notice.item.chapter).filter(String::isNotBlank).joinToString(" · ")
-                            .ifBlank { stringResource(R.string.lmreader_task_translation) },
-                            style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                        Text(listOfNotNull(notice.item.chapter.takeIf(String::isNotBlank),
-                            if (notice.item.total > 0) "${notice.item.completed}/${notice.item.total}" else null).joinToString(" · "),
-                            style = MaterialTheme.typography.bodySmall, maxLines = 1)
-                    }
-                }
-            }
-        }
+        HomeTaskLayout(homeDestination, notice, onOpenCollection, onOpenQueue, content)
         if (enabled) {
             val density = LocalDensity.current
             val size = with(density) { 48.dp.toPx() }
@@ -124,6 +92,68 @@ internal fun HomeTaskChrome(container: AppContainer, homeDestination: String?,
                                 onClick = { menu = false; container.screenTranslation.openSettings(context) })
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun HomeTaskLayout(homeDestination: String?, notice: TaskNotice?,
+    onOpenCollection: (String) -> Unit, onOpenQueue: () -> Unit,
+    content: @Composable (Modifier) -> Unit) {
+    val enabled = homeDestination in setOf(Routes.LIBRARY, Routes.BOOKSHELF)
+    val density = LocalDensity.current
+    var switcherHeight by remember { mutableStateOf(48.dp) }
+    Column(Modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            CompositionLocalProvider(LocalHomeOverlayPadding provides
+                if (enabled) switcherHeight + 32.dp else 0.dp) {
+                content(Modifier.fillMaxSize())
+            }
+            if (enabled) {
+                val insets = if (notice == null) WindowInsets.navigationBars
+                    else WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal)
+                Surface(
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                        .windowInsetsPadding(insets).padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+                        .testTag("home-collection-switcher")
+                        .onSizeChanged { switcherHeight = with(density) { it.height.toDp() } },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 3.dp,
+                    shadowElevation = 6.dp,
+                ) {
+                    SingleChoiceSegmentedButtonRow(Modifier.width(240.dp)) {
+                        listOf(Routes.LIBRARY to "库", Routes.BOOKSHELF to "书架").forEachIndexed { index, (destination, label) ->
+                            SegmentedButton(selected = homeDestination == destination,
+                                onClick = { onOpenCollection(destination) },
+                                shape = SegmentedButtonDefaults.itemShape(index, 2),
+                                modifier = Modifier.testTag(
+                                    if(destination == Routes.LIBRARY) "home-collection:LIBRARY" else "home-collection:BOOKSHELF",
+                                ),
+                                icon = { Icon(
+                                    if(destination == Routes.LIBRARY) Icons.Outlined.Book else Icons.Outlined.Bookmarks,
+                                    null,
+                                ) },
+                            ) { Text(label) }
+                        }
+                    }
+                }
+            }
+        }
+        if (notice != null) Surface(color = MaterialTheme.colorScheme.secondaryContainer,
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenQueue).testTag("home-translation-progress")) {
+            Row(Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Column(Modifier.weight(1f)) {
+                    Text(listOf(notice.item.manga, notice.item.chapter).filter(String::isNotBlank).joinToString(" · ")
+                        .ifBlank { stringResource(R.string.lmreader_task_translation) },
+                        style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    Text(listOfNotNull(notice.item.chapter.takeIf(String::isNotBlank),
+                        if (notice.item.total > 0) "${notice.item.completed}/${notice.item.total}" else null).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall, maxLines = 1)
                 }
             }
         }

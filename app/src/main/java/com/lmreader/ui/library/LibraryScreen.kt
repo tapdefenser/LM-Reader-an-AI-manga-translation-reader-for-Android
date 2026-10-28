@@ -3,6 +3,7 @@ package com.lmreader.ui.library
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -47,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.lmreader.ui.common.LocalHomeOverlayPadding
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -345,7 +347,8 @@ fun LibraryScreen(
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                            contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp,
+                                bottom = 12.dp + LocalHomeOverlayPadding.current),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             items(state.items, key = { it.mangaId }) { card ->
@@ -377,7 +380,8 @@ fun LibraryScreen(
                             state = gridState,
                             columns = GridCells.Adaptive(112.dp),
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+                            contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp,
+                                bottom = 12.dp + LocalHomeOverlayPadding.current),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {

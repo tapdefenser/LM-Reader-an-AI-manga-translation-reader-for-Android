@@ -2,6 +2,7 @@
 
 ## Unreleased / 未发布
 
+- Float the Library/Shelf capsule over the home content, with scrollable bottom spacing and clearance above translation progress. / 库/书架胶囊按钮悬浮在首页内容上，列表末尾可滚到按钮上方，并避让翻译进度条。
 - Move Images/Videos to the main menu and Library/Shelf to the rounded home segments; retain the current collection when changing media and restore each collection's page state. / 主菜单改为图片/视频，底部圆角分段按钮改为库/书架；切换媒体保留当前集合，切换集合恢复各页状态，图库统一简称为库。
 - Add video mask text color: Black, White or Automatic based on each region's background. Changes apply to existing overlays and review previews without rerunning translation. / 视频增加遮罩文字颜色：黑色、白色、自动（随背景亮度），保存即更新已有遮罩和校对预览，无需重译。
 - Route capability repair by the actual missing ASR, translation, vision or API requirement, preserving the original waiting task and snapshot. / 按实际缺少的 ASR、机翻、视觉或 API 能力进入对应设置，保留等待任务与原配置。

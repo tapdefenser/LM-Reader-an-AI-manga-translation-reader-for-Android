@@ -36,6 +36,7 @@ import com.lmreader.core.index.NaturalOrder
 import com.lmreader.core.model.InferencePriority
 import com.lmreader.core.model.ResourceGovernor
 import com.lmreader.di.AppContainer
+import com.lmreader.ui.common.LocalHomeOverlayPadding
 import com.lmreader.tasks.taskStateLabel
 import com.lmreader.ui.i18n.Text
 import kotlinx.coroutines.*
@@ -164,7 +165,8 @@ private fun CatalogContent(container: AppContainer, shelf: Boolean, saved: JSONO
         if(permission != "FULL") TextButton(onClick = ::requestPermission) { Text(if(permission == "PARTIAL") "仅可访问部分视频 · 更改授权" else "授予视频读取权限") }
         if(scanning) LinearProgressIndicator(Modifier.fillMaxWidth())
         (error ?: scanError)?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
-        LazyColumn(state = list, contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(state = list, contentPadding = PaddingValues(start = 12.dp, end = 12.dp,
+            bottom = 24.dp + LocalHomeOverlayPadding.current), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if(visible.isEmpty()) item { Text(if(shelf) "书架还没有视频；可收藏视频，或设置翻译后自动加入。" else "当前授权范围内没有视频。", modifier = Modifier.padding(24.dp)) }
             items(visible, key = { it.videoId }) { video ->
                 val taskState = videoTaskState(tasks, video.videoId)

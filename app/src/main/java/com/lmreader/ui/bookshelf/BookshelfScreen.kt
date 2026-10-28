@@ -60,6 +60,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Modifier
+import com.lmreader.ui.common.LocalHomeOverlayPadding
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -248,7 +249,8 @@ fun BookshelfScreen(
                         LazyColumn(
                             state = listState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(12.dp),
+                            contentPadding = PaddingValues(start = 12.dp, top = 12.dp, end = 12.dp,
+                                bottom = 12.dp + LocalHomeOverlayPadding.current),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             items(state.items, key = { it.mangaId }) { card ->

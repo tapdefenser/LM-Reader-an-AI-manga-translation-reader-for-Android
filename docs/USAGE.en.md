@@ -6,7 +6,7 @@ This guide covers comics, screen translation and local video in `v0.1.12`; mask 
 
 ## Library, reading and language
 
-Choose Image or Video in the main menu, then use the rounded Library/Shelf segments at the bottom of the home page. Changing media keeps the current collection, and switching collections restores each page's state. Choosing media from Settings or another page opens Library.
+Choose Image or Video in the main menu, then use the floating Library/Shelf capsule at the bottom of the home page. It overlays the page, leaves scrollable space for the last item and stays above translation progress. Changing media keeps the current collection, and switching collections restores each page's state. Choosing media from Settings or another page opens Library.
 
 Select a folder on the initial path screen, choose its single/multi-chapter layout and scan it. Image folders, ZIP, CBZ and PDF share the entry point. Reselect the original folder after moving it or losing permission. Comic details offer shelf membership, categories and chapters; reader settings cover paged/strip modes, zoom, cropping and preloading.
 
