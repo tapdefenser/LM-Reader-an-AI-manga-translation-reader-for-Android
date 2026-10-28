@@ -18,7 +18,16 @@ class HomeTaskChromeTest {
     @Test fun ballDragsAndOpensAnUpwardMenuOnlyOnHome() {
         val container=AppContainer.from(ApplicationProvider.getApplicationContext())
         val enabled=mutableStateOf(true)
-        compose.setContent { MaterialTheme { HomeTaskChrome(container,enabled.value,{}) { Box(it) } } }
+        compose.setContent {
+            MaterialTheme {
+                HomeTaskChrome(
+                    container = container,
+                    homeDestination = if(enabled.value) Routes.BOOKSHELF else null,
+                    onOpenCollection = {},
+                    onOpenQueue = {},
+                ) { Box(it) }
+            }
+        }
         val ball=compose.onNodeWithTag("screen-translation-ball")
         val before=ball.fetchSemanticsNode().boundsInRoot
         ball.performTouchInput { swipe(center,center+androidx.compose.ui.geometry.Offset(-90f,-90f)) }
@@ -31,5 +40,31 @@ class HomeTaskChromeTest {
         assertTrue(item.fetchSemanticsNode().positionInWindow.y < ball.fetchSemanticsNode().positionInWindow.y)
         compose.runOnIdle { enabled.value=false }
         ball.assertDoesNotExist()
+        compose.onNodeWithTag("home-collection:LIBRARY").assertDoesNotExist()
+        compose.onNodeWithTag("home-collection:BOOKSHELF").assertDoesNotExist()
+    }
+
+    @Test fun libraryAndShelfSegmentsReplaceImageAndVideoSwitch() {
+        val container=AppContainer.from(ApplicationProvider.getApplicationContext())
+        val destination = mutableStateOf(Routes.LIBRARY)
+        compose.setContent {
+            MaterialTheme {
+                HomeTaskChrome(
+                    container = container,
+                    homeDestination = destination.value,
+                    onOpenCollection = { destination.value = it },
+                    onOpenQueue = {},
+                ) { Box(it) }
+            }
+        }
+        compose.onNodeWithTag("home-collection:LIBRARY").assertIsSelected().assertIsDisplayed()
+        compose.onNodeWithText("库").assertIsDisplayed()
+        compose.onNodeWithTag("home-collection:BOOKSHELF").assertIsDisplayed().performClick()
+        assertEquals(Routes.BOOKSHELF, destination.value)
+        compose.onNodeWithTag("home-collection:BOOKSHELF").assertIsSelected()
+        compose.onNodeWithTag("home-collection:LIBRARY").performClick().assertIsSelected()
+        assertEquals(Routes.LIBRARY, destination.value)
+        compose.onNodeWithText("图片").assertDoesNotExist()
+        compose.onNodeWithText("视频").assertDoesNotExist()
     }
 }

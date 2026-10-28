@@ -6,6 +6,8 @@ This guide covers comics, screen translation and local video in `v0.1.12`; mask 
 
 ## Library, reading and language
 
+Choose Image or Video in the main menu, then use the rounded Library/Shelf segments at the bottom of the home page. Changing media keeps the current collection, and switching collections restores each page's state. Choosing media from Settings or another page opens Library.
+
 Select a folder on the initial path screen, choose its single/multi-chapter layout and scan it. Image folders, ZIP, CBZ and PDF share the entry point. Reselect the original folder after moving it or losing permission. Comic details offer shelf membership, categories and chapters; reader settings cover paged/strip modes, zoom, cropping and preloading.
 
 Document paths identify comics; titles are display labels. Same titles at different paths remain separate, while rescanning the same path updates its existing record and retains shelf membership, reading progress and glossary. After scanning, the loaded page window is reconciled to recover records inserted before an existing cursor, without loading the whole library.
@@ -16,7 +18,7 @@ Open **⋮ → Translation Management** on the comic details page to manage that
 
 ## Local video, background translation and review
 
-Library and Shelf share a remembered image/video switch. The video catalog lists system-indexed media that the app can access; Android 14+ partial access limits the list to selected videos. Refresh discovers media again. Relocate files after moving them or losing access.
+Choose Video in the main menu, then use Library/Shelf at the bottom to switch between all accessible videos and favorites. The media choice is remembered. The video catalog lists system-indexed media that the app can access; Android 14+ partial access limits the list to selected videos. Refresh discovers media again. Relocate files after moving them or losing access.
 
 Open a video and select frames, subtitles or both in translation options, then choose languages and a workflow for each branch. Only branches using API nodes need an API profile. Local subtitle recognition uses the installed model selected in **Settings → API and translation engines → Local ASR models**. Automatic always uses CPU. GPU backends are experimental, and Vulkan is restricted on the device model with a confirmed crash.
 

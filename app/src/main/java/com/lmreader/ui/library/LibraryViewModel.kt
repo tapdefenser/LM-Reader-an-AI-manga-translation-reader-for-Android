@@ -613,7 +613,7 @@ data class LibraryUiState(
             // 看到"没有匹配「a」的漫画"，而其实只是还没查。
             appliedQuery.isNotBlank() -> ScreenState.Empty("没有匹配「$appliedQuery」的漫画")
             else -> ScreenState.Empty(
-                message = "图库里还没有漫画",
+                message = "库里还没有漫画",
                 actionLabel = null,
             )
         }

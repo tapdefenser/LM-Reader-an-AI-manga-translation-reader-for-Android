@@ -5,9 +5,9 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Book
+import androidx.compose.material.icons.outlined.Bookmarks
 import androidx.compose.material.icons.outlined.Translate
-import androidx.compose.material.icons.outlined.Image
-import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -33,29 +33,36 @@ import com.lmreader.di.AppContainer
 import com.lmreader.screen.ScreenBallPosition
 import com.lmreader.tasks.TaskQueue
 import kotlin.math.roundToInt
-import kotlinx.coroutines.launch
 
-/** Home-only space for ongoing work and the future screen translation entry. */
+/** Home-only space for media collection switching, ongoing work and screen translation. */
 @Composable
-internal fun HomeTaskChrome(container: AppContainer, enabled: Boolean, onOpenQueue: () -> Unit,
+internal fun HomeTaskChrome(container: AppContainer, homeDestination: String?,
+    onOpenCollection: (String) -> Unit, onOpenQueue: () -> Unit,
     content: @Composable (Modifier) -> Unit) {
     val notices by container.taskNotifications.notices.collectAsStateWithLifecycle()
     val screenState by container.screenTranslation.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val step by container.translationQueue.currentStep.collectAsStateWithLifecycle()
-    val mediaMode by container.preferences.homeMediaMode.collectAsStateWithLifecycle(initialValue = null)
-    val scope = rememberCoroutineScope()
+    val enabled = homeDestination in setOf(Routes.LIBRARY, Routes.BOOKSHELF)
     val notice = notices[TaskQueue.TRANSLATION]?.takeIf { enabled && it.working }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             content(Modifier.weight(1f).fillMaxWidth())
-            if(enabled && mediaMode != null) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 16.dp),
+            if(enabled) Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(vertical = 16.dp),
                 horizontalArrangement = Arrangement.Center) {
                 SingleChoiceSegmentedButtonRow(Modifier.widthIn(max = 264.dp).width(240.dp)) {
-                    listOf("IMAGE" to "图片", "VIDEO" to "视频").forEachIndexed { index, (mode, label) ->
-                        SegmentedButton(selected = mediaMode == mode, onClick = { scope.launch { container.preferences.setHomeMediaMode(mode) } },
+                    listOf(Routes.LIBRARY to "库", Routes.BOOKSHELF to "书架").forEachIndexed { index, (destination, label) ->
+                        SegmentedButton(selected = homeDestination == destination,
+                            onClick = { onOpenCollection(destination) },
                             shape = SegmentedButtonDefaults.itemShape(index, 2),
-                            icon = { Icon(if(mode == "IMAGE") Icons.Outlined.Image else Icons.Outlined.Videocam, null) }) { Text(label) }
+                            modifier = Modifier.testTag(
+                                if(destination == Routes.LIBRARY) "home-collection:LIBRARY" else "home-collection:BOOKSHELF",
+                            ),
+                            icon = { Icon(
+                                if(destination == Routes.LIBRARY) Icons.Outlined.Book else Icons.Outlined.Bookmarks,
+                                null,
+                            ) },
+                        ) { Text(label) }
                     }
                 }
             }

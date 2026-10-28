@@ -128,7 +128,7 @@ private fun CatalogContent(container: AppContainer, shelf: Boolean, saved: JSONO
             }
         }
     }
-    Scaffold(topBar = { TopAppBar(title = { Text(if(shelf) "书架 · 视频" else "图库 · 视频") }, navigationIcon = {
+    Scaffold(topBar = { TopAppBar(title = { Text("视频") }, navigationIcon = {
         IconButton(onClick = onOpenMenu) { Icon(Icons.Default.Menu, "菜单") }
     }, actions = {
         IconButton(onClick = { container.videoMaintenance.refresh(full = true) }) { Icon(Icons.Default.Refresh, "刷新视频库") }

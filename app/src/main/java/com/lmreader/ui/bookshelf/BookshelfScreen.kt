@@ -236,9 +236,9 @@ fun BookshelfScreen(
                         )
                     } else {
                         MessageState(
-                            message = "书架还是空的。在图库里长按漫画卡片即可加入书架，" +
+                            message = "书架还是空的。在库里长按漫画卡片即可加入书架，" +
                                 "收藏不会复制原文件。",
-                            actionLabel = "去图库",
+                            actionLabel = "去库",
                             onAction = onOpenLibrary,
                         )
                     }

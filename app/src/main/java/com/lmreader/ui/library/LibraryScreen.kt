@@ -251,8 +251,8 @@ fun LibraryScreen(
                         Text(
                             // 生效筛选时在标题上写明范围，用户不必打开栏就知道在看什么。
                             text = state.effectiveSourceFilter?.let { filter ->
-                                "图库（${filter.size} 个图源）"
-                            } ?: "图库",
+                                "库（${filter.size} 个图源）"
+                            } ?: "库",
                         )
                     }
                 },
