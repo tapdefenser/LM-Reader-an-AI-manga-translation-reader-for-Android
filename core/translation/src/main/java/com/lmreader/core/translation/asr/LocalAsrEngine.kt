@@ -208,6 +208,9 @@ class LocalAsrEngine(private val manager: AsrModelManager) {
      * UI never stores a GPU label for a CPU session.
      */
     suspend fun selectBackend(backend: AsrBackend): AsrRuntimeCapabilities {
+        require(asrBackendRestriction(backend, android.os.Build.MODEL) == null) {
+            asrBackendRestriction(backend, android.os.Build.MODEL).orEmpty()
+        }
         stopAndAwait()
         val current = capabilities.value ?: refreshCapabilities()
         if (backend == AsrBackend.VULKAN || backend == AsrBackend.OPENCL) {
@@ -240,6 +243,9 @@ class LocalAsrEngine(private val manager: AsrModelManager) {
         backend: AsrBackend,
         threads: Int,
     ): Long {
+        require(asrBackendRestriction(backend, android.os.Build.MODEL) == null) {
+            asrBackendRestriction(backend, android.os.Build.MODEL).orEmpty()
+        }
         val key = AsrSessionKey(
             modelId = model.id,
             version = model.version,

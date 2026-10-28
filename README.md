@@ -69,12 +69,15 @@ LM-Reader 面向你自己的本地漫画目录。管理图库和阅读进度，�
 python -m pip install PyYAML
 python tools/fetch_vision_models.py
 python tools/fetch_translation_sources.py
+python tools/fetch_asr_sources.py
 # 设置 JAVA_HOME，并在 local.properties 配置 sdk.dir。
 ./gradlew :app:assembleDebug :app:assembleRelease test :app:lintDebug :app:lintRelease
 python tools/package_release.py --allow-unsigned
 ```
 
 Windows 使用 `gradlew.bat`。未提供正式签名环境变量时，Release 产物为未签名候选；离线机翻包由用户运行时下载/导入。完整构建、签名与校验步骤见[发布准备](docs/RELEASING.zh-CN.md)。
+
+默认 Vulkan ASR 构建还需要主机 C++17 编译器来生成 shader；Windows 可通过 `-Plmreader.asr.hostToolchain=...` 指定现有工具链。只构建 CPU 运行时可同时设置 `-Plmreader.asr.vulkan=false -Plmreader.asr.opencl=false`，详见[ASR 构建条件](docs/plans/2026-10-22-video-feedback.zh-CN.md#构建条件)。
 
 ## 文档与项目结构
 

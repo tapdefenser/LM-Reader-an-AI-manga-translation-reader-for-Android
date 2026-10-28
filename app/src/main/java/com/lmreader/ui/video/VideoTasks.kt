@@ -82,7 +82,8 @@ class VideoTasks internal constructor(private val container: AppContainer,
         similarityPercent = container.screenTranslation.preferences.settings.value.videoSimilarityPercent,
         render = container.bubbleRenderPreferences.settings.first())
     /** Saving a draft never changes task snapshots, queue state, shelf membership or result identity. */
-    suspend fun saveOptions(id: String, options: VideoWorkOptions) = snapshot(id) {
+    suspend fun saveOptions(id: String, options: VideoWorkOptions,
+        maskTextColor: BubbleTextColorMode? = null) = snapshot(id) {
         require(options.mode in setOf("FRAME", "SUBTITLE", "BOTH"))
         require(options.maxDimension in 64..2048)
         VideoSamplingRate(options.fpsNumerator, options.fpsDenominator)
@@ -94,7 +95,9 @@ class VideoTasks internal constructor(private val container: AppContainer,
             val old = dao.settings(id) ?: VideoSettingsRecord(id)
             val merged = JSONObject(old.json)
             saved.keys().forEach { key -> merged.put(key, saved.get(key)) }
-            dao.putSettings(old.copy(json = merged.toString(), revision = UUID.randomUUID().toString()))
+            dao.putSettings(old.copy(json = merged.toString(),
+                style = maskTextColor?.let { withVideoMaskTextColor(old.style, it) } ?: old.style,
+                revision = UUID.randomUUID().toString()))
         }
         Unit
     }
@@ -302,6 +305,7 @@ class VideoTasks internal constructor(private val container: AppContainer,
         try {
             options.frameSettings?.let { engine.configure(it) }
             try { engine.prepare() } catch(e: CancellationException) { throw e }
+            catch(e: TaskWaiting) { throw e }
             catch(e: Exception) { throw TaskWaiting("CAPABILITY", e.message ?: "画面工作流尚未就绪") }
             val checkpoint = JSONObject(execution.initial.checkpoint)
             val previousIdentity = checkpoint.optString("identity")
@@ -513,6 +517,7 @@ class VideoTasks internal constructor(private val container: AppContainer,
             ApiProfileCodec.decode(payload.getJSONObject("apiProfiles").toString()), "subtitle:${payload.optString("resultEpoch")}")
         try {
             try { engine.prepare() } catch(e: CancellationException) { throw e }
+            catch(e: TaskWaiting) { throw e }
             catch(e: Exception) { throw TaskWaiting("CAPABILITY", e.message ?: "字幕工作流尚未就绪") }
             val progressLock = Mutex()
             var sourceCheckpoint = execution.initial.checkpoint

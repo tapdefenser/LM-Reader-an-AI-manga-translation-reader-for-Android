@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Check localization
+        run: python3 tools/ci_run.py localization python3 tools/test_ui_translations.py
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -44,8 +46,6 @@ jobs:
           python3 tools/ci_run.py vision-models .scratch/ci-python/bin/python tools/fetch_vision_models.py
           python3 tools/ci_run.py translation-sources .scratch/ci-python/bin/python tools/fetch_translation_sources.py
           python3 tools/ci_run.py asr-sources .scratch/ci-python/bin/python tools/fetch_asr_sources.py
-      - name: Check localization
-        run: python3 tools/ci_run.py localization python3 tools/test_ui_translations.py
       - name: Build, test and lint
         run: |
           chmod +x gradlew

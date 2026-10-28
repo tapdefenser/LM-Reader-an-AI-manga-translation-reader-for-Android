@@ -30,8 +30,9 @@ class BubbleMaskRenderer {
         })
     }
 
-    fun prepare(source: Bitmap, regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings) =
-        prepareSource(source, regions.map { it.region }).layout(regions, settings, hideEmpty = true)
+    fun prepare(source: Bitmap, regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings,
+        textColorMode: BubbleTextColorMode = BubbleTextColorMode.AUTO) =
+        prepareSource(source, regions.map { it.region }).layout(regions, settings, hideEmpty = true, textColorMode = textColorMode)
 
     /** Export composition only. Reader draws the very same prepared overlay directly on its Canvas. */
     fun render(source: Bitmap, regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings): Bitmap {
@@ -176,7 +177,7 @@ internal data class OverlaySeed(val region: PageTextRegion, val path: Path, val 
 class BubbleOverlaySource internal constructor(seeds: List<OverlaySeed>) {
     private val byId = seeds.associateBy { it.region.id }
     fun layout(regions: List<PageTranslatedRegion>, settings: BubbleRenderSettings, hideEmpty: Boolean = false,
-        includeEmptyForEditing: Boolean = false): BubbleOverlay {
+        includeEmptyForEditing: Boolean = false, textColorMode: BubbleTextColorMode = BubbleTextColorMode.AUTO): BubbleOverlay {
         val renderer = BubbleMaskRenderer()
         return BubbleOverlay(regions.filter { !hideEmpty || includeEmptyForEditing || it.translatedText.isNotBlank() }.map { item ->
             val previous = byId[item.region.id]
@@ -192,7 +193,11 @@ class BubbleOverlaySource internal constructor(seeds: List<OverlaySeed>) {
                 if(item.region.kind == RegionKind.FREE_TEXT) .35f else 1f
             val rect = RectF(safe.left + pad, safe.top + pad, safe.right - pad, safe.bottom - pad)
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                this.color = if (Color.red(color) * .2126f + Color.green(color) * .7152f + Color.blue(color) * .0722f > 145) Color.BLACK else Color.WHITE
+                this.color = when (textColorMode) {
+                    BubbleTextColorMode.BLACK -> Color.BLACK
+                    BubbleTextColorMode.WHITE -> Color.WHITE
+                    BubbleTextColorMode.AUTO -> if (Color.red(color) * .2126f + Color.green(color) * .7152f + Color.blue(color) * .0722f > 145) Color.BLACK else Color.WHITE
+                }
                 typeface = Typeface.create(when (settings.font) {
                     BubbleFont.SYSTEM -> null
                     BubbleFont.SANS_SERIF -> "sans-serif"

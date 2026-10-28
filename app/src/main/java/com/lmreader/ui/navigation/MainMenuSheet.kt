@@ -14,12 +14,12 @@ import androidx.compose.material3.NavigationDrawerItem
 import com.lmreader.ui.i18n.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 
 /**
- * 主菜单：图库 / 书架 / 翻译队列 / 导出队列 / 设置（开发文档 3 导航图）。
- *
- * 队列入口显示活动任务数（开发文档 8.1「菜单」）。
+ * 主菜单先选择媒体类型（图片 / 视频），进入后再用首页底部的
+ * 分段按钮切换库 / 书架。队列入口显示活动任务数。
  */
 @Composable
 fun MainMenuSheet(
@@ -39,7 +39,12 @@ fun MainMenuSheet(
             Spacer(Modifier.height(8.dp))
 
             MainDestination.entries
-                .filter { it !in setOf(MainDestination.MENU, MainDestination.VIDEOS, MainDestination.EXPORT_QUEUE) }
+                .filter { it !in setOf(
+                    MainDestination.MENU,
+                    MainDestination.LIBRARY,
+                    MainDestination.BOOKSHELF,
+                    MainDestination.EXPORT_QUEUE,
+                ) }
                 .forEach { destination ->
                     val badge = when (destination) {
                         MainDestination.TRANSLATION_QUEUE -> activeTranslationTasks
@@ -61,14 +66,16 @@ fun MainMenuSheet(
                             onNavigate(destination)
                             onDismiss()
                         },
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                        modifier = Modifier
+                            .padding(horizontal = 12.dp, vertical = 2.dp)
+                            .testTag("main-menu:${destination.name}"),
                     )
                 }
 
             Spacer(Modifier.height(12.dp))
             HorizontalDivider()
             Text(
-                text = "本地图库 · 单/多章节 · 译文遮罩阅读",
+                text = "本地库 · 图片/视频 · 译文遮罩阅读",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -80,9 +87,10 @@ fun MainMenuSheet(
 /** 主菜单可到达的目的地。 */
 enum class MainDestination(val label: String) {
     MENU("菜单"),
-    LIBRARY("图库"),
+    IMAGES("图片"),
+    LIBRARY("库"),
     BOOKSHELF("书架"),
-    VIDEOS("本地视频"),
+    VIDEOS("视频"),
     TRANSLATION_QUEUE("翻译队列"),
     TRANSLATION_WORKFLOWS("翻译工作流"),
     API_LOGS("API 日志"),

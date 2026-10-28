@@ -253,7 +253,7 @@ private fun TranslationGroupCard(group: TranslationQueueGroup, title: String, su
             root?.stage?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             if (root != null && onResolve != null && root.state == "WAITING" && root.needsResolve()) {
                 TextButton(onClick = { onResolve?.invoke(root) }) {
-                    Text(if (root.waitingReason in setOf("CAPABILITY", "API_ACCESS")) "补齐翻译能力" else "查看来源与选项")
+                    Text(if (isCapabilityWaitingReason(root.waitingReason)) "补齐翻译能力" else "查看来源与选项")
                 }
             }
             if (root != null && root.remoteOutcomeUnknown) TextButton(onClick = { onUnknown(root) }) { Text("核对请求") }
@@ -338,7 +338,7 @@ private fun TaskCard(task: TaskRecord, indented: Boolean, scheduler: TaskSchedul
             task.failure?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             if (onResolve != null && task.state == "WAITING" && task.needsResolve()) {
                 TextButton(onClick = { onResolve?.invoke(task) }) {
-                    Text(if (task.waitingReason in setOf("CAPABILITY", "API_ACCESS")) "补齐翻译能力" else "查看来源与选项")
+                    Text(if (isCapabilityWaitingReason(task.waitingReason)) "补齐翻译能力" else "查看来源与选项")
                 }
             }
 
@@ -346,8 +346,8 @@ private fun TaskCard(task: TaskRecord, indented: Boolean, scheduler: TaskSchedul
     }
 }
 
-private fun TaskRecord.needsResolve() = waitingReason in setOf(
-    "CAPABILITY", "API_ACCESS", "ACCESS", "SOURCE_CHANGED", "CONFIG_CHANGED", "CHAPTER_PAUSED")
+private fun TaskRecord.needsResolve() = isCapabilityWaitingReason(waitingReason) || waitingReason in setOf(
+    "ACCESS", "SOURCE_CHANGED", "CONFIG_CHANGED", "CHAPTER_PAUSED")
 
 private fun chapterStateLabel(state: String) = when (state) {
     "PENDING" -> "等待中"; "RUNNING" -> "翻译中"; "PAUSED" -> "已暂停"
@@ -371,6 +371,10 @@ fun waitingReasonLabel(value: String) = when {
     value.startsWith("API:") -> "等待 API 并发许可"
     value.startsWith("VERIFY:") -> "正在校验原视频字节：${value.substringAfter(':')}"
     value == "CAPABILITY" -> "等待模型或 API 配置，请在设置补齐后继续"
+    value == TaskCapability.ASR.reason -> "等待本地 ASR 模型或可用后端，请补齐后继续"
+    value == TaskCapability.TRANSLATION.reason -> "等待本地机翻语言包，请安装所需语言方向后继续"
+    value == TaskCapability.VISION.reason -> "等待 SEG/OCR 模型或可用后端，请补齐后继续"
+    value == TaskCapability.API.reason || value == "API_ACCESS" -> "等待 API 配置，请补齐后继续"
     value == "ACCESS" -> "等待文件读取授权或重新定位"
     value == "SYSTEM_INTERRUPTED" -> "系统中断，已保留成果和恢复点"
     value == "SYSTEM_LIMIT" -> "等待系统允许后台运行，请打开应用后继续"

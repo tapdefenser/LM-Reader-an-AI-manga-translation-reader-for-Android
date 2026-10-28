@@ -66,6 +66,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.room.withTransaction
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.davemorrissey.labs.subscaleview.ImageSource
 import com.davemorrissey.labs.subscaleview.SubsamplingScaleImageView
 import com.lmreader.core.database.media.VideoFrameIndex
@@ -128,6 +129,8 @@ fun VideoBubbleEditor(
     val configuration = LocalConfiguration.current
     val landscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val dao = remember(container, project.id) { container.videoResults.results() }
+    val appearance by dao.observeSettings(project.id).collectAsStateWithLifecycle(initialValue = null)
+    val maskTextColor = com.lmreader.ui.video.videoMaskTextColor(appearance?.style)
     val initialPositionMs = remember(project.id, project.sha256) {
         positionMs.coerceIn(0, (project.durationMs - 1).coerceAtLeast(0))
     }
@@ -431,13 +434,14 @@ fun VideoBubbleEditor(
                         }
                     }
                 } else {
-                    LaunchedEffect(value.regions, value.gestureBefore, frame) {
+                    LaunchedEffect(value.regions, value.gestureBefore, frame, maskTextColor) {
                         if (value.gestureBefore != null) return@LaunchedEffect
                         val pixels = frame.decoded.retain()
                         val built = try { withContext(Dispatchers.Default) {
                             runCatching {
                                 val source = BubbleMaskRenderer().prepareSource(frame.analysis, value.regions.map { it.region })
-                                source.layout(value.regions, value.saved.renderSettings, hideEmpty = true, includeEmptyForEditing = true)
+                                source.layout(value.regions, value.saved.renderSettings, hideEmpty = true, includeEmptyForEditing = true,
+                                    textColorMode = maskTextColor)
                             }.getOrNull()
                         } } finally { pixels.close() }
                         overlay = built

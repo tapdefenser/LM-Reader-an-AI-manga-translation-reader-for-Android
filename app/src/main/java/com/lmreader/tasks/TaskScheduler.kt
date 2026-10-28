@@ -11,7 +11,7 @@ import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-class TaskWaiting(val reason: String, message: String) : Exception(message)
+class TaskWaiting(val reason: String, message: String, cause: Throwable? = null) : Exception(message, cause)
 /** A completed safe unit yields the same durable intent to the dispatcher. */
 class TaskRequeue(val resultConflict: Boolean = false) : com.lmreader.core.workflow.WorkflowRestartRequested()
 fun interface TaskExecutor { suspend fun execute(execution: TaskExecution) }

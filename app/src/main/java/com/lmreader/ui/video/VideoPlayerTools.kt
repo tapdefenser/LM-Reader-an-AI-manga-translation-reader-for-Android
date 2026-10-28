@@ -40,7 +40,8 @@ object VideoPlayerTools : VideoPlayerToolHost {
 }
 
 internal data class VideoMaskKey(val pageId: String, val revision: String, val region: PageTranslatedRegion,
-    val render: BubbleRenderSettings, val width: Int, val height: Int)
+    val render: BubbleRenderSettings, val width: Int, val height: Int,
+    val textColorMode: BubbleTextColorMode = BubbleTextColorMode.AUTO)
 internal data class VideoMaskPlan(val key: VideoMaskKey, val start: Long, val end: Long)
 internal data class TimedMask(val overlay: BubbleOverlay, val width: Int, val height: Int, val start: Long, val end: Long,
     val key: VideoMaskKey)
@@ -80,7 +81,8 @@ private data class PreparedScene(val videoId: String, val atMs: Long, val masks:
         val preferred = JSONObject(settings?.json ?: "{}").optString("frameIdentity")
         val chosen = candidates.firstOrNull { it.identity == preferred } ?: candidates.firstOrNull()
         val identity = preferred.ifBlank { chosen?.identity.orEmpty() }
-        val plans = if(enabled) loadVideoMaskPlans(container, id, project.sha256, identity, now) else emptyList()
+        val plans = if(enabled) loadVideoMaskPlans(container, id, project.sha256, identity, now,
+            videoMaskTextColor(settings?.style)) else emptyList()
         val cachedMasks = scene?.takeIf { it.videoId == id }?.masks.orEmpty().associateBy { it.key }
         if(plans.all { it.key in cachedMasks } && !style.optBoolean("smartColor")) {
             scene = PreparedScene(id, now, plans.map { cachedMasks.getValue(it.key).copy(start = it.start, end = it.end) }, null)
@@ -95,7 +97,7 @@ private data class PreparedScene(val videoId: String, val atMs: Long, val masks:
                         val key = plan.key
                         val scaled = if(frame.bitmap.width == key.width && frame.bitmap.height == key.height) frame.bitmap
                             else Bitmap.createScaledBitmap(frame.bitmap, key.width, key.height, true)
-                        try { TimedMask(BubbleMaskRenderer().prepare(scaled, listOf(key.region), key.render), key.width, key.height, plan.start, plan.end, key) }
+                        try { TimedMask(BubbleMaskRenderer().prepare(scaled, listOf(key.region), key.render, key.textColorMode), key.width, key.height, plan.start, plan.end, key) }
                         finally { if(scaled !== frame.bitmap) scaled.recycle() }
                     }
                 }
@@ -119,7 +121,7 @@ private data class PreparedScene(val videoId: String, val atMs: Long, val masks:
 
 /** The player's only authority is the saved timeline; it never compares source pixels. */
 internal suspend fun loadVideoMaskPlans(container: AppContainer, id: String, sourceHash: String, identity: String,
-    atMs: Long): List<VideoMaskPlan> = withContext(Dispatchers.IO) {
+    atMs: Long, textColorMode: BubbleTextColorMode = BubbleTextColorMode.AUTO): List<VideoMaskPlan> = withContext(Dispatchers.IO) {
     val dao = container.videoResults.results()
     val intervals = dao.regionsAtIdentity(id, sourceHash, identity, atMs)
         .sortedWith(compareByDescending<com.lmreader.core.database.media.VideoRegionInterval> { it.manualTiming }.thenByDescending { it.startMs })
@@ -132,7 +134,7 @@ internal suspend fun loadVideoMaskPlans(container: AppContainer, id: String, sou
             val anchor = current?.let { dao.observationAt(id, sourceHash, identity, time.trackId,
                 time.anchorUs ?: (time.observedStartMs * 1000 + 999)) }
             val region = if(current == null) original else moveVideoRegion(original, anchor, current, saved.width, saved.height)
-            VideoMaskPlan(VideoMaskKey(pageId, saved.revision, region, saved.renderSettings, saved.width, saved.height), time.startMs, time.endMs)
+            VideoMaskPlan(VideoMaskKey(pageId, saved.revision, region, saved.renderSettings, saved.width, saved.height, textColorMode), time.startMs, time.endMs)
         }
     }
 }

@@ -2,6 +2,7 @@ package com.lmreader.core.translation.asr
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -72,5 +73,14 @@ class AsrBackendTest {
         assertEquals(AsrBackend.VULKAN, gpu.actualBackend)
         assertFalse(gpu.usedCpuFallback)
         assertNull(gpu.fallbackReason)
+    }
+
+    @Test fun vulkanRestrictionOnlyBlocksConfirmedDevice() {
+        assertNotNull(asrBackendRestriction(AsrBackend.VULKAN, "24031PN0DC"))
+        assertNotNull(asrBackendRestriction(AsrBackend.VULKAN, "24031pn0dc"))
+        assertNull(asrBackendRestriction(AsrBackend.AUTO, "24031PN0DC"))
+        assertNull(asrBackendRestriction(AsrBackend.CPU, "24031PN0DC"))
+        assertNull(asrBackendRestriction(AsrBackend.OPENCL, "24031PN0DC"))
+        assertNull(asrBackendRestriction(AsrBackend.VULKAN, "unrelated-model"))
     }
 }

@@ -234,7 +234,7 @@ private fun AsrSettingsCard(
                 Column(Modifier.weight(1f)) {
                     Text("推理后端")
                     Text(
-                        "自动优先真实 GPU，初始化失败才回退 CPU；显式选择不可用后端会报错。",
+                        "自动固定使用 CPU。GPU 为实验选项，兼容性与速度需设备实测；已知崩溃机型会限制选择。",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -244,13 +244,16 @@ private fun AsrSettingsCard(
                     }
                     DropdownMenu(expanded = backendOpen, onDismissRequest = { backendOpen = false }) {
                         AsrBackend.entries.forEach { option ->
+                            val restriction = com.lmreader.core.translation.asr.asrBackendRestriction(option, android.os.Build.MODEL)
                             DropdownMenuItem(
                                 text = {
                                     Column {
                                         Text(option.label)
                                         Text(option.description, style = MaterialTheme.typography.bodySmall)
+                                        restriction?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                                     }
                                 },
+                                enabled = restriction == null,
                                 onClick = {
                                     backendOpen = false
                                     onMessage(null)

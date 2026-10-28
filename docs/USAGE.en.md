@@ -2,9 +2,11 @@
 
 [简体中文](USAGE.zh-CN.md) · [Project home](../README.en.md)
 
-This guide covers `v0.1.6`, where screen translation ships as a released feature. Installation requires a signed APK; the unsigned candidate cannot be installed directly. Target devices are Android 8.0+ with arm64-v8a or x86_64.
+This guide covers comics, screen translation and local video in `v0.1.12`; mask text color and capability-repair improvements described below are in the current source. Installation requires a signed APK; the unsigned candidate cannot be installed directly. Target devices are Android 8.0+ with arm64-v8a or x86_64.
 
 ## Library, reading and language
+
+Choose Image or Video in the main menu, then use the floating Library/Shelf capsule at the bottom of the home page. It overlays the page, leaves scrollable space for the last item and stays above translation progress. Changing media keeps the current collection, and switching collections restores each page's state. Choosing media from Settings or another page opens Library.
 
 Select a folder on the initial path screen, choose its single/multi-chapter layout and scan it. Image folders, ZIP, CBZ and PDF share the entry point. Reselect the original folder after moving it or losing permission. Comic details offer shelf membership, categories and chapters; reader settings cover paged/strip modes, zoom, cropping and preloading.
 
@@ -13,6 +15,20 @@ Document paths identify comics; titles are display labels. Same titles at differ
 Open **⋮ → Translation Management** on the comic details page to manage that comic's glossary.
 
 **Settings → General → App language** offers Follow system, Simplified Chinese and English. Follow system uses only the primary language: Simplified Chinese selects Chinese; all others, including Traditional Chinese, select English. English primary plus Chinese secondary still selects English. A manual selection overrides the system and rebuilds the UI. Titles, paths, user input and translation targets are unchanged.
+
+## Local video, background translation and review
+
+Choose Video in the main menu, then use Library/Shelf at the bottom to switch between all accessible videos and favorites. The media choice is remembered. The video catalog lists system-indexed media that the app can access; Android 14+ partial access limits the list to selected videos. Refresh discovers media again. Relocate files after moving them or losing access.
+
+Open a video and select frames, subtitles or both in translation options, then choose languages and a workflow for each branch. Only branches using API nodes need an API profile. Local subtitle recognition uses the installed model selected in **Settings → API and translation engines → Local ASR models**. Automatic always uses CPU. GPU backends are experimental, and Vulkan is restricted on the device model with a confirmed crash.
+
+**Mask text color** offers Black, White and Automatic (based on background brightness). Automatic chooses black or white text for each frame-mask region. Saving immediately updates existing translations and the bubble-review preview, without recognition or API requests. This setting is separate from subtitle-track text color.
+
+Recognition options such as sampling interval, analysis size and region limits apply to newly created tasks; existing tasks retain their snapshots. Saving does not start translation. Start or continue from the player, then follow the translation queue; work can continue after leaving the player. The queue starts paused after each app launch and needs an explicit start/continue command. Batch start/pause acts on individual cards.
+
+When a task needs translation packs, an API profile, vision models or ASR, its capability-repair action opens the appropriate settings. Return and start the same task after repairing the requirement. If its snapshot or semantics can no longer be satisfied, update its options and requeue as prompted; published results remain. Requests with an unknown remote outcome still require review before an explicit retry.
+
+Use the player's translation display and editor to review bubbles, region timing and the current subtitle. Display toggles and mask text color do not rerun translation. Save edits and reopen to check them. Subtitle selection and appearance are under the player's top-right subtitle menu. Long ARM video runs, GPU backends and real cloud providers still require device/configuration-specific validation.
 
 ## Translation, workflows and edits
 

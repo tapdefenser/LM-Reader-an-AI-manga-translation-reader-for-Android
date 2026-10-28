@@ -69,12 +69,15 @@ Use **JDK 21**, Android SDK Platform **37.0**, Build Tools **36.0.0**, NDK **28.
 python -m pip install PyYAML
 python tools/fetch_vision_models.py
 python tools/fetch_translation_sources.py
+python tools/fetch_asr_sources.py
 # Set JAVA_HOME and sdk.dir in local.properties.
 ./gradlew :app:assembleDebug :app:assembleRelease test :app:lintDebug :app:lintRelease
 python tools/package_release.py --allow-unsigned
 ```
 
 On Windows, use `gradlew.bat`. Missing formal signing environment variables produce an unsigned Release candidate. Offline translation packs are downloaded/imported at runtime. See [release preparation](docs/RELEASING.en.md) for signing and packaging checks.
+
+The default Vulkan ASR build also needs a host C++17 compiler for shader generation. On Windows, pass an existing toolchain with `-Plmreader.asr.hostToolchain=...`. For a CPU-only runtime, set both `-Plmreader.asr.vulkan=false -Plmreader.asr.opencl=false`. See [ASR build requirements](docs/plans/2026-10-22-video-feedback.zh-CN.md#构建条件).
 
 ## Documentation and layout
 

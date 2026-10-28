@@ -11,8 +11,8 @@ import kotlinx.serialization.json.longOrNull
 import java.util.Locale
 
 /**
- * Native ASR acceleration backends. [AUTO] prefers a real GPU backend and falls back to CPU
- * only when GPU initialization fails; an explicitly selected backend never falls back.
+ * [AUTO] always uses CPU. GPU backends are experimental, explicit choices and never
+ * silently fall back after selection.
  */
 enum class AsrBackend(
     val wireId: String,
@@ -22,7 +22,7 @@ enum class AsrBackend(
     AUTO(
         wireId = "AUTO",
         label = "自动（推荐）",
-        description = "优先 Vulkan，其次 OpenCL；GPU 初始化失败时回退 CPU，并在会话中标注实际后端。",
+        description = "默认使用 CPU，并显示实际后端；GPU 加速需手动选择实验选项。",
     ),
     CPU(
         wireId = "CPU",
@@ -31,13 +31,13 @@ enum class AsrBackend(
     ),
     VULKAN(
         wireId = "VULKAN",
-        label = "Vulkan",
-        description = "使用系统 Vulkan 驱动；不可用时明确报错，不会静默改用 CPU。",
+        label = "Vulkan（实验）",
+        description = "兼容性与速度需设备实测，部分设备可能发生原生崩溃；不可用时明确报错，不会静默改用 CPU。",
     ),
     OPENCL(
         wireId = "OPENCL",
-        label = "OpenCL",
-        description = "可选后端；仅当构建包含 OpenCL 且设备提供 libOpenCL.so 时可用。",
+        label = "OpenCL（实验）",
+        description = "仅当构建包含 OpenCL 且设备提供 libOpenCL.so 时可用；兼容性与速度需设备实测。",
     ),
     ;
 
@@ -46,6 +46,12 @@ enum class AsrBackend(
             entries.firstOrNull { it.wireId == value?.trim()?.uppercase(Locale.ROOT) } ?: AUTO
     }
 }
+
+/** Confirmed failing phone only; do not infer that every Adreno driver is affected. */
+fun asrBackendRestriction(backend: AsrBackend, deviceModel: String): String? =
+    if (backend == AsrBackend.VULKAN && deviceModel.equals("24031PN0DC", ignoreCase = true))
+        "此机型已确认 Vulkan ASR 会导致应用崩溃，暂不可用。请选择自动或 CPU；修复并验证后再开放。"
+    else null
 
 data class AsrDeviceCapability(
     val name: String,

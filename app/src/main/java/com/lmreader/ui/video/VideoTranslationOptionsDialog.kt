@@ -39,6 +39,7 @@ import com.lmreader.core.model.ApiProfile
 import com.lmreader.core.model.ApiProfileKind
 import com.lmreader.core.model.BubbleFillMode
 import com.lmreader.core.model.BubbleFont
+import com.lmreader.core.model.BubbleTextColorMode
 import com.lmreader.core.model.LocalTranslationLanguage
 import com.lmreader.core.model.SegTextScope
 import com.lmreader.core.model.TranslationWorkflow
@@ -92,6 +93,8 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     var maxDimensionText by rememberSaveable(videoId) { mutableStateOf("1280") }
     var audioTrack by rememberSaveable(videoId) { mutableStateOf(-1) }
     var segTextScopeKey by rememberSaveable(videoId) { mutableStateOf(SegTextScope.ALL.name) }
+    var maskTextColorKey by rememberSaveable(videoId) { mutableStateOf(BubbleTextColorMode.AUTO.name) }
+    var savedMaskTextColorKey by rememberSaveable(videoId) { mutableStateOf(BubbleTextColorMode.AUTO.name) }
     var frameApiProfileId by rememberSaveable(videoId) { mutableStateOf("") }
     var subtitleApiProfileId by rememberSaveable(videoId) { mutableStateOf("") }
     var frameSettingsJson by rememberSaveable(videoId) {
@@ -143,6 +146,8 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                 maxDimensionText = loaded.maxDimension.coerceAtLeast(1).toString()
                 audioTrack = loaded.audioTrack
                 segTextScopeKey = loaded.segTextScope.name
+                maskTextColorKey = videoMaskTextColor(container.videoResults.results().settings(videoId)?.style).name
+                savedMaskTextColorKey = maskTextColorKey
                 frameSettingsJson = (loaded.frameSettings ?: VideoFrameSettings()).json().toString()
                 frameApiProfileId = loaded.frameApiProfileId.orEmpty()
                 subtitleApiProfileId = loaded.subtitleApiProfileId.orEmpty()
@@ -238,7 +243,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
     )
     val draftCanonical = canonicalOptions(draftOptions, durationMs)
     val savedCanonical = savedOptions?.let { canonicalOptions(it, durationMs) }
-    val changed = savedCanonical != null && savedCanonical != draftCanonical
+    val changed = savedCanonical != null && (savedCanonical != draftCanonical || maskTextColorKey != savedMaskTextColorKey)
 
     fun requestSave() {
         if (saving) return
@@ -257,7 +262,8 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
         scope.launch {
             try {
                 val saved = canonicalOptions(draftOptions, durationMs)
-                container.videoTasks.saveOptions(videoId, saved)
+                container.videoTasks.saveOptions(videoId, saved,
+                    BubbleTextColorMode.entries.firstOrNull { it.name == maskTextColorKey } ?: BubbleTextColorMode.AUTO)
                 savedOptions = saved
                 onDismiss()
             } catch (e: CancellationException) {
@@ -362,6 +368,21 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                             frameWorkflowError?.let {
                                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                             }
+                            Text("遮罩文字颜色", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                BubbleTextColorMode.entries.forEach { color ->
+                                    FilterChip(maskTextColorKey == color.name, { maskTextColorKey = color.name },
+                                        modifier = Modifier.testTag("video-mask-text:${color.name}"),
+                                        label = { Text(when (color) {
+                                            BubbleTextColorMode.BLACK -> "黑色"
+                                            BubbleTextColorMode.WHITE -> "白色"
+                                            BubbleTextColorMode.AUTO -> "自动（随背景亮度）"
+                                        }) })
+                                }
+                            }
+                            Text("自动模式按每个遮罩区域的底色选择黑字或白字。保存后立即应用于已有译文，无需重新翻译。",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
 
                         if (subtitleNeeded) {
@@ -470,7 +491,7 @@ fun VideoTranslationOptionsDialog(container: AppContainer, videoId: String, onDi
                             Text(footerMessage, color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodySmall)
                         } else {
-                            Text(if (changed) "保存只更新本视频选项；已排队或进行中的任务保持原配置，之后新建的任务使用新配置。"
+                            Text(if (changed) "识别选项用于之后新建的任务，已有任务保持原配置；遮罩文字颜色保存后立即生效。"
                                 else "当前与已保存配置相同。保存不会创建、替换或重新排队任务。",
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

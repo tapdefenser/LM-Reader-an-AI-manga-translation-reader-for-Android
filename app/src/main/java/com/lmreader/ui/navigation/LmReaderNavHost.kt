@@ -46,9 +46,9 @@ import kotlinx.coroutines.launch
 private fun resolveTaskOptions(row: com.lmreader.core.database.tasks.TaskRecord, context: android.content.Context,
     nav: NavHostController) {
     val payload = runCatching { org.json.JSONObject(row.payload) }.getOrElse { org.json.JSONObject() }
-    if(row.waitingReason in setOf("CAPABILITY", "API_ACCESS")) {
-        val localAsr = payload.optJSONObject("options")?.optString("subtitleSource") == "ASR_LOCAL"
-        nav.navigate(if(localAsr) Routes.SETTINGS_API_ASR else Routes.SETTINGS_API)
+    val capabilityRoute = com.lmreader.tasks.capabilitySettingsRoute(row.waitingReason)
+    if(capabilityRoute != null) {
+        nav.navigate(capabilityRoute)
     } else if(row.type.startsWith("VIDEO") && payload.optString("videoId").isNotBlank()) {
         val id = payload.getString("videoId")
         com.lmreader.ui.video.openVideoPlayer(context, id, listOf(id), if(row.waitingReason == "CONFIG_CHANGED") "OPTIONS" else "INFO")
@@ -208,9 +208,18 @@ fun LmReaderNavHost(
                     queueRows.count { it.type == "VIDEO_EXPORT" && it.state !in setOf("SUCCEEDED", "CANCELLED", "FAILED") },
                 onNavigate = { target ->
                     when (target) {
-                        MainDestination.LIBRARY -> navController.navigateMainDestination(Routes.LIBRARY)
-                        MainDestination.BOOKSHELF -> navController.navigateMainDestination(Routes.BOOKSHELF)
-                        MainDestination.VIDEOS -> navController.navigateMainDestination(Routes.VIDEOS)
+                        MainDestination.IMAGES -> {
+                            scope.launch { container.preferences.setHomeMediaMode("IMAGE") }
+                            if(entry?.destination?.route !in setOf(Routes.LIBRARY, Routes.BOOKSHELF))
+                                navController.navigateHomeCollection(Routes.LIBRARY)
+                        }
+                        MainDestination.LIBRARY -> navController.navigateHomeCollection(Routes.LIBRARY)
+                        MainDestination.BOOKSHELF -> navController.navigateHomeCollection(Routes.BOOKSHELF)
+                        MainDestination.VIDEOS -> {
+                            scope.launch { container.preferences.setHomeMediaMode("VIDEO") }
+                            if(entry?.destination?.route !in setOf(Routes.LIBRARY, Routes.BOOKSHELF))
+                                navController.navigateHomeCollection(Routes.LIBRARY)
+                        }
                         MainDestination.TRANSLATION_QUEUE ->
                             navController.navigateMainDestination(Routes.TRANSLATION_QUEUE)
                         MainDestination.TRANSLATION_WORKFLOWS ->
@@ -229,7 +238,8 @@ fun LmReaderNavHost(
         },
     ) {
         Surface(modifier = Modifier.fillMaxSize()) {
-            HomeTaskChrome(container, entry?.destination?.route in setOf(Routes.LIBRARY, Routes.BOOKSHELF),
+            HomeTaskChrome(container, entry?.destination?.route,
+                onOpenCollection = { destination -> navController.navigateHomeCollection(destination) },
                 onOpenQueue = { navController.navigateSingleTop(Routes.TRANSLATION_QUEUE) }) { modifier ->
             NavHost(
                 navController = navController,
@@ -311,7 +321,7 @@ fun LmReaderNavHost(
                         container = container,
                         onOpenMenu = openMenu,
                         onOpenManga = { mangaId -> navController.navigate(Routes.mangaDetail(mangaId)) },
-                        onOpenLibrary = { navController.navigateMainDestination(Routes.LIBRARY) },
+                        onOpenLibrary = { navController.navigateHomeCollection(Routes.LIBRARY) },
                     )
                     }
                 }
@@ -483,4 +493,14 @@ private fun NavHostController.navigateMainDestination(route: String) {
 /** Child pages retain their caller so both toolbar and system Back return there. */
 private fun NavHostController.navigateSingleTop(route: String) {
     navigate(route) { launchSingleTop = true }
+}
+
+/** Keep each collection's list state when switching the home segments. */
+private fun NavHostController.navigateHomeCollection(route: String) {
+    if (currentDestination?.route == route) return
+    navigate(route) {
+        launchSingleTop = true
+        restoreState = true
+        popUpTo(graph.startDestinationId) { saveState = true }
+    }
 }
